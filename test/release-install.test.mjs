@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createApp } from '../server.mjs';
+import { Repository } from '../repository.mjs';
 import { authenticateTestOwner, ownerFetch } from '../test-support/editor-session.mjs';
 
 test('fresh installation has no business records in either workspace and setup is one-time', async t => {
@@ -42,6 +43,13 @@ test('synthetic seed creates distinct directories and never initializes normal d
     const output = JSON.parse(result.stdout.trim());
     assert.ok(output.directory.startsWith(parent));
     assert.ok(output.password.length >= 24);
+    const repository = new Repository(join(output.directory, 'demo.sqlite'), 'demo');
+    try {
+      const state = repository.state();
+      assert.ok(state.accounts.some(a => a.partyType === 'customer'));
+      for (const type of ['sale','purchase','customerOrder','orderAdvance','supplierOffset'])
+        assert.ok(repository.events().some(event => event.command.type === type), type);
+    } finally { repository.close(); }
     results.push(output);
   }
   assert.notEqual(results[0].directory, results[1].directory);
