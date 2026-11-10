@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Dijital Defter stok, cari ve günlük raporlarını salt okunur inceleyin.">
+  <title>ER ŞAT · Yönetici Raporları</title>
+  <link rel="stylesheet" href="/reports.css">
+  <script type="module" src="/reports.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#report-main">Raporlara geç</a>
+  <header class="report-header">
+    <div class="report-brand"><span aria-hidden="true">D</span><div>Defter Raporları<small>İŞLETMENİN GÖRÜNÜMÜ</small></div></div>
+    <div class="report-controls"><label for="report-workspace">Defter<select id="report-workspace"><option value="demo">Örnek defter</option><option value="dukkan">Dükkân defteri</option></select></label><button id="report-refresh" class="button secondary" type="button">Yenile</button></div>
+  </header>
+  <div class="report-shell">
+    <div class="report-context"><span class="readonly-badge">Salt okunur</span><p id="report-meta">Rapor hazırlanıyor…</p></div>
+    <nav class="report-nav" aria-label="Rapor bölümleri">
+      <button type="button" data-report-view="overview" aria-current="page"><span aria-hidden="true">01</span> Genel bakış</button>
+      <button type="button" data-report-view="stock"><span aria-hidden="true">02</span> Stok</button>
+      <button type="button" data-report-view="cari"><span aria-hidden="true">03</span> Cariler</button>
+      <button type="button" data-report-view="journal"><span aria-hidden="true">04</span> Hareketler</button>
+    </nav>
+    <p id="report-status" class="report-status" role="status" aria-live="polite" aria-atomic="true"></p>
+    <main id="report-main" tabindex="-1"><section class="empty-state"><h1>Rapor hazırlanıyor</h1><p>Defterin son kayıtları okunuyor.</p></section></main>
+    <footer>Bu portal kayıtları değiştirmez. Giriş ve düzeltmeler ana bilgisayardaki defterden yapılır.</footer>
+  </div>
+</body>
+</html>

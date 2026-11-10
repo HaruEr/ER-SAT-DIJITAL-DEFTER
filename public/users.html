@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Çalışan hesapları · ER ŞAT</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/access.css">
+<script defer src="/access-client.js"></script><script defer src="/users.js"></script></head><body class="access-page">
+<main class="access-card"><a href="/owner">Deftere dön</a><h1>Çalışan hesapları</h1><p id="session-name"></p>
+<form id="employee"><h2>Çalışan ekle</h2><label>Adı<input name="name" required maxlength="100" autocomplete="off"></label>
+<label>Parola<input name="password" type="password" required minlength="15" autocomplete="new-password"></label><small>En az 15 karakter girin.</small>
+<button class="button">Hesap oluştur</button></form>
+<form id="disable"><h2>Erişimi kapat</h2><label>Çalışan<select name="id" required></select></label>
+<button class="button secondary">Seçili hesabı devre dışı bırak</button></form>
+<p id="status" role="status"></p><button class="button secondary" id="logout">Oturumu kapat</button></main></body></html>

@@ -1,0 +1,70 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {randomUUID} from 'node:crypto';
+import {loadJSDOM} from '../test-support/jsdom.mjs';
+import {Repository} from '../repository.mjs';
+import {INITIAL_ACCOUNTS} from '../domain.mjs';
+import * as supplierModule from '../public/suppliers.js';
+const JSDOM=await loadJSDOM(),tick=()=>new Promise(r=>setTimeout(r,0));
+test('supplier interaction clears stale success but preserves error and uncertain outcomes',async t=>{
+  const repo=new Repository(':memory:','demo');t.after(()=>repo.close());
+  repo.execute({id:randomUUID(),revision:0,command:{type:'opening',date:'2026-11-10',balances:Object.fromEntries(INITIAL_ACCOUNTS.filter(a=>!a.retired).map(a=>[a.id,'0']))}});
+  const dom=new JSDOM(readFileSync(new URL('../public/index.html',import.meta.url),'utf8'),{url:'http://127.0.0.1/',runScripts:'outside-only'}),w=dom.window,d=w.document;t.after(()=>w.close());
+  let supplierContext;
+  w.__supplierModule={renderSupplierWorkspace:(container,context)=>{supplierContext=context;return{update(){},destroy(){}};}};
+  w.fetch=async()=>({ok:true,json:async()=>repo.state()});
+  w.eval(readFileSync(new URL('../public/app.js',import.meta.url),'utf8').replace("import('./suppliers.js')","Promise.resolve(window.__supplierModule)")+'\nwindow.__noticeTest={setView,inform,setPending:value=>{pending=value;}};');await tick();
+  w.__noticeTest.setView('suppliers');await tick();
+  w.__noticeTest.inform('Önceki işlem kaydedildi.');supplierContext.onInteraction();
+  assert.equal(d.querySelector('#notice').hidden,true,'new task must not retain old success');
+  w.__noticeTest.inform('Kaynak yetersiz.',true);supplierContext.onInteraction();
+  assert.equal(d.querySelector('#notice').hidden,false,'error is not silently discarded');
+  w.__noticeTest.inform('Sonuç belirsiz.');w.__noticeTest.setPending({id:'pending-test'});supplierContext.onInteraction();
+  assert.equal(d.querySelector('#notice').hidden,false,'pending outcome must stay visible');
+});
+test('application supplier route preserves drafts, clears committed requests and cancels stale module renders',async t=>{
+  const repo=new Repository(':memory:','demo');t.after(()=>repo.close());
+  repo.execute({id:randomUUID(),revision:0,command:{type:'opening',date:'2026-11-10',balances:Object.fromEntries(INITIAL_ACCOUNTS.filter(a=>!a.retired).map(a=>[a.id,'0']))}});
+  const dom=new JSDOM(readFileSync(new URL('../public/index.html',import.meta.url),'utf8'),{url:'http://127.0.0.1/',runScripts:'outside-only'}),w=dom.window,d=w.document;
+  t.after(()=>w.close());Object.defineProperty(w.crypto,'randomUUID',{value:randomUUID});
+  w.__supplierModule=supplierModule;
+  let uncertain=false;const calls=[];
+  w.fetch=async(url,options)=>{
+    const parsed=new URL(url,w.location.href),path=parsed.pathname;calls.push(path);
+    if(path==='/api/state')return{ok:true,json:async()=>repo.state()};
+    if(path==='/api/journal')return{ok:true,json:async()=>repo.journalPage({...Object.fromEntries(parsed.searchParams),limit:Number(parsed.searchParams.get('limit'))})};
+    if(path==='/api/command'){
+      const result=repo.execute(JSON.parse(options.body));
+      if(uncertain){uncertain=false;throw new Error('Sentetik yanıt kaybı');}
+      return{ok:true,json:async()=>result};
+    }
+    throw new Error('Unexpected '+path);
+  };
+  const source=readFileSync(new URL('../public/app.js',import.meta.url),'utf8');
+  assert.ok(source.includes("import('./suppliers.js')"));
+  w.eval(source.replace("import('./suppliers.js')","Promise.resolve(window.__supplierModule)")+'\nwindow.__supplierTest={setView,refresh,getMemory:()=>supplierMemory,journalItemMarkup};');await tick();
+  const nav=w.__supplierTest.setView;
+  nav('suppliers');nav('overview');await tick();assert.equal(d.querySelector('[data-create-firm]'),null);
+  nav('suppliers');await tick();d.querySelector('[data-create-firm]').click();
+  const name=d.querySelector('form').elements.name;name.value='Taslak firma';name.dispatchEvent(new w.Event('input',{bubbles:true}));
+  nav('overview');nav('suppliers');await tick();assert.equal(d.querySelector('form').elements.name.value,'Taslak firma');
+  uncertain=true;d.querySelector('form').requestSubmit();await tick();
+  assert.equal(repo.state().supplierParties.length,1);assert.equal(d.querySelector('#retry-bar').hidden,false);
+  d.querySelector('#retry-bar button').click();await tick();await tick();
+  assert.equal(repo.state().supplierParties.length,1,'retry cannot duplicate firm');
+  assert.equal(calls.filter(path=>path==='/api/command').length,1,'committed firm is reconciled without a second POST');
+  assert.ok(calls.indexOf('/api/journal')>calls.indexOf('/api/command'),'retry first looks up the committed identity');
+  assert.equal([...w.__supplierTest.getMemory().keys()].filter(k=>k.startsWith('supplier:draft:')).length,0);
+  assert.equal(d.querySelector('#retry-bar').hidden,true);
+  assert.equal(d.querySelector('[data-create-firm]').disabled,false,'new controls unlock after successful retry');
+  const supplierId=repo.state().supplierParties[0].id;
+  const post=(id,command)=>repo.execute({id,revision:repo.state().revision,command:{date:'2026-11-10',...command}});
+  post('unit',{type:'supplierUnit',supplierId,unit:'HAS'});
+  post('purchase',{type:'supplierPurchase',supplierId,items:[{accountId:'ceyrek',quantity:'1'}],charges:[{accountId:'supplier-unit-unit',quantity:'3'}]});
+  await w.__supplierTest.refresh(false);const event=repo.state().journal.at(-1),receipt=d.createElement('div');
+  receipt.innerHTML=w.__supplierTest.journalItemMarkup(event,new Set(),[]);
+  assert.equal(receipt.querySelector('[data-edit-transaction]'),null,'native edits belong to the supplier workflow');
+  assert.match(receipt.querySelector('.receipt-cari').textContent,/3,000 has gr/);
+  assert.doesNotMatch(receipt.textContent,/NaN|0,00 TL/,'missing TL reference is never a zero price');
+});

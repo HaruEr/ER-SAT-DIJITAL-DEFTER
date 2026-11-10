@@ -1,0 +1,3 @@
+# Preserve upstream artifact bytes and documented SHA256 across Windows checkouts.
+*.js -text
+*.js -whitespace

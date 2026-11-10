@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-tests:
+    name: windows-tests
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      NODE_OPTIONS: ''
+      NODE_PATH: ''
+      JSDOM_MODULE_PATH: ''
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout reviewed history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+      - name: Isolate temporary files and cache
+        run: |
+          $testTemp = Join-Path $env:RUNNER_TEMP 'er-sat-synthetic'
+          New-Item -ItemType Directory -Force -Path $testTemp | Out-Null
+          "TEMP=$testTemp" >> $env:GITHUB_ENV
+          "TMP=$testTemp" >> $env:GITHUB_ENV
+          "npm_config_cache=$(Join-Path $testTemp 'npm-cache')" >> $env:GITHUB_ENV
+      - name: Release safety
+        run: node scripts/release-check.mjs
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+      - name: JavaScript syntax
+        run: node scripts/check-syntax.mjs
+      - name: Backend
+        run: npm test
+      - name: UI
+        run: npm run test:ui
+      - name: Independent financial regression
+        run: npm run test:supplier-oracle
+      - name: Dependency advisories
+        run: npm audit --audit-level=high
+      - name: Whitespace
+        run: git diff --check

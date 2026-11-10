@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Oturum aç · ER ŞAT Dijital Defter</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/access.css">
+<script defer src="/access-client.js"></script><script defer src="/login.js"></script></head>
+<body class="access-page"><main class="access-card"><p class="eyebrow">ER ŞAT DİJİTAL DEFTER</p><h1 id="heading">Oturum aç</h1>
+<form id="login" hidden><label id="select-label">Kullanıcı<select id="user" autocomplete="username"></select></label>
+<label id="name-label" hidden>İşletme sahibinin adı<input id="name" maxlength="100" autocomplete="name"></label>
+<label>Parola<input id="password" type="password" required autocomplete="current-password"></label>
+<p id="help" hidden>İlk kurulumu işletme sahibi yapar. En az 15 karakterlik bir parola kullanın.</p>
+<button class="button" id="submit">Oturum aç</button></form><p role="alert" id="feedback"></p>
+<noscript>Oturum açmak için JavaScript'i etkinleştirin.</noscript></main></body></html>

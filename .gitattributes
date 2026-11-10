@@ -1,0 +1,2 @@
+# Preserve reviewed source and vendored bytes exactly across clones.
+* -text

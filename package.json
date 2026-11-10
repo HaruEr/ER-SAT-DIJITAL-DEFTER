@@ -1,0 +1,29 @@
+{
+  "name": "kuyumcu-yerel-defter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "start:reports": "node report-server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:ui": "node qa-temp/ui-purchase-smoke.mjs && node qa-temp/ui-advanced-smoke.mjs && node qa-temp/ui-busy-smoke.mjs && node qa-temp/ui-backup-smoke.mjs && node qa-temp/ui-ux-smoke.mjs && node qa-temp/ui-recovery-smoke.mjs && node qa-temp/ui-archive-smoke.mjs && node qa-temp/ui-reports-smoke.mjs && node qa-temp/ui-compact-smoke.mjs && node qa-temp/ui-drafts-smoke.mjs && node qa-temp/ui-workbench-smoke.mjs && node qa-temp/ui-returns-smoke.mjs && node qa-temp/ui-simplification-smoke.mjs && node qa-temp/ui-simplified-transactions-smoke.mjs && node qa-temp/ui-review-regressions-smoke.mjs && node qa-temp/ui-page-ownership-smoke.mjs && node qa-temp/ui-page-boundary-review-smoke.mjs && node qa-temp/ui-d04-smoke.mjs && node qa-temp/ui-d06-smoke.mjs && node qa-temp/ui-d07-smoke.mjs && node qa-temp/ui-d08o-smoke.mjs && node qa-temp/master-ux-count-smoke.mjs && node qa-temp/master-ux-report-filters-smoke.mjs && node qa-temp/manual-has-ui-smoke.mjs && node qa-temp/manual-mixed-ui-smoke.mjs && node qa-temp/receipt-statement-smoke.mjs && node qa-temp/ui-sale-search-smoke.mjs && node qa-temp/inventory-item-smoke.mjs && node qa-temp/ui-sale-pricing-smoke.mjs && node qa-temp/ui-prior-scrap-smoke.mjs && node qa-temp/ui-scrap-advance-smoke.mjs && node qa-temp/ui-checkout-trade-smoke.mjs && node --test qa-temp/ui-uncertain-query-smoke.mjs qa-temp/supplier-workspace-smoke.mjs qa-temp/supplier-workspace-core-smoke.mjs qa-temp/supplier-workspace-read-smoke.mjs qa-temp/supplier-app-integration-smoke.mjs qa-temp/supplier-workspace-documents-smoke.mjs",
+    "test:recovery": "node --test test/recovery-api.test.mjs test/recovery-drill.test.mjs",
+    "benchmark": "node scripts/benchmark.mjs",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-include=domain.mjs --test-coverage-include=repository.mjs --test-coverage-include=server.mjs --test-coverage-include=archive.mjs --test-coverage-include=ledger-view.mjs --test-coverage-include=report-server.mjs --test-coverage-include=report-repository.mjs --test-coverage-include=report-launcher.mjs test/*.test.mjs",
+    "test:quality": "npm run test:coverage && npm run test:ui",
+    "test:backup-pilot": "node --test qa-temp/synthetic-encrypted-backup-pilot.test.mjs",
+    "pilot:backup": "node scripts/synthetic-encrypted-backup-pilot.mjs",
+    "test:supplier-oracle": "node --test test/supplier-multiday-independent.test.mjs test/supplier-edit-preview-independent.test.mjs test/supplier-rebuild-integration.test.mjs test/supplier-write-gate.test.mjs",
+    "sandbox": "node scripts/sandbox.mjs",
+    "seed:synthetic": "node qa-temp/supplier-uat-seed.mjs",
+    "check:release": "node scripts/release-check.mjs",
+    "check:syntax": "node scripts/check-syntax.mjs"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  }
+}
