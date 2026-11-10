@@ -4,13 +4,13 @@
 
 Kuyumcu işletmeleri için yerel satış, alış, stok, kasa/banka ve çok birimli cari defter uygulaması. Node.js, yerleşik SQLite ve vanilla JavaScript kullanır. Veriler kurulumun kendi bilgisayarında tutulur. Resmî muhasebe veya e-belge entegrasyonu içermez.
 
-**Yayın adayı:** Kullanıcı kod için **MIT lisansını seçti**. Telif sahibi/yılı ve GitHub depo sahibi henüz doğrulanmadı. `LICENSE.template` yalnız taslaktır; doğrulanmış bilgilerle nihai `LICENSE` etkinleştirilmeden tamamlanmış lisans bildirimi sayılmaz. Ürün adı korunur; marka/logo hakları ayrıca değerlendirilir. GitHub korumaları etkinleştirilmedi ve genel yayın/push izni verilmedi. [Lisans kararı](docs/license-options.md) ve [yayın kapıları](docs/github-protection.md) tamamlanmadan genel yayın yapılmamalı.
+**Yayın adayı:** Kod [MIT lisansı](LICENSE) altındadır. Copyright (c) 2026 Harun Eren Şat. Bütün dosyaların kod sahibi `@HaruEr` olarak tanımlıdır. ER ŞAT DİJİTAL DEFTER adı korunur; marka/logo hakları kod lisansından ayrı değerlendirilir. GitHub korumaları etkinleştirilmedi; push veya yayın izni verilmedi. [Lisans kararı](docs/license-options.md) ve [yayın kapıları](docs/github-protection.md).
 
 ## Windows'ta kurulum
 
 Git ve Node.js **24.x** gerekir. Node 24 yerleşik `node:sqlite` sağlar; ayrı SQLite sunucusu kurulmaz. Windows dışı platformlar için bu adayda doğrulanmış destek iddiası yoktur.
 
-Depo yayımlandıktan ve lisans kesinleştikten sonra kendi fork adresinizi kullanın:
+Depo yayımlandıktan sonra kendi fork adresinizi kullanın:
 
 ```powershell
 git clone <forkunuzun-HTTPS-adresi> er-sat-defter

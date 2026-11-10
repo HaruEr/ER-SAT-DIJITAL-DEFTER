@@ -25,4 +25,4 @@ PDF/font kodu byte düzeyinde korunur. Fontkit, dfa ve brotli paketlerinin eksik
 
 ## Açık yayın kapıları
 
-MIT kullanıcı tarafından seçildi. Telif sahibi/yıl doğrulanıp LICENSE.template nihai LICENSE haline getirilmeli; gerçek GitHub sahibi CODEOWNERS'a yazılmalı. Marka/logo hakları kod lisansından ayrıdır. Uzak depo korumaları ve ilk Actions koşusu henüz uygulanmadı. Açık kaynak/Public yayın için ayrıca kullanıcı izni gerekir.
+MIT tam metni LICENSE dosyasında, Copyright (c) 2026 Harun Eren Şat bildirimiyle tamamlandı. CODEOWNERS tek kuralı `* @HaruEr` olarak tamamlandı. Marka/logo hakları kod lisansından ayrıdır. Uzak depo korumaları ve ilk Actions koşusu henüz uygulanmadı. Açık kaynak/Public yayın için ayrıca kullanıcı izni gerekir.

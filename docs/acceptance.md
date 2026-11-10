@@ -2,7 +2,7 @@
 
 ## Karar
 
-Tam uygulama kaynakları ve bağımsız sıfır kurulum teknik olarak doğrulandı. **Public yayına hazır onayı verilmedi:** MIT seçilmiş olsa da telif sahibi ve gerçek GitHub onay hesabı bekleniyor; son LICENSE/CODEOWNERS ve uzak koruma etkinleştirmesi tamamlanmadı. Push, gerçek PR, uzak depo değişikliği veya Public yayın yapılmadı.
+Tam uygulama kaynakları ve bağımsız sıfır kurulum teknik olarak doğrulandı. **Yerel son hazırlık tamamlandı:** standart MIT LICENSE, Copyright (c) 2026 Harun Eren Şat ve bütün dosyalar için `* @HaruEr` CODEOWNERS kararı uygulanmıştır. Public yayın onayı verilmedi; uzak korumaların etkinleştirilmesi ve gerçek GitHub kabulü beklenmektedir. Push, gerçek PR, uzak depo değişikliği veya Public yayın yapılmadı.
 
 ## Kaynak ve davranış
 
@@ -59,3 +59,11 @@ Bu sonuç mevcut bütün iş kurallarının her kombinasyonunun yeniden manuel s
 GitHub fork/push/PR ve server-side owner onayı ancak yayın izni, depo ve hesap bilgileri tamamlanınca dış ortamda doğrulanabilir. [Koruma kontrol listesi](github-protection.md) hazırlanmıştır; dosya halinde öneri ile etkin GitHub ayarı ayrıdır.
 
 Yerel katkı provası temiz klonda ayrı codex/contribution-workflow-check dalında tamamlandı: sözdizimi denetleyicisine davranış değiştirmeyen açıklama eklendi, node --check ve git diff --check exit 0, yerel commit 398ba2f ve incelenebilir format-patch üretildi; ardından main dalına dönüldü. Bu prova gerçek fork/push/PR açıldığı anlamına gelmez; katkı commit'i resmî yayın adayına alınmadı.
+
+## Son lisans ve sahiplik hazırlığı
+
+11 Kasım 2026: LICENSE standart MIT metniyle ve birebir Copyright (c) 2026 Harun Eren Şat satırıyla tamamlandı. CODEOWNERS tek etkin satırı `* @HaruEr`; .github konumu, tüm dosyaları kapsaması ve çakışan CODEOWNERS olmaması yerelde doğrulandı. README, CONTRIBUTING, SECURITY, lisans kararı, koruma politikası ve güvenlik raporu uyumlu hale getirildi.
+
+Bu kesitte yalnız lisans, sahiplik ve belgeler değişti. 92 kaynak/test hash'i tekrar eşleşti; runtime, finansal algoritmalar, CI, package/lockfile ve üçüncü taraf bildirimleri değişmedi. 53 açık script dosya referansı ile CI dosyasının varlığı kontrol edildi. Ağır backend/UI/oracle testleri yeniden çalıştırılmadı; yukarıdaki sonuçlar belirtilen önceki commit kesitlerine aittir. Yeni bağımlılık eklenmedi.
+
+Son çalışma ağacı/index/erişilebilir geçmiş taraması ve Git paket kontrollerinin ham kanıtları dağıtım dışındaki evidence alanındadır. Tarama desen tabanlıdır; her tür kişisel verinin yokluğunun mutlak garantisi değildir. Uzak CODEOWNERS parser/erişim denetimi, plan uygunluğu, korumalar ve gerçek Actions koşusu yayın aşamasında bekler. HaruEr kendi PR'ını onaylayamayacağından bu durumda ayrı süreç kararı olmadan merge engeli korunur.

@@ -1,6 +1,6 @@
 # Katkı rehberi
 
-Lisans ve depo koruma ayarları kesinleştikten sonra katkı akışı: **Fork → Clone → Branch → Develop → Test → Commit → kendi forkuna Push → Pull Request → depo sahibinin incelemesi → Kabul/Ret**. Kendi forkundaki değişiklikler resmî ana dala veya işletmenin defterine doğrudan uygulanmaz.
+Kod MIT lisansı altındadır. Depo yayımlanıp korumalar etkinleştirildikten sonra katkı akışı: **Fork → Clone → Branch → Develop → Test → Commit → kendi forkuna Push → Pull Request → HaruEr incelemesi ve onayı → Kabul/Ret**. Kendi forkundaki değişiklikler resmî ana dala veya işletmenin defterine doğrudan uygulanmaz.
 
 ## Çalışma düzeni
 
@@ -21,4 +21,4 @@ Yeni HTTP yolunda kimlik, rol ve origin sınırlarını koruyun. Mobil API/DB sa
 
 Amaç, etkilenen modüller, önceki/yeni davranış, varsa Issue, çalıştırılan tam komutlar ve exit/sonuçları, finansal etki, geriye dönük uyum, UI görüntüleri, atlanan kontroller ve açık riskler. PR şablonunu doldurun. Özelliği kaldırma önerileri kullanım ve veri geçişi etkisini ayrıca açıklamalıdır.
 
-Kod için MIT seçilmiştir; telif sahibi/yılı doğrulanıp nihai `LICENSE` etkinleştirilmesi beklenmektedir. Katkı telifi katkıcıda kalabilir; katkının MIT altında sunulabildiği kabul öncesinde doğrulanmalıdır. DCO veya CLA şu an etkin değildir; [katkı politikası seçenekleri](docs/license-options.md) depo sahibi kararını bekler. Gerçek kişisel e-posta adreslerini kanıt dosyalarına eklemeyin; Git kimliğiniz için uygun gizlilik ayarını seçin.
+Tam [MIT lisansı](LICENSE) ve telif bildirimi: Copyright (c) 2026 Harun Eren Şat. Katkı telifi katkıcıda kalabilir; katkının MIT altında sunulabildiği kabul öncesinde doğrulanmalıdır. DCO veya CLA şu an etkin değildir; [katkı politikası seçenekleri](docs/license-options.md) depo sahibi kararını bekler. Gerçek kişisel e-posta adreslerini kanıt dosyalarına eklemeyin; Git kimliğiniz için uygun gizlilik ayarını seçin.

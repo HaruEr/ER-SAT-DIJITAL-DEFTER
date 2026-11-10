@@ -1,5 +1,7 @@
 # Güvenlik
 
+Kod sahibi ve zorunlu inceleme hesabı `HaruEr` olarak belirlenmiştir; bu yerel kayıt GitHub korumalarının veya özel bildirim kanalının etkin olduğu anlamına gelmez.
+
 Bu yerel yayın adayında resmî destek süresi veya güvenlik yanıt SLA'sı ilan edilmemiştir. Son kabul raporu dışındaki sürümler için test sonucu varsaymayın.
 
 ## Açık bildirme
