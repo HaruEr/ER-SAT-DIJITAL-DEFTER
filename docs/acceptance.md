@@ -27,6 +27,7 @@ Windows, Node v24.15.0. Kaynak/test kesiti b62eb4e; sonraki 8ebed9d yalnız sent
 | Staged sahte sır negatif deneyi | Beklenen exit 1; index farkı yakalandı |
 | Boş kurulum + taşınabilir seed testleri | Önce sabit yol RED; düzeltme sonrası 2/2 PASS |
 | Genişletilmiş seed testi | Önce eksik müşteri RED; son seed 2/2 PASS |
+| `node scripts/sandbox.mjs` | Yeni sentetik dizin ve loopback sunucu; 2 deneme hesabı, normal data/ oluşmadı |
 | Şifreli pilot yol sınırı | RED sonrası 4/4 PASS |
 | `npm.cmd run test:backup-pilot` | Resmî ve hash doğrulanmış Restic ile 37/37 PASS, exit 0 |
 | PDF vendor lock ayrı npm audit | 74 bağımlılık; 0 bulgu, exit 0 |
@@ -56,3 +57,5 @@ Son sentetik DB ayrıca salt okunur kontrol edildi: 16 olay, kasa 700 TL, çeyre
 Bu sonuç mevcut bütün iş kurallarının her kombinasyonunun yeniden manuel sınandığı iddiası değildir. Sipariş/avans, çalışan rolleri, eski olay uyumu, mobil salt okunur API ve diğer kombinasyonlar mevcut otomatik regresyonlarla kapsanır. Gerçek telefon/ağ, fiziksel yazıcı, mağaza kabulü, bulut/elektrik kesintisi, RPO/RTO ve Windows dışı işletim sistemi doğrulanmadı. Native PDF indirme doğrulandı; yazıcı çıktısı iddiası yoktur.
 
 GitHub fork/push/PR ve server-side owner onayı ancak yayın izni, depo ve hesap bilgileri tamamlanınca dış ortamda doğrulanabilir. [Koruma kontrol listesi](github-protection.md) hazırlanmıştır; dosya halinde öneri ile etkin GitHub ayarı ayrıdır.
+
+Yerel katkı provası temiz klonda ayrı codex/contribution-workflow-check dalında tamamlandı: sözdizimi denetleyicisine davranış değiştirmeyen açıklama eklendi, node --check ve git diff --check exit 0, yerel commit 398ba2f ve incelenebilir format-patch üretildi; ardından main dalına dönüldü. Bu prova gerçek fork/push/PR açıldığı anlamına gelmez; katkı commit'i resmî yayın adayına alınmadı.
