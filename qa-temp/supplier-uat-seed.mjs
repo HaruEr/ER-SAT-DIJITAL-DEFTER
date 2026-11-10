@@ -45,6 +45,13 @@ write('E03-return',{type:'supplierReturn',supplierId:firms.E03.supplierId,origin
 write('E06-reverse',{type:'supplierReverse',originalId:'E06-purchase',note:'UAT önkoşulu iptal'});
 firm('A03',['HAS','USD','SILVER']);
 buy('A03','A03-has','264.150','1');buy('A03','A03-usd','9998.39','1','USD');pay('A03','A03-ag','1402.080','SILVER');
+// Portable developer scenarios use only this freshly created synthetic ledger.
+write('developer-customer',{type:'account',name:'Sentetik müşteri',partyType:'customer',unit:'TL',opening:'0'});
+write('developer-sale',{type:'sale',counterpartyType:'customer',counterpartyId:'cari-developer-customer',items:[{accountId:'ceyrek',quantity:'1',value:'100'}],received:[{accountId:'nakit',quantity:'100',valueTL:'100'}],given:[]});
+write('developer-purchase',{type:'purchase',source:'customer',counterpartyType:'customer',counterpartyId:'cari-developer-customer',items:[{accountId:'ceyrek',quantity:'1',value:'50'}],given:[{accountId:'nakit',quantity:'50',valueTL:'50'}],received:[]});
+write('developer-order',{type:'customerOrder',customerId:'cari-developer-customer',description:'Sentetik sipariş'});
+write('developer-advance',{type:'orderAdvance',orderId:'developer-order',accountId:'nakit',amountTL:'25'});
+write('developer-offset',{type:'supplierOffset',supplierId:firms.D05.supplierId,fromAccountId:firms.D05.accounts.USD,fromQuantity:'1',toAccountId:firms.D05.accounts.HAS,toQuantity:'1',sourceUses:[{sourceId:'D05-usd-source',quantity:'1'}],targetUses:[{purchaseId:'D05-purchase',quantity:'1'}],note:'Sentetik manuel mahsup'});
 const state=r.state();writeFileSync(join(directory,'uat-baseline.json'),JSON.stringify({version:'supplier-uat-v1',date:state.date,revision:state.revision,firms,balances:state.balances},null,2));r.close();
 const identities=new IdentityStore(directory),password=randomBytes(24).toString('base64url');
 const owner=await identities.initializeOwner({name:'UAT Yönetici',password});
