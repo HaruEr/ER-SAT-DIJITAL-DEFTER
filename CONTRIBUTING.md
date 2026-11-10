@@ -21,4 +21,4 @@ Yeni HTTP yolunda kimlik, rol ve origin sınırlarını koruyun. Mobil API/DB sa
 
 Amaç, etkilenen modüller, önceki/yeni davranış, varsa Issue, çalıştırılan tam komutlar ve exit/sonuçları, finansal etki, geriye dönük uyum, UI görüntüleri, atlanan kontroller ve açık riskler. PR şablonunu doldurun. Özelliği kaldırma önerileri kullanım ve veri geçişi etkisini ayrıca açıklamalıdır.
 
-Katkı telifi katkıcıda kalabilir; kabulün hangi lisans altında olduğu önceden belirlenmelidir. DCO veya CLA şu an etkin değildir; [seçenekler](docs/license-options.md) depo sahibi kararını bekler. Gerçek kişisel e-posta adreslerini kanıt dosyalarına eklemeyin; Git kimliğiniz için uygun gizlilik ayarını seçin.
+Kod için MIT seçilmiştir; telif sahibi/yılı doğrulanıp nihai `LICENSE` etkinleştirilmesi beklenmektedir. Katkı telifi katkıcıda kalabilir; katkının MIT altında sunulabildiği kabul öncesinde doğrulanmalıdır. DCO veya CLA şu an etkin değildir; [katkı politikası seçenekleri](docs/license-options.md) depo sahibi kararını bekler. Gerçek kişisel e-posta adreslerini kanıt dosyalarına eklemeyin; Git kimliğiniz için uygun gizlilik ayarını seçin.

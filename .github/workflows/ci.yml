@@ -56,5 +56,13 @@ jobs:
         run: npm run test:supplier-oracle
       - name: Dependency advisories
         run: npm audit --audit-level=high
+      - name: Vendored PDF dependency advisories
+        run: |
+          $vendorAudit = Join-Path $env:RUNNER_TEMP 'er-sat-vendor-audit'
+          New-Item -ItemType Directory -Force -Path $vendorAudit | Out-Null
+          Copy-Item public/vendor/pdfmake/review-dependency-lock.json (Join-Path $vendorAudit 'package-lock.json')
+          $vendorLock = Get-Content public/vendor/pdfmake/review-dependency-lock.json -Raw | ConvertFrom-Json -AsHashtable
+          @{ name='pdfmake-vendor'; version='1.0.0'; private=$true; dependencies=$vendorLock.packages[''].dependencies } | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $vendorAudit 'package.json')
+          npm audit --prefix $vendorAudit --package-lock-only --audit-level=high
       - name: Whitespace
         run: git diff --check

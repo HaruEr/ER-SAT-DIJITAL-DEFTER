@@ -1,6 +1,10 @@
-# Lisans kararı — yayın öncesi açık
+# Lisans kararı — MIT seçildi, hak sahibi bekleniyor
 
-**Henüz bir proje lisansı seçilmedi.** Bu belge seçenek sunar; kullanıcı adına hak tanımaz. Kodun yalnız görünür olması açık kaynak değiştirme ve yeniden dağıtma izni sağlamaz. GitHub'ın görüntüleme/fork koşulları geniş bir yazılım lisansının yerini tutmaz. [GitHub lisans açıklaması](https://choosealicense.com/no-permission/).
+**Kullanıcı kod için MIT lisansını açıkça seçti.** ER ŞAT DİJİTAL DEFTER ürün adı korunacak; marka ve logo hakları ayrı tutulacak. Telif sahibi/yılı ve GitHub depo sahibi daha sonra doğrulanacak. `LICENSE.template` MIT metnini çözümlenmemiş `[COPYRIGHT_YEAR_PENDING]` ve `[COPYRIGHT_HOLDER_PENDING]` alanlarıyla içerir; nihai lisans bildirimi değildir. Hak sahibi bilgisi doğrulanınca bu alanlar doldurulup dosya `LICENSE` olarak etkinleştirilmelidir. Kullanıcı adına kişi, şirket veya yıl uydurulmaz.
+
+GitHub'a push veya genel yayın yetkisi verilmedi. Kodun yalnız görünür olması açık kaynak değiştirme ve yeniden dağıtma izni sağlamaz; seçilmiş lisansın eksiksiz biçimde uygulanması gerekir. [GitHub lisans açıklaması](https://choosealicense.com/no-permission/).
+
+Aşağıdaki karşılaştırma kararın bağlamını korur; yeni bir lisans seçimi talebi değildir.
 
 | Seçenek | Temel sonuç | Tercih nedeni / maliyet |
 | --- | --- | --- |
@@ -9,7 +13,7 @@
 | [GPL-3.0](https://choosealicense.com/licenses/gpl-3.0/) | Dağıtılan türev/birleşik eserlerde aynı lisans ve karşılık gelen kaynak yükümlülükleri | Dağıtılan geliştirmelerin açık kalmasını hedefler; bazı entegrasyon modellerini sınırlar |
 | [AGPL-3.0](https://choosealicense.com/licenses/agpl-3.0/) | GPL ailesine ek olarak değiştirilmiş ağ hizmetinde kullanıcıya kaynak sunma yükümlülüğü | Hizmet olarak sunulan değişikliklerde açıklık ister; dış benimseme ve uyumluluk değerlendirmesi daha ağırdır |
 
-Karar sorusu: kapalı ticari türevlere izin verilmesi mi, dağıtılan geliştirmelerin açık kalması mı, ağ hizmeti değişikliklerinin de paylaşılması mı isteniyor? Bu karar telif sahibine aittir. Tam lisans metni ve kullanılan bileşenlerle uyumluluk karar öncesi değerlendirilmelidir.
+MIT tercihi, telif ve lisans bildirimi koşullarıyla kapalı ticari türevlere de izin veren yaklaşımı seçer. Tam metin `LICENSE.template` içindedir. Üçüncü taraf bileşenler kendi lisanslarına tabi kalır.
 
 ## Ayrı haklar
 
@@ -24,4 +28,4 @@ Karar sorusu: kapalı ticari türevlere izin verilmesi mi, dağıtılan gelişti
 
 **CLA:** Ayrı katkı sözleşmesiyle gerekli haklar tanımlanabilir; koşullarına göre lisans verme/yeniden lisanslama imkânı sağlayabilir. Katkıcıya ek işlem ve hukuki metin yönetimi getirir. Otomatik olarak telif devri anlamına gelmez; sözleşme metni belirleyicidir. Bu aday CLA dayatmaz.
 
-Yayın öncesi: kullanıcı lisansı ve hak sahibini seçer, tam LICENSE eklenir, package metadata eşleştirilir, marka politikası ve katkı politikası netleştirilir, üçüncü taraf bildirimleri tamamlanır. Bu kapılar kapanmadan “açık kaynak yayına hazır” sonucu verilmez.
+Yayın öncesi kalanlar: hak sahibi ve telif yılı doğrulanır, taslak alanları doldurulup tam `LICENSE` etkinleştirilir, package metadata eşleştirilir, marka politikası ve katkı politikası netleştirilir; GitHub sahibi ve ayrı yayın onayı alınır. Bu kapılar kapanmadan “açık kaynak yayına hazır” sonucu verilmez.

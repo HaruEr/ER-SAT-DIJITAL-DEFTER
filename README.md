@@ -1,8 +1,10 @@
 # ER ŞAT DİJİTAL DEFTER
 
+[Teknik kabul sonuçları](docs/acceptance.md) · [Tam sürüm eşdeğerliği](docs/equivalence.md) · [Yayın güvenliği](docs/security-review.md)
+
 Kuyumcu işletmeleri için yerel satış, alış, stok, kasa/banka ve çok birimli cari defter uygulaması. Node.js, yerleşik SQLite ve vanilla JavaScript kullanır. Veriler kurulumun kendi bilgisayarında tutulur. Resmî muhasebe veya e-belge entegrasyonu içermez.
 
-**Yayın adayı:** Kod lisansı, telif sahibi ve GitHub depo sahibi henüz kesinleştirilmedi. Bu hazırlık açık kaynak kullanım izni verildiği veya GitHub korumalarının etkin olduğu anlamına gelmez. [Lisans seçenekleri](docs/license-options.md) ve [yayın kapıları](docs/github-protection.md) tamamlanmadan genel yayın yapılmamalı.
+**Yayın adayı:** Kullanıcı kod için **MIT lisansını seçti**. Telif sahibi/yılı ve GitHub depo sahibi henüz doğrulanmadı. `LICENSE.template` yalnız taslaktır; doğrulanmış bilgilerle nihai `LICENSE` etkinleştirilmeden tamamlanmış lisans bildirimi sayılmaz. Ürün adı korunur; marka/logo hakları ayrıca değerlendirilir. GitHub korumaları etkinleştirilmedi ve genel yayın/push izni verilmedi. [Lisans kararı](docs/license-options.md) ve [yayın kapıları](docs/github-protection.md) tamamlanmadan genel yayın yapılmamalı.
 
 ## Windows'ta kurulum
 
@@ -18,7 +20,7 @@ npm.cmd ci --ignore-scripts
 npm.cmd start
 ```
 
-Tarayıcıda `http://127.0.0.1:4317` açılır. Alternatif olarak `BASLAT.cmd` kullanılabilir. `public/index.html` dosyasını doğrudan açmayın. Port kullanımda ise aynı PowerShell penceresinde `$env:PORT='4327'` ayarlayıp başlatın; açık başka uygulamaları durdurmayın.
+Tarayıcıda `http://127.0.0.1:4317` adresini açın. Alternatif olarak `BASLAT.cmd` kullanılabilir. `public/index.html` dosyasını doğrudan açmayın. Port kullanımda ise aynı PowerShell penceresinde `$env:PORT='4327'` ayarlayıp başlatın; açık başka uygulamaları durdurmayın.
 
 İlk ekranda kendi işletme sahibi adınızı ve **en az 15 karakterlik** parolanızı belirleyin. Hazır yönetici hesabı veya varsayılan parola yoktur. Bu hesap adı işletme profilinden ve **ER ŞAT DİJİTAL DEFTER** ürün adından ayrıdır.
 
