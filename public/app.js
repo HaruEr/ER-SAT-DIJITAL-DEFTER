@@ -1,6 +1,8 @@
 const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const units = new Proxy({ TL: { scale: 100, digits: 2, label: 'TL' }, USD: { scale: 100, digits: 2, label: 'USD' }, EUR: { scale: 100, digits: 2, label: 'EUR' }, GRAM: { scale: 1000, digits: 3, label: 'gr' }, HAS: { scale: 1000, digits: 3, label: 'has gr' }, SILVER: { scale: 1000, digits: 3, label: 'saf gümüş gr' }, ADET: { scale: 1, digits: 0, label: 'adet' } }, { get: (known, code) => Object.hasOwn(known, code) ? known[code] : { scale: 100, digits: 2, label: String(code) } });
+const codec = globalThis.DefterAmountCodec;
+const dateFmt = globalThis.DefterDateFormat;
+const units = codec ? codec.units : new Proxy({ TL: { scale: 100, digits: 2, label: 'TL' }, USD: { scale: 100, digits: 2, label: 'USD' }, EUR: { scale: 100, digits: 2, label: 'EUR' }, GRAM: { scale: 1000, digits: 3, label: 'gr' }, HAS: { scale: 1000, digits: 3, label: 'has gr' }, SILVER: { scale: 1000, digits: 3, label: 'saf gümüş gr' }, ADET: { scale: 1, digits: 0, label: 'adet' } }, { get: (known, code) => Object.hasOwn(known, code) ? known[code] : { scale: 100, digits: 2, label: String(code) } });
 let state, view = 'overview', transactionTab = 'sale', busy = false, editingTransaction = null, partyReturnContext = null;
 let busyControls = new Map();
 let recoveryGeneration = 0;
@@ -71,10 +73,10 @@ const countGroupLabel = group => ({'ana-terazi':'ANA TERAZİ · 14 AYAR / 22 AYA
 const api = path => `/api/${path}?workspace=${workspace}`;
 function readPending() { try { return JSON.parse(sessionStorage.getItem(`defter-pending-${workspace}`)) || null; } catch { return null; } }
 function savePending(value) { pending = value; if (value) sessionStorage.setItem(`defter-pending-${workspace}`, JSON.stringify(value)); else sessionStorage.removeItem(`defter-pending-${workspace}`); $('#retry-bar').hidden = !pending; }
-function formatted(value, unit = 'TL') { const u = units[unit]; return `${new Intl.NumberFormat('tr-TR', { minimumFractionDigits: u.digits, maximumFractionDigits: u.digits }).format((value || 0) / u.scale)} ${u.label}`; }
-function raw(value, unit) { return ((value || 0) / units[unit].scale).toFixed(units[unit].digits); }
-function day(value) { return value ? new Date(`${value}T12:00:00`).toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' }) : 'Başlangıç devri bekleniyor'; }
-function today() { const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Istanbul', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date()).map(p => [p.type, p.value])); return `${parts.year}-${parts.month}-${parts.day}`; }
+function formatted(value, unit = 'TL') { return codec ? codec.formatAmount(value, unit) : `${new Intl.NumberFormat('tr-TR', { minimumFractionDigits: units[unit].digits, maximumFractionDigits: units[unit].digits }).format((value || 0) / units[unit].scale)} ${units[unit].label}`; }
+function raw(value, unit) { return codec ? codec.canonicalFromScaled(value || 0, unit) : ((value || 0) / units[unit].scale).toFixed(units[unit].digits); }
+function day(value) { return dateFmt ? dateFmt.formatTurkishDate(value) : (value ? new Date(`${value}T12:00:00`).toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' }) : 'Başlangıç devri bekleniyor'); }
+function today() { if (dateFmt) return dateFmt.todayIstanbul(); const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Istanbul', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date()).map(p => [p.type, p.value])); return `${parts.year}-${parts.month}-${parts.day}`; }
 function account(id) { return state.accounts.find(a => a.id === id); }
 function activeAccounts() { return state.accounts.filter(a => !a.retired).sort((a,b)=>(a.displayOrder??90)-(b.displayOrder??90)); }
 function summaryAccountLabel(id) { const a = account(id); return esc(a?.name || id) + (a?.retired ? '<br><small>Eski hesap · yeni işleme kapalı</small>' : ''); }
@@ -362,7 +364,7 @@ async function renderSupplierPage() {
     if (generation!==supplierRenderGeneration||view!=='suppliers'||workspace!==selectedWorkspace) return;
     supplierWorkspaceScope=workspace;
     supplierWorkspace=renderSupplierWorkspace($('#main .supplier-workspace'),{
-      state,workspace,memory:supplierMemory,request,refresh,escape:esc,format:formatted,day,parseAmount,
+      state,workspace,memory:supplierMemory,request,refresh,escape:esc,format:formatted,day,parseAmount,canonicalValue,
       onInteraction() {
         const notice=$('#notice');
         if(!pending&&notice.getAttribute('role')==='status') { notice.hidden=true;notice.textContent=''; }
@@ -850,7 +852,7 @@ function renderCollectionForm(container, partyType = 'customer', editingCommand 
     const amount=parseAmount(form.querySelector('#f-quantity'),a.unit,true),balance=balanceFor(a);
     if(amount!==null&&amount>Math.abs(balance))form.querySelector('#f-quantity').setCustomValidity('Tutar mevcut borç veya alacağı aşamaz.');
     if(!form.reportValidity()||!balance||!target.value)return;
-    submit({type:'collection',customerAccount:a.id,direction:balance>0?'collect':'pay',target:target.value,quantity:form.querySelector('#f-quantity').value,note:form.querySelector('#f-note').value},'Cari ve ödeme hesabı güncellendi.');
+    submit({type:'collection',customerAccount:a.id,direction:balance>0?'collect':'pay',target:target.value,quantity:canonicalValue(form.querySelector('#f-quantity'),a.unit,true),note:form.querySelector('#f-note').value},'Cari ve ödeme hesabı güncellendi.');
   });
   connectFieldHints(container);if(view!=='edit')prepareDraftForms();
 }
@@ -863,25 +865,26 @@ function renderFinanceForm(container, kind = 'transfer') {
     const form=container.querySelector('#settlement-form'),gross=form.querySelector('#f-gross'),expected=form.querySelector('#f-expected'),fee=form.querySelector('#f-fee');fee.readOnly=true;
     const calculate=()=>{const g=parseAmount(gross,'TL',true),n=parseAmount(expected,'TL');if(g!==null&&n!==null)expected.setCustomValidity(n>g?'Bankaya yatacak tutar POS alacağını aşamaz.':'');fee.value=g!==null&&n!==null&&g>=n?raw(g-n,'TL'):'';form.querySelector('#settlement-hint').textContent=banks.length?'Komisyon = kapatılacak POS alacağı − bankaya yatacak net tutar.':'Önce Banka/Pos/Kasa sayfasından TL banka hesabı ekleyin.';form.querySelector('button[type="submit"]').disabled=!banks.length;};
     gross.addEventListener('input',calculate);expected.addEventListener('input',calculate);calculate();
-    form.addEventListener('submit',event=>{event.preventDefault();calculate();if(!form.reportValidity()||!fee.value)return;submit({type:'settlement',bankAccount:form.querySelector('#f-bankAccount').value,gross:gross.value,fee:fee.value,note:form.querySelector('#f-note').value},'POS alacağı ve banka bakiyesi güncellendi.');});
+    form.addEventListener('submit',event=>{event.preventDefault();calculate();if(!form.reportValidity()||!fee.value)return;submit({type:'settlement',bankAccount:form.querySelector('#f-bankAccount').value,gross:canonicalValue(gross,'TL',true),fee:canonicalValue(fee,'TL'),note:form.querySelector('#f-note').value},'POS alacağı ve banka bakiyesi güncellendi.');});
   }else if(kind==='movement'){
     container.innerHTML=`<h2>Gider / Sermaye</h2><p class="subtitle">İşletme giderini, sermaye girişini veya işletmeden çekişi kaydedin.</p><form id="movement-form"><div class="form-grid">${field('category','İşlem',{options:[['Gider','İşletme gideri'],['Sermaye','Sermaye ekleme'],['İşletmeden çekiş','İşletmeden çekiş']]})}${field('accountId','Kasa / banka',{options:funds.map(a=>[a.id,`${a.name} · ${units[a.unit].label}`])})}${field('quantity','Miktar')}${field('note','Açıklama · isteğe bağlı',{full:true,required:false})}</div><p id="movement-warning" class="context-note"></p>${action('Kaydet')}</form>`;
     const form=container.querySelector('#movement-form'),select=form.querySelector('#f-accountId');
     form.querySelector('#f-quantity').addEventListener('input',()=>{const a=account(select.value);if(a)parseAmount(form.querySelector('#f-quantity'),a.unit,true);});
     const update=()=>{const a=account(select.value);form.querySelector('#f-quantity').previousElementSibling.textContent='Miktar'+(a?' · '+units[a.unit].label:'');form.querySelector('#movement-warning').textContent=a?'Mevcut: '+formatted(state.balances[a.id],a.unit):'Önce bir kasa / banka hesabı oluşturun.';};select.addEventListener('change',update);update();
-    form.addEventListener('submit',event=>{event.preventDefault();const values=formValues(form),a=account(values.accountId);if(!a)return;parseAmount(form.querySelector('#f-quantity'),a.unit,true);if(!form.reportValidity())return;submit({type:'movement',...values,direction:values.direction||(values.category==='Sermaye'?'in':'out')},'Kasa / banka hareketi kaydedildi.');});
+    form.addEventListener('submit',event=>{event.preventDefault();const values=formValues(form),a=account(values.accountId);if(!a)return;parseAmount(form.querySelector('#f-quantity'),a.unit,true);if(!form.reportValidity())return;submit({type:'movement',...values,quantity:canonicalValue(form.querySelector('#f-quantity'),a.unit,true),direction:values.direction||(values.category==='Sermaye'?'in':'out')},'Kasa / banka hareketi kaydedildi.');});
   }else{
     container.innerHTML=`<h2>Kasa / Banka transferi</h2><p class="subtitle">TL veya dövizi aynı birimdeki hesaplarınız arasında taşıyın.</p><form id="transfer-form"><div class="form-grid">${field('fromAccount','Çıkan kasa / banka',{options:funds.map(a=>[a.id,`${a.name} · ${formatted(state.balances[a.id],a.unit)}`])})}${field('toAccount','Giren kasa / banka',{options:[]})}${field('quantity','Aktarılan miktar')}${field('note','Açıklama · isteğe bağlı',{full:true,required:false})}</div><p class="context-note" id="transfer-hint"></p>${action('Transferi kaydet','Aynı birimdeki iki hesap birlikte güncellenir.')}</form>`;
     const form=container.querySelector('#transfer-form'),from=form.querySelector('#f-fromAccount'),to=form.querySelector('#f-toAccount');
     form.querySelector('#f-quantity').addEventListener('input',()=>{const a=account(from.value);if(a)parseAmount(form.querySelector('#f-quantity'),a.unit,true);});
     const update=()=>{const a=account(from.value),old=to.value,choices=funds.filter(t=>t.id!==a?.id&&t.unit===a?.unit);to.innerHTML=choices.map(t=>`<option value="${esc(t.id)}">${esc(t.name)} · ${esc(formatted(state.balances[t.id],t.unit))}</option>`).join('');if(choices.some(t=>t.id===old))to.value=old;form.querySelector('#f-quantity').previousElementSibling.textContent='Aktarılan miktar'+(a?' · '+units[a.unit].label:'');form.querySelector('#transfer-hint').textContent=choices.length?'Bu transfer işletmenin toplam parasını değiştirmez.':'Banka/Pos/Kasa sayfasından aynı birimde ikinci hesap ekleyin.';form.querySelector('button[type="submit"]').disabled=!choices.length;};
     from.addEventListener('change',update);update();
-    form.addEventListener('submit',event=>{event.preventDefault();const a=account(from.value);if(!a)return;parseAmount(form.querySelector('#f-quantity'),a.unit,true);if(!form.reportValidity()||!to.value)return;submit({type:'transfer',...formValues(form)},'Hesaplar arası transfer kaydedildi.');});
+    form.addEventListener('submit',event=>{event.preventDefault();const a=account(from.value);if(!a)return;parseAmount(form.querySelector('#f-quantity'),a.unit,true);if(!form.reportValidity()||!to.value)return;submit({type:'transfer',...formValues(form),quantity:canonicalValue(form.querySelector('#f-quantity'),a.unit,true)},'Hesaplar arası transfer kaydedildi.');});
   }
   connectFieldHints(container);if(view!=='edit')prepareDraftForms();
 }
 
 function parseAmount(input, unit = 'TL', positive = false) {
+  if (codec) return codec.parseInputElement(input, unit, positive);
   const spec = units[unit], normalized = String(input.value).trim().replace(',', '.');
   const pattern = spec.digits === 0 ? /^\d+$/ : new RegExp('^\\d+(?:\\.\\d{1,' + spec.digits + '})?$');
   const [whole = '', fraction = ''] = normalized.split('.');
@@ -889,6 +892,10 @@ function parseAmount(input, unit = 'TL', positive = false) {
   const valid = pattern.test(normalized) && Number.isSafeInteger(scaled) && scaled <= 1e12 && (!positive || scaled > 0);
   input.setCustomValidity(normalized && !valid ? 'Geçersiz miktar. ' + unit + ' için en fazla ' + spec.digits + ' ondalık basamak kullanın' + (positive ? '; sıfırdan büyük olmalı.' : '.') : '');
   return valid ? scaled : null;
+}
+function canonicalValue(input, unit = 'TL', positive = false) {
+  if (codec) return codec.canonicalInputValue(input, unit, positive);
+  return String(input?.value ?? '').trim().replace(',', '.');
 }
 function financialAccounts() { return activeAccounts().filter(a => a.kind === 'asset' && (['TL','HAS','SILVER'].includes(a.unit) || /^[A-Z]{3}$/.test(a.unit))); }
 
@@ -983,7 +990,7 @@ function attachSaleProductSearch(row, catalog, product, id) {
 function attachSaleLinePricing(row) {
   const panel = document.createElement('details');
   panel.className = 'sale-line-pricing';
-  const moneyPattern = '[0-9]+([.,][0-9]{1,2})?';
+  const moneyPattern = '(?:(?:[0-9]{1,3}(?:\\.[0-9]{3})+|[0-9]+)(?:,[0-9]{1,2})?|[0-9]+\\.[0-9]{1,2})';
   const moneyInput = (key, label, signed = false) => `<label class="field"><span>${label}</span><input data-price-field="${key}" inputmode="decimal" maxlength="24" pattern="${signed ? '-?' : ''}${moneyPattern}"></label>`;
   panel.innerHTML = `<summary>Fiyat ve maliyet bilgileri</summary>
     <div class="form-grid">${moneyInput('quotedTL','Teklif edilen toplam satır bedeli · TL')}
@@ -1170,8 +1177,21 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
   }
   const familyCaris=()=>supplier&&!legacyMultiCari?ownCaris.filter(a=>form.querySelector('#f-counterpartyId').value?(a.id===form.querySelector('#f-counterpartyId').value||a.parentAccountId===form.querySelector('#f-counterpartyId').value):!a.parentAccountId):ownCaris;
   form.querySelector('#f-counterpartyId')?.addEventListener('change',()=>{if(supplier&&!legacyMultiCari)for(const kind of ['debt','counterdebt'])for(const row of allocationRows(kind)){const select=row.querySelector('select'),selected=select.value;select.innerHTML='<option value="">Bakiye hesabı seçin</option>'+familyCaris().map(a=>`<option value="${esc(a.id)}">${esc(a.name)} · ${esc(units[a.unit].label)}</option>`).join('');select.value=familyCaris().some(a=>a.id===selected)?selected:'';}updateTotals();});
-  const items=()=>rows().map(row=>({ ...Object.fromEntries((isStock?['accountId','quantity','weightAccount','weight']:['accountId','quantity','weightAccount','weight','value']).map(key=>[key,row.querySelector(`[data-item-field="${key}"]`).value])), ...(row.dataset.inventoryCode && {inventoryCode:row.dataset.inventoryCode}) }));
-  const allocations=kind=>allocationRows(kind).map(row=>Object.fromEntries(['accountId','quantity','valueTL','weightAccount','weight'].filter(key=>!row.querySelector(`[data-allocation-field="${key}"]`).disabled).map(key=>[key,row.querySelector(`[data-allocation-field="${key}"]`).value])));
+  const items=(canonicalize=true)=>rows().map(row=>{
+    const a=account(row.querySelector('[data-item-field="accountId"]').value);
+    const read=(key,unit)=>canonicalize?canonicalValue(row.querySelector(`[data-item-field="${key}"]`),unit,true):row.querySelector(`[data-item-field="${key}"]`).value;
+    return { accountId:a?.id||row.querySelector('[data-item-field="accountId"]').value, quantity:read('quantity',a?.unit||'ADET'), weightAccount:row.querySelector('[data-item-field="weightAccount"]').value, weight:read('weight','GRAM'), ...(isStock?{}:{value:read('value','TL')}), ...(row.dataset.inventoryCode && {inventoryCode:row.dataset.inventoryCode}) };
+  });
+  const allocations=(kind,canonicalize=true)=>allocationRows(kind).map(row=>{
+    const a=account(row.querySelector('[data-allocation-field="accountId"]').value);
+    const entries=[];
+    for(const key of ['accountId','quantity','valueTL','weightAccount','weight']){
+      const el=row.querySelector(`[data-allocation-field="${key}"]`);
+      if(el.disabled)continue;
+      entries.push([key, !canonicalize?el.value:key==='quantity'?canonicalValue(el,a?.unit||'TL',true):key==='valueTL'?canonicalValue(el,'TL',true):key==='weight'?canonicalValue(el,'GRAM',true):el.value]);
+    }
+    return Object.fromEntries(entries);
+  });
   const updateTotals=()=>{
     form.querySelector('#add-sale-item').disabled=rows().length>=30;
     rows().forEach((row,index)=>{row.querySelector('.sale-line-title').textContent=`${index+1}. ürün`;row.querySelector('[data-remove-item]').disabled=rows().length===1&&!row.dataset.inventoryCode;const a=account(row.querySelector('[data-item-field="accountId"]').value);if(!a)return;parseAmount(row.querySelector('[data-item-field="quantity"]'),a.unit,true);const weight=row.querySelector('[data-item-field="weight"]');if(!weight.disabled)parseAmount(weight,'GRAM',true);});
@@ -1302,7 +1322,7 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
     submit(command,isExchange?'Cari karşılıklar ve hesap etkileri kaydedildi.':isPurchase?'Alış, ödeme ve kalan borç kaydedildi.':'Satış ve ödemeler kaydedildi.',undefined,{key:form.dataset.draftKey});
   });
   form.draftAdapter={
-    read:()=>({items:items(), ...priceData(), orderId:form.dataset.missingOrder || orderPanel?.querySelector('select')?.value,
+    read:()=>({items:items(false), ...priceData(), orderId:form.dataset.missingOrder || orderPanel?.querySelector('select')?.value,
       advanceAmounts:[...(orderPanel?.querySelectorAll('[data-advance-id]') || [])].map(input=>[input.dataset.advanceId,input.value]),
       ...Object.fromEntries(['payment','counterpayment','debt','counterdebt','scrap'].map(kind=>[kind,allocationRows(kind).map(row=>({...Object.fromEntries([...row.querySelectorAll('[data-allocation-field]')].map(control=>[control.dataset.allocationField,control.value])),paymentType:row.dataset.paymentType}))]))}),
     restore:saved=>{
@@ -1403,15 +1423,13 @@ function bindMeasureForm(formId, accounts, prefix, type) {
     form.addEventListener('input',updateProgress);$('#count-differences-only').addEventListener('change',updateProgress);updateProgress();
   }
   for (const input of form.querySelectorAll('[data-measure]')) input.addEventListener('input', () => {
-    const a = account(input.dataset.measure), spec = units[a.unit], normalized = input.value.trim().replace(',', '.');
-    const pattern = spec.digits === 0 ? /^\d+$/ : new RegExp('^\\d+(?:\\.\\d{1,' + spec.digits + '})?$');
-    const parts = normalized.split('.'), scaled = Number(parts[0]) * spec.scale + Number((parts[1] || '').padEnd(spec.digits, '0'));
-    const valid = pattern.test(normalized) && Number.isSafeInteger(scaled) && scaled <= 1e12;
-    input.setCustomValidity(!normalized || valid ? '' : 'Geçersiz miktar: en fazla ' + spec.digits + ' ondalık basamak kullanın.');
-    const delta = normalized && valid ? scaled - (state.balances[a.id] || 0) : null;
+    const a = account(input.dataset.measure), text = input.value.trim();
+    const scaled = text ? parseAmount(input, a.unit) : null;
+    const valid = !text || scaled !== null;
+    const delta = text && valid ? scaled - (state.balances[a.id] || 0) : null;
     const cell = document.getElementById(prefix + '-diff-' + a.id);
-    cell.textContent = !normalized ? '—' : !valid ? 'Geçersiz miktar' : formatted(delta, a.unit);
-    cell.className = 'numeric count-diff' + (delta || (!valid && normalized) ? ' negative' : '');
+    cell.textContent = !text ? '—' : !valid ? (input.validationMessage || 'Geçersiz miktar') : formatted(delta, a.unit);
+    cell.className = 'numeric count-diff' + (delta || (!valid && text) ? ' negative' : '');
     document.getElementById(prefix + '-reason-' + a.id).required = delta !== null && delta !== 0;
   });
   form.addEventListener('submit', e => {
@@ -1716,7 +1734,7 @@ function bindSaleReturn(article, original, current) {
     const fingerprint=JSON.stringify(command);
     if(form.dataset.reviewedReturn!==fingerprint){
       form.querySelector('[data-return-review]')?.remove();
-      form.insertAdjacentHTML('beforeend',`<div data-return-review class="info neutral"><p class="journal-record-context">İade yapılan satış: ${esc(original.id)} · ${esc(day(original.date))}</p><strong>İade bedeli: ${esc(formatted(sum))}</strong><p>Para çıkışı: ${esc(a.name)} · ${esc(formatted(amount,a.unit))}. İş günü: ${esc(state.date)}.</p><p>Eski satış ve cari bakiye silinmez; seçili ürünler stoğa geri girer.</p><button type="button" data-confirm-return class="button">İadeyi onayla</button></div>`);
+      form.insertAdjacentHTML('beforeend',`<div data-return-review class="info neutral"><p class="journal-record-context">İade yapılan satış: ${esc(original.id)} · ${esc(day(original.date))}</p><strong>İade bedeli: ${esc(formatted(sum))}</strong><p>Para çıkışı: ${esc(a.name)} · ${esc(formatted(amount,a.unit))}. İş günü: ${esc(day(state.date))}.</p><p>Eski satış ve cari bakiye silinmez; seçili ürünler stoğa geri girer.</p><button type="button" data-confirm-return class="button">İadeyi onayla</button></div>`);
       const returnedCodes=items.map(item=>original.meta.lines[item.lineIndex].inventoryCode).filter(Boolean);
       if(returnedCodes.length){
         const summary=document.createElement('p');
@@ -1726,10 +1744,10 @@ function bindSaleReturn(article, original, current) {
       if(cari.rows.length){
         const effects=document.createElement('p');
         const a=account(cari.rows[0].accountId);
-        effects.textContent=cari.rows.map(row=>(row.action==='reduceDebt'?'Müşteri borcundan düşülecek':'Müşteriye alacak yazılacak')+
-          ' · '+a.name+' · '+row.quantity+' '+units[a.unit].label+(a.unit==='TL'?'':' · '+row.valueTL+' TL karşılığı')).join(' / ')+
+        effects.textContent=cari.rows.map(row=>{const qEl=form.querySelector('[data-cari-native]'),rEl=form.querySelector('[data-cari-tl]'),qVal=parseAmount(qEl,a.unit,true),rVal=rEl?parseAmount(rEl,'TL',true):qVal;return (row.action==='reduceDebt'?'Müşteri borcundan düşülecek':'Müşteriye alacak yazılacak')+
+          ' · '+a.name+' · '+(qVal!==null?formatted(qVal,a.unit):row.quantity+' '+units[a.unit].label)+(a.unit==='TL'?'':' · '+(rVal!==null?formatted(rVal,'TL'):row.valueTL+' TL')+' karşılığı');}).join(' / ')+
           ' · Kalan '+(cari.balance>0?'müşteri borcu ':cari.balance<0?'müşteri alacağı ':'bakiye ')+formatted(Math.abs(cari.balance),a.unit);
-        if (!amount) form.querySelector('[data-return-review] strong + p').textContent='Para çıkışı yok. İş günü '+state.date;
+        if (!amount) form.querySelector('[data-return-review] strong + p').textContent='Para çıkışı yok. İş günü '+day(state.date);
         form.querySelector('[data-confirm-return]').before(effects);
       }
       if(product){

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { ReportRepository, ReportError } from './report-repository.mjs';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
-const staticFiles = new Map([['/',['reports.html','text/html; charset=utf-8']],['/reports.js',['reports.js','text/javascript; charset=utf-8']],['/reports.css',['reports.css','text/css; charset=utf-8']]]);
+const staticFiles = new Map([['/',['reports.html','text/html; charset=utf-8']],['/amount-codec.js',['amount-codec.js','text/javascript; charset=utf-8']],['/date-format.js',['date-format.js','text/javascript; charset=utf-8']],['/reports.js',['reports.js','text/javascript; charset=utf-8']],['/reports.css',['reports.css','text/css; charset=utf-8']]]);
 const routes = new Set(['/api/reports/overview','/api/reports/summary','/api/reports/journal']);
 const responseHeaders = { 'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff', 'Referrer-Policy':'no-referrer', 'Cross-Origin-Resource-Policy':'same-origin', 'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" };
 

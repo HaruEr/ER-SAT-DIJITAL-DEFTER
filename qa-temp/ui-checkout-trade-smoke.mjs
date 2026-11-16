@@ -29,6 +29,8 @@ async function setup(t,handler,seed,initialDraft) {
     if(path.includes('/customers'))return[{id:person.id,name:person.name,unit:'USD'}];
     return snapshot;
   }};
+  window.eval(readFileSync(new URL('../public/amount-codec.js',import.meta.url),'utf8'));
+  window.eval(readFileSync(new URL('../public/date-format.js',import.meta.url),'utf8'));
   window.eval(readFileSync(new URL('../public/checkout.js',import.meta.url),'utf8'));
   const fill=(selector,value)=>{const el=typeof selector==='string'?get(selector):selector;assert.ok(el,String(selector));el.value=value;el.dispatchEvent(new window.Event(el.tagName==='SELECT'?'change':'input',{bubbles:true}));};
   await tick();await tick();
@@ -48,7 +50,7 @@ test('multi-row checkout retains native quantities and requires review before on
   get('[data-add="received"][data-category="money"]').click();
   const receipt=get('[data-allocation="received"]');fill(receipt.querySelector('[data-account]'),'usd');fill(receipt.querySelector('[data-quantity]'),'10');fill(receipt.querySelector('[data-value]'),'300');
   get('#trade').requestSubmit();assert.equal(calls.length,0);assert.equal(get('#review').hidden,false);
-  assert.match(get('#review-content').textContent,/10 USD/);
+  assert.match(get('#review-content').textContent,/10,00 USD/);
   get('#confirm').click();await tick();await tick();assert.equal(calls.length,1);
   assert.deepEqual(JSON.parse(JSON.stringify(calls[0].command.items)).map(row=>row.quantity),['1','2']);
   assert.deepEqual(JSON.parse(JSON.stringify(calls[0].command.received)),[{accountId:'usd',quantity:'10',valueTL:'300'}]);
@@ -113,7 +115,7 @@ test('mixed products, USD cash, TL change and selected USD current account prese
   }
   add('received','usd','2','50');add('received','hurda14','1.25','40');add('given','nakit','10');add('credits',person.id,'0.8','20');
   f.get('#trade').requestSubmit();assert.equal(f.get('#review').hidden,false);
-  assert.match(f.get('#review-content').textContent,/1.25 gr/);
+  assert.match(f.get('#review-content').textContent,/1,250 gr/);
   f.get('#confirm').click();await f.tick();await f.tick();
   const c=f.calls[0].command;
   assert.equal(c.received.length,2);assert.equal(c.given[0].quantity,'10');assert.equal(c.credits[0].quantity,'0.8');assert.equal(c.credits[0].valueTL,'20');

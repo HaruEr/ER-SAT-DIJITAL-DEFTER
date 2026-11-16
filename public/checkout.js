@@ -1,10 +1,14 @@
 const $ = id => document.getElementById(id);
 const { api, current } = window.DefterSession;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const codec = globalThis.DefterAmountCodec;
+const dateFmt = globalThis.DefterDateFormat;
 const normalize = value => String(value || '').toLocaleLowerCase('tr').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i');
-const scale = unit => unit === 'ADET' ? 1 : ['GRAM','HAS','SILVER'].includes(unit) ? 1000 : 100;
-const format = (value, unit='TL') => (value/scale(unit)).toLocaleString('tr-TR',{minimumFractionDigits:unit==='ADET'?0:unit==='GRAM'?3:2,maximumFractionDigits:scale(unit)===1000?3:2})+' '+({ADET:'adet',GRAM:'gr',HAS:'has gr',SILVER:'saf gümüş gr'}[unit] || unit);
+const scale = unit => codec ? codec.units[unit].scale : (unit === 'ADET' ? 1 : ['GRAM','HAS','SILVER'].includes(unit) ? 1000 : 100);
+const format = (value, unit='TL') => codec ? codec.formatAmount(value, unit) : ((value/scale(unit)).toLocaleString('tr-TR',{minimumFractionDigits:unit==='ADET'?0:unit==='GRAM'?3:2,maximumFractionDigits:scale(unit)===1000?3:2})+' '+({ADET:'adet',GRAM:'gr',HAS:'has gr',SILVER:'saf gümüş gr'}[unit] || unit));
 const decimal = value => String(value || '').trim().replace(',','.');
+const canonical = (input, unit='TL', positive=true) => codec ? codec.canonicalInputValue(input, unit, positive) : decimal(input?.value);
+const day = value => dateFmt ? dateFmt.formatTurkishDate(value) : value;
 const option = (id,name) => '<option value="'+esc(id)+'">'+esc(name)+'</option>';
 const numeric = (field,label,required=true) => '<label>'+label+'<input '+field+' inputmode="decimal" maxlength="24"'+(required?' required':'')+'></label>';
 const groups = ['received','given','credits','debts'];
@@ -21,6 +25,10 @@ const broadcast = typeof BroadcastChannel === 'function' ? new BroadcastChannel(
 const status = message => { $('status').textContent = message; };
 const isStale = () => snapshot && (draftRevision !== snapshot.revision || draftDate !== snapshot.date || externalRevision > snapshot.revision);
 function parse(input,unit='TL',signed=false,optional=false,allowZero=false) {
+  if (codec && !signed) {
+    if (!String(input?.value ?? '').trim() && optional) { input?.setCustomValidity(''); return null; }
+    return codec.parseInputElement(input, unit, !allowZero);
+  }
   input.setCustomValidity('');
   const value=decimal(input.value);
   if (!value && optional) return null;
@@ -263,9 +271,9 @@ function command() {
     if(!product)continue;
     if(serials.has(serial?.code))row.querySelector('[data-product]').setCustomValidity('Tekil ürün bu işlemde bir kez seçilebilir.');
     if(serial)serials.add(serial.code);
-    const item={accountId:product.id,quantity:decimal(row.querySelector('[data-quantity]').value),value:decimal(row.querySelector('[data-value]').value)};
+    const item={accountId:product.id,quantity:canonical(row.querySelector('[data-quantity]'),product.unit,true),value:canonical(row.querySelector('[data-value]'),'TL',true)};
     if(serial)item.inventoryCode=serial.code;
-    if(product.weights.length)Object.assign(item,{weightAccount:row.querySelector('[data-pool]').value,weight:decimal(row.querySelector('[data-weight]').value)});
+    if(product.weights.length)Object.assign(item,{weightAccount:row.querySelector('[data-pool]').value,weight:canonical(row.querySelector('[data-weight]'),'GRAM',true)});
     items.push(item);
     const price=pricing(row);prices.push(price);
     if(operation==='sale'&&price) {
@@ -278,9 +286,9 @@ function command() {
   if(operation==='sale'&&prices.some(Boolean))result.salePricing={version:1,lines:prices};
   for(const kind of groups)result[kind]=[...$(kind).children].map(row=>{
     const account=allocationAccount(row);validateRow(row,account,false);
-    const allocation={accountId:row.querySelector('[data-account]').value,quantity:decimal(row.querySelector('[data-quantity]').value),valueTL:decimal(row.querySelector('[data-value]').value)};
+    const allocation={accountId:row.querySelector('[data-account]').value,quantity:canonical(row.querySelector('[data-quantity]'),account?.unit||'TL',true),valueTL:canonical(row.querySelector('[data-value]'),'TL',true)};
     if(['credits','debts'].includes(kind)&&!selectedCustomer?.accounts.some(a=>a.id===allocation.accountId))row.querySelector('[data-account]').setCustomValidity('Seçilen müşterinin hesabını kullanın.');
-    if(account?.weights?.length)Object.assign(allocation,{weightAccount:row.querySelector('[data-pool]').value,weight:decimal(row.querySelector('[data-weight]').value)});
+    if(account?.weights?.length)Object.assign(allocation,{weightAccount:row.querySelector('[data-pool]').value,weight:canonical(row.querySelector('[data-weight]'),'GRAM',true)});
     return allocation;
   });
   if($('note').value.trim())result.note=$('note').value.trim();
@@ -290,7 +298,12 @@ function renderReview(c) {
   status('');
   const names=new Map([...(snapshot.products || []),...snapshot.payments,...(selectedCustomer?.accounts || [])].map(a=>[a.id,a]));
   const lines=[...c.items.map(row=>({label:operation==='sale'?'Satılan':'Alınan ürün',row,reference:row.value})),...groups.flatMap(kind=>c[kind].map(row=>({label:groupNames[kind],row,reference:row.valueTL})))];
-  $('review-content').innerHTML='<p>'+esc((operation==='sale'?'Satış':'Alış')+' · '+snapshot.date+' · '+(selectedCustomer?.name || 'Müşteri seçilmedi'))+'</p><div class="table-wrap"><table><thead><tr><th>İşlem</th><th>Hesap / ürün</th><th>Miktar</th><th>TL bedeli</th></tr></thead><tbody>'+lines.map(({label,row,reference})=>'<tr><td data-review-label="İşlem">'+esc(label)+'</td><td data-review-label="Ürün / hesap">'+esc(names.get(row.accountId)?.name || row.accountId)+(row.inventoryCode?' · '+esc(row.inventoryCode):'')+'</td><td data-review-label="Miktar">'+esc(row.quantity+' '+({ADET:'adet',GRAM:'gr'}[names.get(row.accountId)?.unit] || names.get(row.accountId)?.unit || ''))+(row.weight?' · '+esc(row.weight+' gr'):'')+'</td><td data-review-label="TL bedeli">'+esc(reference+' TL')+'</td></tr>').join('')+'</tbody></table></div>';
+  const fmtReview = (val, u) => {
+    if (!codec) return `${val} ${u}`;
+    const res = codec.parseUserAmount(val, u, { positive: true, allowZero: true });
+    return res.status === 'valid' ? res.formatted : `${val} ${u}`;
+  };
+  $('review-content').innerHTML='<p>'+esc((operation==='sale'?'Satış':'Alış')+' · '+day(snapshot.date)+' · '+(selectedCustomer?.name || 'Müşteri seçilmedi'))+'</p><div class="table-wrap"><table><thead><tr><th scope="col">İşlem</th><th scope="col">Hesap / ürün</th><th scope="col">Miktar</th><th scope="col">TL bedeli</th></tr></thead><tbody>'+lines.map(({label,row,reference})=>{const u=names.get(row.accountId)?.unit||'TL';return '<tr><td data-review-label="İşlem">'+esc(label)+'</td><td data-review-label="Ürün / hesap">'+esc(names.get(row.accountId)?.name || row.accountId)+(row.inventoryCode?' · '+esc(row.inventoryCode):'')+'</td><td data-review-label="Miktar">'+esc(fmtReview(row.quantity,u))+(row.weight?' · '+esc(fmtReview(row.weight,'GRAM')):'')+'</td><td data-review-label="TL bedeli">'+esc(fmtReview(reference,'TL'))+'</td></tr>';}).join('')+'</tbody></table></div>';
   $('review').hidden=false;controls();$('review-title').focus();
 }
 function stockTable() {
@@ -313,7 +326,7 @@ async function refresh() {
     const fresh=await api(route('checkout',selected));
     if(sequence!==loadSequence || selected!==workspace)return;
     snapshot=fresh;externalRevision=Math.max(externalRevision,fresh.revision);
-    $('date').textContent=fresh.initialized?'Açık iş günü · '+fresh.date:'Bu defterin açılışını işletme sahibi yapmalı.';
+    $('date').textContent=fresh.initialized?'Açık iş günü · '+day(fresh.date):'Bu defterin açılışını işletme sahibi yapmalı.';
     restoreDraft(readStored(draftKey()));stockTable();$('trade').hidden=!fresh.initialized;
     if(selectedCustomer && !pending) await lookupCustomer(selectedCustomer.id);
     if(sequence!==loadSequence || selected!==workspace)return;

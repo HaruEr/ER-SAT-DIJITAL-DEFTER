@@ -1002,3 +1002,5 @@ main:has(#summary-result) .summary-filters { gap:16px; }
 .stepper-nav-back { margin-bottom: 14px; padding-top: 0; border-top: 0; }
 @media (max-width: 700px) { .stepper-bar { grid-template-columns: 1fr; } }
 .notice:not([hidden]) { position: sticky; top: 12px; z-index: 4; box-shadow: var(--shadow); }
+.amount-disambiguation { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--warning-soft); color: var(--warning-ink); }
+.amount-disambiguation small { flex: 1 1 100%; font-weight: 600; }

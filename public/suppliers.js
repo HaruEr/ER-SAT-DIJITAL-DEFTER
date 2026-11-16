@@ -250,7 +250,19 @@ function renderSupplierForm(panel, context) {
       if(invalid){target.textContent='Eksik veya geçersiz miktarlar var. Mali önizleme hesaplanmadı.';return;}
     }
     for(const [name,group]of groups){
-      const lines=current.rows[name].map(row=>{const a=[...catalog,...nativeAccounts].find(a=>a.id===row.accountId);return a&&row.quantity?esc((a.name||unitLabel(a.unit))+' · '+row.quantity+' '+unitLabel(a.unit)+(row.weight?' · '+row.weight+' gr':'')+(row.referenceTL?' · TL referansı '+row.referenceTL:'')):'';}).filter(Boolean);
+      const lines=group.rows().map(rowEl=>{
+        const aId=rowEl.querySelector('[data-field="accountId"]')?.value;
+        const a=[...catalog,...nativeAccounts].find(x=>x.id===aId);
+        const qEl=rowEl.querySelector('[data-field="quantity"]'),wEl=rowEl.querySelector('[data-field="weight"]'),rEl=rowEl.querySelector('[data-field="referenceTL"]');
+        if(!a||!qEl?.value.trim())return '';
+        const qAmt=context.parseAmount?.(qEl,a.unit,true);
+        const wAmt=wEl&&!wEl.disabled&&wEl.value.trim()?context.parseAmount?.(wEl,'GRAM',true):null;
+        const rAmt=rEl&&!rEl.disabled&&rEl.value.trim()?context.parseAmount?.(rEl,'TL',false):null;
+        const qStr=qAmt!==null&&qAmt!==undefined?context.format(qAmt,a.unit):qEl.value+' '+unitLabel(a.unit);
+        const wStr=wAmt!==null&&wAmt!==undefined?' · '+context.format(wAmt,'GRAM'):(wEl?.value.trim()?' · '+wEl.value+' gr':'');
+        const rStr=rAmt!==null&&rAmt!==undefined?' · TL referansı '+context.format(rAmt,'TL'):(rEl?.value.trim()?' · TL referansı '+rEl.value:'');
+        return esc((a.name||unitLabel(a.unit))+' · '+qStr+wStr+rStr);
+      }).filter(Boolean);
       if(lines.length)parts.push('<h4>'+esc(group.section.querySelector('legend').textContent)+'</h4><ul>'+lines.map(x=>'<li>'+x+'</li>').join('')+'</ul>');
     }
     if(context.parseAmount){
@@ -298,7 +310,7 @@ function renderSupplierForm(panel, context) {
     else if(kind==='unit'){command.supplierId=partyId;command.unit=data.fields.unit==='other'?data.fields.currencyCode.trim().toUpperCase():data.fields.unit;if(!/^[A-Z]{3}$/.test(command.unit)&&command.unit!=='TL'&&command.unit!=='SILVER'||command.unit==='TRY'){info('Döviz için üç harfli kod, Türk lirası için TL seçin.');return;}}
     else {
       if(!nativeAccounts.length){info('Önce firma hesabı için birim ekleyin.');return;}command.supplierId=partyId;
-      for(const[name,rows]of Object.entries(data.rows))if(rows.length)command[name]=rows.map(row=>Object.fromEntries(Object.entries(row).filter(([,v])=>v.trim()!=='')));
+      for(const[name,group]of groups){const rows=group.rows();if(rows.length)command[name]=rows.map(rowEl=>{const a=[...catalog,...nativeAccounts].find(x=>x.id===rowEl.querySelector('[data-field="accountId"]')?.value);const out={};for(const el of rowEl.querySelectorAll('[data-field]')){const f=el.dataset.field;if(el.disabled||!el.value.trim())continue;out[f]=f==='quantity'&&a&&context.canonicalValue?context.canonicalValue(el,a.unit,true):f==='weight'&&context.canonicalValue?context.canonicalValue(el,'GRAM',true):f==='referenceTL'&&context.canonicalValue?context.canonicalValue(el,'TL',false):el.value.trim();}return out;});}
       if(kind==='purchase'&&(!command.items?.length||!command.charges?.length)){info('Alınan ürün ve anlaşılmış alış borcu gerekli.');return;}
       if(kind==='payment'&&(!command.given?.length&&!command.received?.length||!command.credits?.length&&!command.debts?.length)){info('Gerçek karşılık ve anlaşılmış firma hesabı etkisi gerekli.');return;}
       if(data.fields.referenceTL?.trim()){if(context.parseAmount&&context.parseAmount(form.elements.referenceTL,'TL',false)===null){info('Geçerli TL referansı girin.');return;}command.referenceTL=data.fields.referenceTL.trim();}
