@@ -2053,7 +2053,24 @@ $('.sidebar')?.addEventListener('keydown', event => {
     setNavigationOpen(false); $('#navigation-toggle').focus(); event.preventDefault();
   }
 });
-async function start() { applyTheme(localStorage.getItem('defter-theme')||'light');$('#theme-toggle')?.addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));$('#workspace').value = workspace; await refresh(false); }
+async function start() {
+  applyTheme(localStorage.getItem('defter-theme')||'light');
+  $('#theme-toggle')?.addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));
+  const shell=document.querySelector('.shell'), collapseBtn=$('#sidebar-collapse');
+  const applyCollapsed=collapsed=>{
+    if(!shell||!collapseBtn)return;
+    shell.classList.toggle('sidebar-collapsed',collapsed);
+    collapseBtn.setAttribute('aria-expanded',String(!collapsed));
+    collapseBtn.textContent=collapsed?'»':'«';
+    collapseBtn.setAttribute('aria-label',collapsed?'Menüyü genişlet':'Menüyü daralt');
+    collapseBtn.title=collapsed?'Menüyü genişlet':'Menüyü daralt';
+    try{localStorage.setItem('defter-sidebar-collapsed',collapsed?'1':'0');}catch{}
+  };
+  applyCollapsed((()=>{try{return localStorage.getItem('defter-sidebar-collapsed')==='1';}catch{return false;}})());
+  collapseBtn?.addEventListener('click',()=>applyCollapsed(!shell.classList.contains('sidebar-collapsed')));
+  $('#workspace').value = workspace;
+  await refresh(false);
+}
 start();
 
 function inventoryMatches(item, query) {

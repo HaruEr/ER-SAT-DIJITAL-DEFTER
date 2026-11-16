@@ -1,6 +1,19 @@
 // Per-tab authorization keeps separate local editor ports and users isolated.
 (() => {
   const key = 'defter-session';
+  const themeKey = 'defter-theme';
+  function applySharedTheme(theme) {
+    const selected = theme === 'dark' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = selected;
+    const button = document.querySelector('#theme-toggle');
+    if (button) {
+      button.textContent = selected === 'dark' ? 'Gündüz modu' : 'Gece modu';
+      button.setAttribute('aria-pressed', String(selected === 'dark'));
+      button.setAttribute('aria-label', selected === 'dark' ? 'Gündüz moduna geç' : 'Gece moduna geç');
+    }
+    try { localStorage.setItem(themeKey, selected); } catch {}
+  }
+  applySharedTheme((() => { try { return localStorage.getItem(themeKey); } catch { return null; } })() || 'light');
   function current() {
     try { return JSON.parse(sessionStorage.getItem(key)); } catch { return null; }
   }
@@ -41,7 +54,12 @@
     sessionStorage.setItem('defter-restore-complete','1');
     lock();
   }
-  window.DefterSession = { current, clear, lock, api, store, finishRestore };
+  window.DefterSession = { current, clear, lock, api, store, finishRestore, applyTheme: applySharedTheme };
+  if (location.pathname !== '/owner') {
+    document.querySelector('#theme-toggle')?.addEventListener('click', () => {
+      applySharedTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+    });
+  }
   if (location.pathname === '/') return;
   const session = current();
   if (!session || session.expiresAt <= Date.now()) { lock(); return; }
