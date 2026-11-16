@@ -621,7 +621,7 @@ function receiptReference(id, suffix='') {
   return '<span data-receipt-label="'+esc(id)+'" data-receipt-suffix="'+esc(suffix)+'">'+esc((entry?receiptChoiceText(entry):'Fiş bilgisi yükleniyor')+suffix)+'</span>';
 }
 function receiptTechnical(ids) {
-  return '<details data-receipt-technical><summary>Teknik kayıt bilgileri</summary><p style="overflow-wrap:anywhere">'+ids.filter(Boolean).map(esc).join(' · ')+'</p></details>';
+  return '<details data-receipt-technical><summary>Teknik kayıt bilgileri</summary><p class="wrap-anywhere">'+ids.filter(Boolean).map(esc).join(' · ')+'</p></details>';
 }
 async function hydrateReceiptLabels(root) {
   const selectedWorkspace=workspace,revision=state.revision;
@@ -654,7 +654,7 @@ function renderCustomerOrders(panel, customer) {
     '<details data-scrap-transfer><summary>Hurda alış borcunu avansa ayır</summary><form class="form-grid" data-order-action="scrapAdvanceTransfer" data-order="' + esc(order.id) + '">' +
     '<p class="context-note full">Kaynak hurda alışını seçin. Aktarım, bu alıştan avansa ayrılmamış tutar ve müşteriye güncel net borcumuzla sınırlıdır.</p>' +
     '<label class="field">Alış kaydı ara<input type="search" data-scrap-query maxlength="160"></label><button type="button" class="button secondary" data-find-scrap>Alışları göster</button>' +
-    '<label class="field full">Kaynak hurda alışı<select name="purchaseId" required><option value="">Alış seçin</option></select></label><details><summary>Teknik kayıt bilgileri</summary><p data-source-id style="overflow-wrap:anywhere"></p></details><p class="context-note full" data-source-limit aria-live="polite"></p>' +
+    '<label class="field full">Kaynak hurda alışı<select name="purchaseId" required><option value="">Alış seçin</option></select></label><details><summary>Teknik kayıt bilgileri</summary><p data-source-id class="wrap-anywhere"></p></details><p class="context-note full" data-source-limit aria-live="polite"></p>' +
     amountField + '<label class="field full">Aktarım anlaşması / açıklaması<input name="note" required maxlength="160"></label>' +
     '<p class="info neutral full" data-scrap-preview aria-live="polite"></p><button class="button">Seçilen borcu avansa aktar</button></form></details>';
   const undoForm = order => {
@@ -1548,7 +1548,7 @@ function bindPriorScrapLink(article, sale, reversed, current) {
   panel.innerHTML = `<summary>Önceki hurda alışını ilişkilendir</summary>
     <label class="field"><span>${esc(account(partyId).name)} · Satıştan önceki hurda alışı</span><select></select></label>
     <p class="context-note">Bağlantı yalnızca iki kaydı müşteri geçmişinde bir araya getirir. Stok, ödeme ve cari bakiyeler aynı kalır.</p>
-    <p role="status" class="context-note"></p><details><summary>Teknik kayıt bilgileri</summary><p data-link-id style="overflow-wrap:anywhere"></p></details>
+    <p role="status" class="context-note"></p><details><summary>Teknik kayıt bilgileri</summary><p data-link-id class="wrap-anywhere"></p></details>
     <button type="button" class="button secondary compact" data-more-scrap hidden>Daha eski alışları göster</button>
     <button type="button" class="button secondary compact" data-link-purchase disabled>Seçili alışı satışa bağla</button>`;
   article.append(panel);
@@ -1587,7 +1587,7 @@ function bindPriorScrapLink(article, sale, reversed, current) {
     submitButton.disabled = !select.value;
     panel.querySelector('[data-link-id]').textContent=select.value||'Alış seçilmedi';
     if (select.value) {
-      status.style.overflowWrap = 'anywhere';
+      status.classList.add('wrap-anywhere');
       status.textContent = 'Seçilen alış · ' + select.selectedOptions[0].textContent;
     } else status.textContent = (select.length-1) + ' alış gösteriliyor.';
   });
@@ -2077,7 +2077,7 @@ function renderInventoryCards() {
     ${field('itemDescription','Ürün açıklaması',{required:false})}
     <label class="field"><span>Fotoğraf · isteğe bağlı</span><input type="file" id="item-photo-file" accept="image/jpeg,image/png"><small>JPEG veya PNG, en çok 8 MiB. 96 × 96 önizleme saklanır.</small></label></div><details><summary>Brüt/net gram, milyem ve alış bağlantısı</summary><div class="form-grid">
     ${field('itemGross','Brüt ağırlık · gr',{required:false,max:24})}${field('itemNet','Net ağırlık · gr',{required:false,max:24})}
-    ${field('itemFineness','Milyem',{required:false,max:4})}<label class="field"><span>Alış ara · tarih veya açıklama</span><input type="search" data-item-purchase-query maxlength="160"></label><button type="button" class="button secondary" data-find-item-purchase>Alışları göster</button><label class="field"><span>Alış fişi / ürün satırı · isteğe bağlı</span><select name="itemPurchaseChoice"><option value="">Alış bağlantısı yok</option></select></label><p role="status" data-item-purchase-status></p><details><summary>Teknik kayıt bilgileri</summary><p data-item-purchase-id style="overflow-wrap:anywhere">Alış seçilmedi</p></details></div></details>
+    ${field('itemFineness','Milyem',{required:false,max:4})}<label class="field"><span>Alış ara · tarih veya açıklama</span><input type="search" data-item-purchase-query maxlength="160"></label><button type="button" class="button secondary" data-find-item-purchase>Alışları göster</button><label class="field"><span>Alış fişi / ürün satırı · isteğe bağlı</span><select name="itemPurchaseChoice"><option value="">Alış bağlantısı yok</option></select></label><p role="status" data-item-purchase-status></p><details><summary>Teknik kayıt bilgileri</summary><p data-item-purchase-id class="wrap-anywhere">Alış seçilmedi</p></details></div></details>
     ${action('Tekil ürünü kaydet','Kayıt stok miktarını veya kasa bakiyesini değiştirmez.')}</form></details>
     <label class="field"><span>Tekil ürün ara</span><input type="search" id="inventory-card-search" maxlength="160" autocomplete="off"></label>
     <div id="inventory-card-list" aria-live="polite"></div>`;
