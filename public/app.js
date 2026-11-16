@@ -2,6 +2,7 @@ const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const codec = globalThis.DefterAmountCodec;
 const dateFmt = globalThis.DefterDateFormat;
+const uiKit = globalThis.DefterUI;
 const units = codec ? codec.units : new Proxy({ TL: { scale: 100, digits: 2, label: 'TL' }, USD: { scale: 100, digits: 2, label: 'USD' }, EUR: { scale: 100, digits: 2, label: 'EUR' }, GRAM: { scale: 1000, digits: 3, label: 'gr' }, HAS: { scale: 1000, digits: 3, label: 'has gr' }, SILVER: { scale: 1000, digits: 3, label: 'saf gümüş gr' }, ADET: { scale: 1, digits: 0, label: 'adet' } }, { get: (known, code) => Object.hasOwn(known, code) ? known[code] : { scale: 100, digits: 2, label: String(code) } });
 let state, view = 'overview', transactionTab = 'sale', busy = false, editingTransaction = null, partyReturnContext = null;
 let busyControls = new Map();
@@ -80,8 +81,19 @@ function today() { if (dateFmt) return dateFmt.todayIstanbul(); const parts = Ob
 function account(id) { return state.accounts.find(a => a.id === id); }
 function activeAccounts() { return state.accounts.filter(a => !a.retired).sort((a,b)=>(a.displayOrder??90)-(b.displayOrder??90)); }
 function summaryAccountLabel(id) { const a = account(id); return esc(a?.name || id) + (a?.retired ? '<br><small>Eski hesap · yeni işleme kapalı</small>' : ''); }
-function inform(message, error = false) {
+function inform(message, error = false, { persistent = false } = {}) {
   const notice = $('#notice');
+  if (uiKit && !error && !persistent) {
+    uiKit.clearBanner(notice);
+    notice.setAttribute('role', 'status');
+    notice.setAttribute('aria-live', 'polite');
+    uiKit.toast(message, { kind: 'success' });
+    return;
+  }
+  if (uiKit) {
+    uiKit.showBanner(notice, message, { kind: error ? 'error' : 'info', focus: error });
+    return;
+  }
   notice.setAttribute('role', error ? 'alert' : 'status');
   notice.setAttribute('aria-live', error ? 'assertive' : 'polite');
   notice.setAttribute('aria-atomic', 'true');
@@ -122,7 +134,7 @@ async function refresh(announce = true) {
   const previousFocus = document.activeElement;
   if (!state) { $('#business-date').textContent = 'Yükleniyor…'; $('#main').innerHTML = '<div class="loading" role="status"><strong>Defter açılıyor…</strong><span>Yerel kayıtlar hazırlanıyor.</span></div>'; }
   setBusy(true);
-  try { const loaded = await request('state', undefined, selectedWorkspace); if (workspace !== selectedWorkspace || generation !== recoveryGeneration) return; state = loaded; render(); if (!previousFocus?.isConnected) $('#main').focus({ preventScroll: true }); if (announce) inform('Defter yenilendi. Sayım formu açıksa fiziki sayıları yeniden kontrol ederek girin.'); }
+  try { const loaded = await request('state', undefined, selectedWorkspace); if (workspace !== selectedWorkspace || generation !== recoveryGeneration) return; state = loaded; render(); if (!previousFocus?.isConnected) $('#main').focus({ preventScroll: true }); if (announce) inform('Defter yenilendi. Sayım formu açıksa fiziki sayıları yeniden kontrol ederek girin.', false, { persistent: true }); }
   catch (e) { if (workspace !== selectedWorkspace || generation !== recoveryGeneration) return; if (!state) renderLoadError(e.message); inform(`Defter bilgileri alınamadı: ${e.message}`, true); }
   finally { setBusy(false); if (workspace !== selectedWorkspace) await refresh(announce); }
 }
@@ -228,7 +240,7 @@ async function submit(command, message = 'İşlem kaydedildi.', envelope, effect
     }
     if(content.command.type==='close'&&result.queried)inform('Kapanış kaydı defterde doğrulandı; ikinci kez gönderilmedi. Dosya yedeğinin durumunu Yedek ekranından ayrıca kontrol edin.',true);
     else if (content.command.type === 'close' && result.backupStatus?.saved === false) inform(`GÜN KAPANDI ve yeni gün açıldı; ancak YEDEK ALINAMADI: ${result.backupStatus.error || 'Dosya yazma hatası. Yedek ekranından uygun yedeği (büyük defter için akışlı arşiv) indirin.'}`, true);
-    else if (content.command.type === 'close' && result.backupStatus?.saved) inform(`${result.duplicate ? 'Bu kapanış daha önce kaydedilmişti; ikinci kez işlenmedi.' : message} Dosya yedeği doğrulandı: ${result.backupStatus.filename}`);
+    else if (content.command.type === 'close' && result.backupStatus?.saved) inform(`${result.duplicate ? 'Bu kapanış daha önce kaydedilmişti; ikinci kez işlenmedi.' : message} Dosya yedeği doğrulandı: ${result.backupStatus.filename}`, false, { persistent: true });
     else inform(result.duplicate ? 'Bu işlem daha önce kaydedilmişti. İkinci kez yazılmadı.' : message);
     return true;
   } catch (e) {
@@ -284,6 +296,7 @@ function setView(next) {
   setNavigationOpen(false);
   captureDrafts();
   if (partyReturnContext && (partyReturnContext.workspace !== workspace || next !== partyReturnContext.ownerView)) partyReturnContext = null;
+  uiKit?.clearToasts(); uiKit?.closePopover();
   view = next; $('#notice').hidden = true; render(); $('#main').focus({ preventScroll: true });$('#main').scrollIntoView?.({block:'start',behavior:'instant'});
 }
 function canonicalTransactionRoute() {
@@ -561,7 +574,7 @@ function renderAccounts(stock=false){
     const load=async()=>{
       const ticket=++sequence,result=$('#statement-result'),status=$('#statement-status'),filters={accountId:id,startDate:$('#statement-start').value,endDate:$('#statement-end').value};
       const current=()=>ticket===sequence&&result.isConnected&&view===expectedView&&workspace===selectedWorkspace&&state.revision===expectedRevision;
-      result.textContent='';panel.querySelector('[data-current-balance]').textContent='';status.textContent='Ekstre hazırlanıyor…';
+      result.textContent='';panel.querySelector('[data-current-balance]').textContent='';status.textContent='Ekstre hazırlanıyor…';uiKit?.renderSkeleton(result,{variant:'table',rows:4,label:'Ekstre hazırlanıyor'});
       try{
         if(filters.startDate&&filters.endDate&&filters.startDate>filters.endDate)throw new Error('Başlangıç tarihi bitiş tarihinden sonra olamaz.');
         const [statement,page]=await Promise.all([request('account-statement',undefined,selectedWorkspace,{query:filters}),request('journal',undefined,selectedWorkspace,{query:{...filters,scope:'all',limit:'25'}})]);
@@ -743,7 +756,8 @@ function renderBanks(){
   const remember=changes=>workbenchMemory.set(memoryKey,{...workbenchMemory.get(memoryKey),...changes});
   const banks=financialAccounts().filter(a=>a.id!=='pos');
   $('#main').innerHTML=heading('Banka/Pos/Kasa','Banka ve fiziki kasaları para birimine göre ayrı takip edin. Nakit Diğer için her dövize ayrı hesap açın.','<button class="button" id="add-bank" type="button">+ Banka / kasa ekle</button><button class="button secondary" id="add-other-cash" type="button">+ Nakit Diğer ekle</button>')+`<section class="section" id="bank-editor" hidden></section><div class="bank-grid">${banks.map(a=>`<article class="bank-card"><span class="card-label">${esc(a.name)}</span><small>${a.physical?(a.unit==='HAS'?'Fiziki HAS hesabı':a.unit==='SILVER'?'Fiziki saf gümüş hesabı':'Fiziki kasa'):'Banka hesabı'} · ${esc(a.unit)}</small><strong class="card-value">${esc(formatted(state.balances[a.id],a.unit))}</strong><button class="button text" type="button" data-bank-journal="${esc(a.id)}">Giriş / çıkışları gör →</button><button class="button text" type="button" data-bank-rename="${esc(a.id)}">Hesap adını düzenle</button></article>`).join('')}<article class="bank-card"><span class="card-label">Bekleyen POS</span><strong class="card-value">${esc(formatted(state.balances.pos))}</strong><button class="button text" type="button" data-bank-journal="pos">POS işlemlerini gör →</button></article></div><section class="section"><div class="workbench-actions"><button type="button" class="button" data-bank-action="settlement">POS'u Bankaya Aktar</button><button type="button" class="button secondary" data-bank-action="transfer">Kasa / Banka Transferi</button></div><div id="bank-operation"></div></section><section class="section"><h2>POS İşlemleri</h2><div id="pos-history" role="status">Yükleniyor…</div></section>`;
-  // D06: presentation only; keep the existing finance forms and their handlers.
+  const posHistory = $('#pos-history');
+  if (posHistory && uiKit?.renderSkeleton) uiKit.renderSkeleton(posHistory, { variant: 'list', rows: 3, label: 'POS işlemleri yükleniyor' });
   const bankGrid=$('.bank-grid'),bankOperation=$('#bank-operation');
   const bankWorkspace=document.createElement('div');bankWorkspace.className='bank-workspace';
   bankGrid.before(bankWorkspace);bankWorkspace.append(bankOperation.closest('section'),bankGrid);
@@ -1346,8 +1360,64 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
   if(!isStock && !isPurchase && !isExchange && !supplier && state.inventoryItems?.length) bindSaleInventory(form,rows,addRow,updateTotals);
   if(!isExchange)addRow();
   if(!isStock&&view!=='edit'){
-    container.insertAdjacentHTML('beforeend',`<div class="section owner-shortcuts"><h3>${supplier?'Yeni bir firmadan mı alış yapıyorsunuz?':'Müşteri listede yok mu?'}</h3><p class="context-note">${supplier?'Firma bilgileri Toptancılar ekranında tutulur.':'Müşteri bilgileri Müşteri Ekranı’nda tutulur.'} Ürün ve ödeme taslağınız korunur; hesap eklendiğinde bu işleme dönersiniz.</p><button type="button" class="button secondary" data-create-party>${supplier?'Toptancı ekle ve işleme dön':'Müşteri Ekranı’nda müşteri ekle →'}</button></div>`);
-    container.querySelector('[data-create-party]').addEventListener('click',()=>startPartyCreation(form,mode));
+    const partyBox = form.querySelector('.trade-party');
+    const partySelect = form.querySelector('#f-counterpartyId');
+    if (partyBox && partySelect && uiKit?.openPopover) {
+      const infoBtn = document.createElement('button');
+      infoBtn.type = 'button';
+      infoBtn.className = 'button secondary compact';
+      infoBtn.dataset.partyPopover = 'true';
+      infoBtn.textContent = 'Cari özeti';
+      const syncPopoverBtn = () => { infoBtn.disabled = !partySelect.value; infoBtn.hidden = !partySelect.value; };
+      partySelect.addEventListener('change', () => { uiKit.closePopover(); syncPopoverBtn(); });
+      infoBtn.addEventListener('click', () => {
+        const a = account(partySelect.value);
+        if (!a) return;
+        const bal = state.balances[a.id] || 0;
+        const balText = `${formatted(Math.abs(bal), a.unit)} · ${bal > 0 ? 'Alacağımız' : bal < 0 ? 'Borcumuz' : 'Bakiye sıfır'}`;
+        uiKit.openPopover(infoBtn, {
+          title: a.name,
+          content: `<p><strong>Bakiye:</strong> ${esc(balText)}</p>${a.phone ? `<p><strong>Telefon:</strong> ${esc(a.phone)}</p>` : ''}${a.taxId ? `<p><strong>TC/VKN:</strong> ${esc(a.taxId)}</p>` : ''}${a.address ? `<p><strong>Adres:</strong> ${esc(a.address)}</p>` : ''}`
+        });
+      });
+      partyBox.append(infoBtn);
+      syncPopoverBtn();
+    }
+    container.insertAdjacentHTML('beforeend',`<div class="section owner-shortcuts"><h3>${supplier?'Yeni bir firmadan mı alış yapıyorsunuz?':'Müşteri listede yok mu?'}</h3><p class="context-note">${supplier?'Firma bilgileri Toptancılar ekranında tutulur.':'Müşteri bilgileri Müşteri Ekranı’nda tutulur.'} Ürün ve ödeme taslağınız korunur; hesap eklendiğinde bu işleme dönersiniz.</p><button type="button" class="button secondary" data-create-party>${supplier?'Toptancı ekle ve işleme dön':'Hızlı müşteri kartı oluştur'}</button></div>`);
+    container.querySelector('[data-create-party]').addEventListener('click', async event => {
+      if (supplier || !uiKit?.openDrawer) { startPartyCreation(form, mode); return; }
+      const drawerForm = document.createElement('form');
+      drawerForm.className = 'defter-confirm-form';
+      drawerForm.innerHTML = `<div class="notice" hidden></div><div class="form-grid">${field('name','Müşteri adı')}${field('unit','Hesap birimi',{options:[['TL','TL'],['HAS','HAS'],['USD','USD'],['EUR','EUR']]})}${field('phone','Telefon',{required:false,max:30})}${field('taxId','TC / VKN',{required:false,max:11})}${field('address','Adres',{full:true,required:false,max:300})}</div>${action('Müşteriyi kaydet ve seç','Satış taslağınız korunur.')}`;
+      connectFieldHints(drawerForm);
+      const drawer = uiKit.openDrawer({ title: 'Yeni Müşteri Kartı', subtitle: 'Satış ekranından ayrılmadan hızlı kayıt', content: drawerForm, trigger: event.currentTarget });
+      drawerForm.addEventListener('submit', async submitEvent => {
+        submitEvent.preventDefault();
+        if (!drawerForm.reportValidity()) return;
+        const vals = formValues(drawerForm);
+        const btn = drawerForm.querySelector('button[type="submit"]');
+        const drawerNotice = drawerForm.querySelector('.notice');
+        uiKit.clearBanner(drawerNotice);
+        btn.disabled = true;
+        try {
+          const res = await request('command', { id: crypto.randomUUID(), revision: state.revision, command: { type: 'account', date: state.date || today(), name: vals.name.trim(), unit: vals.unit, opening: '0', partyType: 'customer', ...(vals.phone?.trim() && { phone: vals.phone.trim() }), ...(vals.taxId?.trim() && { taxId: vals.taxId.trim() }), ...(vals.address?.trim() && { address: vals.address.trim() }) } }, workspace);
+          state = res.state;
+          const createdId = res.state.journal.at(-1)?.meta?.accountId;
+          drawer.close('saved');
+          captureDrafts();
+          render();
+          const select = $('#f-counterpartyId');
+          if (select && createdId && [...select.options].some(o => o.value === createdId)) {
+            select.value = createdId;
+            select.dispatchEvent(new Event('change'));
+          }
+          inform('Müşteri kartı oluşturuldu ve seçildi.');
+        } catch (err) {
+          uiKit.showBanner(drawerNotice, err.message, { kind: 'error', focus: false });
+          btn.disabled = false;
+        }
+      });
+    });
   }
   connectFieldHints(container);if(view!=='edit')prepareDraftForms();if(isExchange)updateTotals();
 }
@@ -2055,7 +2125,7 @@ function bindRestoreForm({ revision, selectedWorkspace = workspace, recovery = f
       if (!current()) return;
       if (!result?.state || typeof result.state !== 'object') throw new Error('Geri yükleme sonucu doğrulanamadı.');
       if (result.reauthenticate === true) { window.DefterSession.finishRestore(); return; }
-      clearWorkspaceDrafts(selectedWorkspace); state = result.state; render(); $('#main').focus({ preventScroll: true }); inform('Yedek doğrulanarak geri yüklendi. Önceki aktif geçmiş sunucudaki geri yükleme arşivinde korundu.');
+      clearWorkspaceDrafts(selectedWorkspace); state = result.state; render(); $('#main').focus({ preventScroll: true }); inform('Yedek doğrulanarak geri yüklendi. Önceki aktif geçmiş sunucudaki geri yükleme arşivinde korundu.', false, { persistent: true });
     } catch (error) {
       if (!current()) return;
       if (acknowledged) {

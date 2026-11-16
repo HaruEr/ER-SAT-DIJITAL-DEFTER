@@ -204,7 +204,7 @@
     }, true);
   }
 
-  root.DefterAmountCodec = {
+  const exportsObj = {
     units,
     formatAmount,
     canonicalFromScaled,
@@ -212,4 +212,6 @@
     parseInputElement,
     canonicalInputValue
   };
-})(globalThis);
+  root.DefterAmountCodec = exportsObj;
+  if (typeof globalThis !== 'undefined') globalThis.DefterAmountCodec = exportsObj;
+})(typeof window !== 'undefined' ? window : globalThis);

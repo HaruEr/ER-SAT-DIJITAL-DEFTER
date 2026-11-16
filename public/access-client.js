@@ -91,6 +91,9 @@
       link.href = result.url;
       link.download = '';
       link.click();
-    } catch (error) { window.alert(error.message); }
+    } catch (error) {
+      if (window.DefterUI?.toast) window.DefterUI.toast(error.message, { kind: 'warning', durationMs: 5000 });
+      else window.alert(error.message);
+    }
   });
 })();

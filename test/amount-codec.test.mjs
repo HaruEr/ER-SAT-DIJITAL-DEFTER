@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { JSDOM } from 'jsdom';
+import { readFileSync } from 'node:fs';
 import '../public/amount-codec.js';
 import '../public/date-format.js';
 import { quantity, decimal, applyEvent, emptyState, INITIAL_ACCOUNTS } from '../domain.mjs';
@@ -133,6 +135,70 @@ test('Server domain rejects uncanonical grouped input while accepting canonical 
     const legacyState = emptyState();
     const nextLegacy = applyEvent(legacyState, { id: 'leg-1', schemaVersion: 3, timestamp: '2025-01-01T10:00:00Z', command: { type: 'opening', date: '2025-01-01', balances: { ...balances, bilezik22: '10.500' } } });
     assert.equal(nextLegacy.balances.bilezik22, 10500);
+  } finally {
+    repo.close();
+  }
+});
+
+test('Paket 1B extra regressions: table-driven multi-unit matrix, resolution invalidation on user edit, and v16/v17 replay independence', () => {
+  const cases = [
+    ['TL', '1.250,75', 'valid', '1250.75', 125075, '1.250,75 TL'],
+    ['USD', '2.500,50', 'valid', '2500.50', 250050, '2.500,50 USD'],
+    ['EUR', '100,05', 'valid', '100.05', 10005, '100,05 EUR'],
+    ['GBP', '45.000', 'valid', '45000', 4500000, '45.000,00 GBP'],
+    ['ADET', '1.250', 'valid', '1250', 1250, '1.250 adet'],
+    ['ADET', '1,5', 'invalid', null, null, null],
+    ['GRAM', '0,125', 'valid', '0.125', 125, '0,125 gr'],
+    ['HAS', '10.500', 'ambiguous', null, null, null],
+    ['SILVER', '10.500', 'ambiguous', null, null, null]
+  ];
+  for (const [unit, rawInput, expectedStatus, expectedCanonical, expectedScaled, expectedFormatted] of cases) {
+    const res = codec.parseUserAmount(rawInput, unit, { positive: true });
+    assert.equal(res.status, expectedStatus, `${unit} ${rawInput}`);
+    if (expectedStatus === 'valid') {
+      assert.equal(res.canonical, expectedCanonical);
+      assert.equal(res.scaled, expectedScaled);
+      assert.equal(res.formatted, expectedFormatted);
+      assert.equal(quantity(res.canonical, unit), expectedScaled);
+    }
+  }
+
+  // Resolution invalidation when user edits input value after disambiguating 10.500
+  const dom = new JSDOM('<!doctype html><html><body><label class="field"><input id="w" type="text"></label></body></html>');
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  globalThis.Event = dom.window.Event;
+  globalThis.HTMLInputElement = dom.window.HTMLInputElement;
+  dom.window.eval(readFileSync(new URL('../public/amount-codec.js', import.meta.url), 'utf8'));
+  const input = dom.window.document.getElementById('w');
+  input.value = '10.500';
+  assert.equal(dom.window.DefterAmountCodec.parseInputElement(input, 'HAS', true), null);
+  dom.window.document.querySelector('[data-amount-choice="decimal"]').click();
+  assert.equal(input.dataset.amountResolution, 'decimal');
+  assert.equal(dom.window.DefterAmountCodec.parseInputElement(input, 'HAS', true), 10500);
+
+  // User edits input -> trusted input clears prior resolution so new 10.500 is ambiguous again
+  input.value = '10.500';
+  delete input.dataset.amountResolution;
+  assert.equal(dom.window.DefterAmountCodec.parseInputElement(input, 'HAS', true), null);
+  assert.ok(dom.window.document.querySelector('.amount-disambiguation'));
+
+  // Historical v16/v17-style stored events replay identically independent of UI codec
+  const repo = new Repository(':memory:', 'legacy-v16-v17');
+  try {
+    const balances = Object.fromEntries(INITIAL_ACCOUNTS.filter(a => !a.retired).map(a => [a.id, '0']));
+    balances.nakit = '10000';
+    balances.bilezik22 = '10.500';
+    repo.execute({ id: 'v16-open', revision: 0, command: { type: 'opening', date: '2026-05-01', balances } });
+    const backup = repo.backup();
+    const restored = new Repository(':memory:', 'legacy-v16-v17');
+    try {
+      restored.restore({ backup, revision: 0, confirmation: 'GERİ YÜKLE' });
+      assert.equal(restored.state().balances.bilezik22, 10500);
+      assert.equal(restored.state().balances.nakit, 1000000);
+    } finally {
+      restored.close();
+    }
   } finally {
     repo.close();
   }
