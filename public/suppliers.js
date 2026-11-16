@@ -320,8 +320,10 @@ function renderSupplierRead(panel, context) {
   const {escape:esc,format,day,state,partyId,kind}=context;
   let disposed=false,generation=0,snapshot=null,printing=false;
   const doc=panel.ownerDocument,scope={supplierId:partyId,startDate:'',endDate:'',limit:50,documents:'omit'},revision=state.revision;
-  panel.insertAdjacentHTML('beforeend','<form data-supplier-period class="form-grid"><label class="field"><span>Başlangıç tarihi</span><input type="date" name="startDate"></label><label class="field"><span>Bitiş tarihi</span><input type="date" name="endDate"></label><button class="button secondary">Dönemi göster</button></form><p role="status" data-supplier-read-status></p><div data-supplier-read-result></div><button type="button" class="button secondary" data-supplier-more hidden>Daha eski hareketleri göster</button><button type="button" class="button" data-supplier-print disabled>Yazdır</button><button type="button" class="button secondary" data-supplier-pdf disabled>PDF indir</button><button type="button" class="button secondary" data-supplier-csv disabled>CSV indir</button>');
-  const form=panel.querySelector('[data-supplier-period]'),status=panel.querySelector('[data-supplier-read-status]'),result=panel.querySelector('[data-supplier-read-result]'),more=panel.querySelector('[data-supplier-more]'),print=panel.querySelector('[data-supplier-print]'),csv=panel.querySelector('[data-supplier-csv]'),pdf=panel.querySelector('[data-supplier-pdf]');
+  panel.insertAdjacentHTML('beforeend','<form data-supplier-period class="form-grid"><label class="field"><span>Başlangıç tarihi</span><input type="date" name="startDate"></label><label class="field"><span>Bitiş tarihi</span><input type="date" name="endDate"></label>'+(kind==='history'?'<label class="field"><span>Hareketlerde ara</span><input type="search" data-supplier-history-search placeholder="İşlem, ürün veya açıklama…" maxlength="160"></label>':'')+'<button class="button secondary">Dönemi göster</button></form><p role="status" data-supplier-read-status></p><div data-supplier-read-result></div><button type="button" class="button secondary" data-supplier-more hidden>Daha eski hareketleri göster</button><button type="button" class="button" data-supplier-print disabled>Yazdır</button><button type="button" class="button secondary" data-supplier-pdf disabled>PDF indir</button><button type="button" class="button secondary" data-supplier-csv disabled>CSV indir</button>');
+  const form=panel.querySelector('[data-supplier-period]'),historySearch=form.querySelector('[data-supplier-history-search]'),status=panel.querySelector('[data-supplier-read-status]'),result=panel.querySelector('[data-supplier-read-result]'),more=panel.querySelector('[data-supplier-more]'),print=panel.querySelector('[data-supplier-print]'),csv=panel.querySelector('[data-supplier-csv]'),pdf=panel.querySelector('[data-supplier-pdf]');
+  const filterEvents=events=>{const q=normalize(historySearch?.value||'');return !q?events:events.filter(e=>normalize([e.label,day(e.date),e.meta?.note,e.id,...(e.meta?.lines||[]).map(l=>(state.accounts||[]).find(a=>a.id===l.accountId)?.name||'')].filter(Boolean).join(' ')).includes(q));};
+  historySearch?.addEventListener('input',()=>{if(snapshot)result.innerHTML=eventsMarkup(filterEvents(snapshot.events),true);});
   const current=ticket=>!disposed&&panel.isConnected&&ticket===generation;
   const signature=page=>JSON.stringify([page.revision,page.supplier?.id,page.accounts,page.statements,page.startDate,page.endDate,page.total]);
   const signed=(n,unit)=>Number.isSafeInteger(n)?(n<0?'−':n>0?'+':'')+format(Math.abs(n),unit):'Belirtilmedi';
@@ -565,6 +567,21 @@ async function renderSupplierDocumentTask(panel, context) {
   const review=doc.createElement('button');review.type='button';review.className='button secondary';review.dataset.reviewCurrent='';review.textContent='Güncel belgelerle kontrol ettim';review.hidden=!stale();form.append(review);
   review.addEventListener('click',()=>{stamp={revision,date:state.date};review.hidden=true;dirty=true;remember();status.textContent='Güncel belge miktarlarını kontrol edip kaydedin.';});
   if(kind==='return')form.insertAdjacentHTML('beforeend','<div data-return-preview class="info neutral" aria-live="polite"></div>');
+  if(kind==='allocation'||kind==='offset')form.insertAdjacentHTML('beforeend','<div data-document-preview class="info neutral" aria-live="polite"></div>');
+  const docPreview=form.querySelector('[data-document-preview]');
+  function updateDocPreview(){
+    if(!docPreview)return;
+    const links=sourcePicker?.snapshot()||[];
+    if(kind==='allocation'){
+      const count=links.filter(l=>l.choice&&l.quantity?.trim()).length;
+      docPreview.textContent=count?`${count} adet kaynak-alış eşleştirmesi kaydedilecek. Kasa, stok ve cari bakiyeler değişmez.`:'Eşleştirilecek kaynak ve hedef alış belgesi seçin.';
+    }
+    if(kind==='offset'){
+      const fromAcc=accounts.find(a=>a.id===form.elements.fromAccountId?.value),toAcc=accounts.find(a=>a.id===form.elements.toAccountId?.value);
+      const fq=form.elements.fromQuantity?.value.trim()||'—',tq=form.elements.toQuantity?.value.trim()||'—';
+      docPreview.textContent=`Önizleme: ${fromAcc?unitLabel(fromAcc.unit):'Alacak'} (${fq}) → ${toAcc?unitLabel(toAcc.unit):'Borç'} (${tq}) · ${links.filter(l=>l.choice&&l.quantity?.trim()).length} kaynak bağlı.`;
+    }
+  }
   const save=doc.createElement('button');save.className='button';save.textContent={allocation:'Tahsisi kaydet',offset:'Hesap mahsubunu kaydet',return:'Alış iadesini kaydet',legacyLink:'Eski tahsilat kaynaklarını kaydet'}[kind];form.append(save);
   function capture(){
     const fields=Object.fromEntries([...form.querySelectorAll('[name]')].map(input=>[input.name,input.value]));
@@ -572,7 +589,7 @@ async function renderSupplierDocumentTask(panel, context) {
     const targets=targetHost?[...targetHost.children].map(row=>Object.fromEntries([...row.querySelectorAll('[data-target-field]')].map(input=>[input.dataset.targetField,input.type==='checkbox'?input.checked:input.value]))):[];
     return {fields,arrays,targets,links:sourcePicker?.snapshot()||[],stamp,...(saved?.amend?{amend:saved.amend,recordLabel:saved.recordLabel}:{})};
   }
-  function remember(){if(dirty&&!completed)memory.set(key,capture());returnPreview();}
+  function remember(){if(dirty&&!completed)memory.set(key,capture());returnPreview();updateDocPreview();}
   function returnPreview(){
     const target=form.querySelector('[data-return-preview]');if(!target)return;
     const purchase=refundable.find(p=>p.id===form.elements.originalId.value);
