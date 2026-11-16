@@ -362,6 +362,109 @@
     });
   }
 
+  let activePopover = null;
+
+  function closePopover(restoreFocus = false) {
+    if (!activePopover) return;
+    const { pop, anchor, onDocDown, onKeyDown, onClose } = activePopover;
+    activePopover = null;
+    document.removeEventListener('pointerdown', onDocDown, true);
+    document.removeEventListener('mousedown', onDocDown, true);
+    document.removeEventListener('keydown', onKeyDown, true);
+    pop.remove();
+    anchor?.setAttribute('aria-expanded', 'false');
+    if (restoreFocus && anchor?.isConnected) anchor.focus({ preventScroll: true });
+    onClose?.();
+  }
+
+  function openPopover(anchorEl, { title = '', content = '', onClose = null } = {}) {
+    if (typeof document === 'undefined' || !document.body || !anchorEl) return null;
+    if (activePopover?.anchor === anchorEl) {
+      closePopover(true);
+      return null;
+    }
+    closePopover(false);
+
+    const pop = document.createElement('div');
+    pop.className = 'defter-popover';
+    pop.setAttribute('role', 'dialog');
+    pop.setAttribute('aria-modal', 'false');
+    const titleId = `defter-pop-title-${Date.now()}`;
+    if (title) pop.setAttribute('aria-labelledby', titleId);
+
+    const head = document.createElement('div');
+    head.className = 'defter-popover-head';
+    if (title) {
+      const strong = document.createElement('strong');
+      strong.id = titleId;
+      strong.textContent = title;
+      head.append(strong);
+    }
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'defter-popover-close';
+    closeBtn.setAttribute('aria-label', 'Bilgi kutusunu kapat');
+    closeBtn.textContent = '×';
+    closeBtn.addEventListener('click', () => closePopover(true));
+    head.append(closeBtn);
+
+    const body = document.createElement('div');
+    body.className = 'defter-popover-body';
+    if (typeof content === 'string') body.innerHTML = content;
+    else if (content instanceof Node) body.append(content);
+
+    pop.append(head, body);
+    document.body.append(pop);
+    anchorEl.setAttribute('aria-expanded', 'true');
+
+    // Position and clamp within viewport bounds
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1024;
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 768;
+    const rect = anchorEl.getBoundingClientRect?.() || { left: 16, right: 120, top: 16, bottom: 48 };
+    const popRect = pop.getBoundingClientRect?.() || { width: 280, height: 140 };
+    const popW = popRect.width || 280;
+    const popH = popRect.height || 140;
+    const left = Math.max(8, Math.min(rect.left, vw - popW - 8));
+    const top = rect.bottom + 8 + popH <= vh - 8 ? rect.bottom + 8 : Math.max(8, rect.top - popH - 8);
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
+
+    const onDocDown = event => {
+      if (!pop.contains(event.target) && !anchorEl.contains(event.target)) closePopover(false);
+    };
+    const onKeyDown = event => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closePopover(true);
+      }
+    };
+    document.addEventListener('pointerdown', onDocDown, true);
+    document.addEventListener('mousedown', onDocDown, true);
+    document.addEventListener('keydown', onKeyDown, true);
+
+    activePopover = { pop, anchor: anchorEl, onDocDown, onKeyDown, onClose };
+    closeBtn.focus({ preventScroll: true });
+    return { element: pop, close: () => closePopover(true) };
+  }
+
+  function renderSkeleton(container, { variant = 'list', rows = 4, label = 'İçerik yükleniyor' } = {}) {
+    if (!container) return null;
+    const wrap = document.createElement('div');
+    wrap.className = `defter-skeleton defter-skeleton--${variant}`;
+    wrap.setAttribute('aria-busy', 'true');
+    wrap.setAttribute('role', 'status');
+    wrap.setAttribute('aria-label', label);
+    const count = Math.max(1, Math.min(10, Number(rows) || 4));
+    for (let i = 0; i < count; i++) {
+      const line = document.createElement('div');
+      line.className = 'defter-skeleton-line';
+      wrap.append(line);
+    }
+    container.replaceChildren(wrap);
+    return wrap;
+  }
+
   const exportsObj = {
     toast,
     clearToasts,
@@ -372,6 +475,9 @@
     openModal,
     openDrawer,
     confirmCritical,
+    openPopover,
+    closePopover,
+    renderSkeleton,
     getLayerCount: () => layerStack.length
   };
   root.DefterUI = exportsObj;
