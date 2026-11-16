@@ -22,6 +22,7 @@ const staticFiles = new Map([
   ['/access-client.js', ['access-client.js', 'text/javascript; charset=utf-8']],
   ['/amount-codec.js', ['amount-codec.js', 'text/javascript; charset=utf-8']],
   ['/date-format.js', ['date-format.js', 'text/javascript; charset=utf-8']],
+  ['/ui-kit.js', ['ui-kit.js', 'text/javascript; charset=utf-8']],
   ['/users', ['users.html', 'text/html; charset=utf-8']],
   ['/users.js', ['users.js', 'text/javascript; charset=utf-8']],
   ['/access.css', ['access.css', 'text/css; charset=utf-8']],
