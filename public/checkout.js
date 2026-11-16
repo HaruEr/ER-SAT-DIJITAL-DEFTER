@@ -237,6 +237,15 @@ function totals() {
   const difference=total-(operation==='sale'?net:-net);
   $('total').textContent=format(total);
   $('balance').textContent=!$('items').children.length?'Ürün ekleyin':incomplete?'Eksik tutarları tamamlayın':difference===0?'Tam dengeli':'Fark '+format(difference);
+  const eq=$('checkout-equation');
+  if(eq){
+    const balanced=Boolean($('items').children.length)&&!incomplete&&difference===0;
+    const partial=Boolean($('items').children.length)&&(incomplete||difference>0);
+    eq.classList.toggle('is-balanced',balanced);
+    eq.classList.toggle('is-partial',!balanced&&partial);
+    eq.classList.toggle('is-error',!balanced&&!partial);
+  }
+  for(const btn of document.querySelectorAll('[data-add]'))btn.disabled=$(btn.dataset.add).children.length>=30;
   return {total,difference,incomplete};
 }
 function validateRow(row,product,primary) {
@@ -362,6 +371,28 @@ function queue(envelope,kind) {
   sessionStorage.setItem(pendingKey(),JSON.stringify(pending));controls();
   void sendPending();
 }
+const setCheckoutStep = step => {
+  $('trade').querySelectorAll('[data-step-panel]').forEach(panel => panel.classList.toggle('is-active', Number(panel.dataset.stepPanel) === step));
+  $('trade').querySelectorAll('[data-step-target]').forEach(tab => {
+    const active = Number(tab.dataset.stepTarget) === step;
+    tab.classList.toggle('is-active', active);
+    tab.setAttribute('aria-current', active ? 'step' : 'false');
+  });
+};
+$('trade').querySelectorAll('[data-step-target]').forEach(btn => btn.addEventListener('click', () => setCheckoutStep(Number(btn.dataset.stepTarget))));
+$('trade').querySelectorAll('[data-step-next], [data-step-prev]').forEach(btn => btn.addEventListener('click', () => {
+  const next = Number(btn.dataset.stepNext || btn.dataset.stepPrev);
+  if (btn.dataset.stepNext) {
+    const currentPanel = btn.closest('[data-step-panel]');
+    const invalid = [...currentPanel.querySelectorAll('input,select,textarea')].find(el => !el.disabled && !el.checkValidity());
+    if (invalid) { invalid.reportValidity(); return; }
+  }
+  setCheckoutStep(next);
+}));
+$('trade').addEventListener('invalid', event => {
+  const panel = event.target?.closest?.('[data-step-panel]');
+  if (panel) setCheckoutStep(Number(panel.dataset.stepPanel));
+}, true);
 $('trade').addEventListener('submit',event=>{
   event.preventDefault();if(writing||pending||customerLoading||!snapshot||isStale())return;
   const totalsResult=totals(),c=command();

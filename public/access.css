@@ -70,3 +70,7 @@
 }
 .checkout-category-buttons { display:flex; gap:8px; flex-wrap:wrap; }
 .checkout-category-buttons .button { min-width:72px; }
+.checkout-trade-stepper [data-step-panel]:not(.is-active) { display:none; }
+.checkout-total.is-balanced { border-color:var(--positive); background:var(--positive-soft); }
+.checkout-total.is-partial { border-color:var(--gold); background:var(--warning-soft); }
+.checkout-total.is-error { border-color:var(--red); background:var(--negative-soft); }
