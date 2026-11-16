@@ -1,5 +1,7 @@
 (root => {
   const activeToasts = new Set();
+  const layerStack = [];
+  const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
   function ensureToastRegion() {
     if (typeof document === 'undefined' || !document.body) return null;
@@ -130,13 +132,247 @@
     container.append(errEl);
   }
 
+  function focusableIn(container) {
+    if (!container) return [];
+    return [...container.querySelectorAll(FOCUSABLE)].filter(el => !el.hidden && !el.closest('[hidden]'));
+  }
+
+  function setBackgroundInert(active) {
+    if (typeof document === 'undefined') return;
+    for (const selector of ['.shell', '.access-card', 'main']) {
+      const el = document.querySelector(selector);
+      if (!el || el.closest('.defter-dialog')) continue;
+      if (active) el.setAttribute('aria-hidden', 'true');
+      else el.removeAttribute('aria-hidden');
+    }
+  }
+
+  function topLayer() {
+    return layerStack[layerStack.length - 1] || null;
+  }
+
+  function openLayer({ kind = 'modal', title = '', subtitle = '', content = '', size = 'md', closeOnBackdrop = false, closeOnEsc = true, trigger = null, onClose = null } = {}) {
+    if (typeof document === 'undefined' || !document.body) return null;
+    const prevTop = topLayer();
+    const returnTarget = trigger || document.activeElement;
+
+    const dialog = document.createElement('dialog');
+    dialog.className = `defter-dialog defter-${kind} defter-dialog--${size}`;
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    const headingId = `defter-dialog-title-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    dialog.setAttribute('aria-labelledby', headingId);
+
+    const header = document.createElement('header');
+    header.className = 'defter-dialog-head';
+    const titleWrap = document.createElement('div');
+    const h2 = document.createElement('h2');
+    h2.id = headingId;
+    h2.textContent = title;
+    titleWrap.append(h2);
+    if (subtitle) {
+      const sub = document.createElement('p');
+      sub.className = 'defter-dialog-subtitle';
+      sub.textContent = subtitle;
+      titleWrap.append(sub);
+    }
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'defter-dialog-close';
+    closeBtn.setAttribute('aria-label', 'Pencereyi kapat');
+    closeBtn.textContent = '×';
+    header.append(titleWrap, closeBtn);
+
+    const body = document.createElement('div');
+    body.className = 'defter-dialog-body';
+    if (typeof content === 'string') body.innerHTML = content;
+    else if (content instanceof Node) body.append(content);
+
+    dialog.append(header, body);
+
+    let closed = false;
+    const entry = { dialog, closeOnEsc, closeOnBackdrop, returnTarget, close: null };
+
+    const handleKeydown = event => {
+      if (topLayer() !== entry) return;
+      if (event.key === 'Escape') {
+        if (closeOnEsc) {
+          event.preventDefault();
+          event.stopPropagation();
+          close('escape');
+        }
+        return;
+      }
+      if (event.key === 'Tab') {
+        const items = focusableIn(dialog);
+        if (!items.length) {
+          event.preventDefault();
+          return;
+        }
+        const first = items[0];
+        const last = items[items.length - 1];
+        if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+
+    const handleCancel = event => {
+      event.preventDefault();
+      if (topLayer() === entry && closeOnEsc) close('escape');
+    };
+
+    const handleClick = event => {
+      if (topLayer() !== entry) return;
+      if (closeOnBackdrop && event.target === dialog) close('backdrop');
+    };
+
+    function close(reason = 'programmatic') {
+      if (closed) return;
+      closed = true;
+      const idx = layerStack.indexOf(entry);
+      if (idx !== -1) layerStack.splice(idx, 1);
+      dialog.removeEventListener('keydown', handleKeydown);
+      dialog.removeEventListener('cancel', handleCancel);
+      dialog.removeEventListener('click', handleClick);
+      if (typeof dialog.close === 'function' && dialog.open) {
+        try { dialog.close(); } catch {}
+      }
+      dialog.removeAttribute('open');
+      dialog.remove();
+
+      if (prevTop && prevTop.dialog.isConnected) {
+        prevTop.dialog.removeAttribute('aria-hidden');
+      }
+      if (layerStack.length === 0) setBackgroundInert(false);
+
+      if (returnTarget && typeof returnTarget.focus === 'function' && returnTarget.isConnected) {
+        returnTarget.focus({ preventScroll: true });
+      }
+      onClose?.(reason);
+    }
+
+    entry.close = close;
+    if (prevTop) prevTop.dialog.setAttribute('aria-hidden', 'true');
+    setBackgroundInert(true);
+    layerStack.push(entry);
+    dialog.style.zIndex = String(100 + layerStack.length * 2);
+    document.body.append(dialog);
+
+    if (typeof dialog.showModal === 'function') {
+      try { dialog.showModal(); } catch { dialog.setAttribute('open', ''); }
+    } else {
+      dialog.setAttribute('open', '');
+    }
+
+    dialog.addEventListener('keydown', handleKeydown);
+    dialog.addEventListener('cancel', handleCancel);
+    dialog.addEventListener('click', handleClick);
+    closeBtn.addEventListener('click', () => close('close-button'));
+
+    const initialFocus = focusableIn(body)[0] || closeBtn;
+    initialFocus?.focus?.({ preventScroll: true });
+
+    return { dialog, body, close };
+  }
+
+  function openModal(options = {}) {
+    return openLayer({ ...options, kind: 'modal', closeOnBackdrop: options.closeOnBackdrop ?? false });
+  }
+
+  function openDrawer(options = {}) {
+    return openLayer({ ...options, kind: 'drawer', closeOnBackdrop: options.closeOnBackdrop ?? true });
+  }
+
+  function confirmCritical({ title = 'İşlemi onaylayın', impactText = '', summaryHtml = '', confirmLabel = 'Onayla', cancelLabel = 'Vazgeç', danger = true, requireReason = false, reasonLabel = 'Gerekçe', trigger = null } = {}) {
+    return new Promise(resolve => {
+      let settled = false;
+      const done = payload => {
+        if (settled) return;
+        settled = true;
+        resolve(payload);
+      };
+
+      const wrap = document.createElement('form');
+      wrap.className = 'defter-confirm-form';
+      if (impactText) {
+        const p = document.createElement('p');
+        p.className = 'defter-confirm-impact';
+        p.textContent = impactText;
+        wrap.append(p);
+      }
+      if (summaryHtml) {
+        const box = document.createElement('div');
+        box.className = 'info neutral';
+        box.innerHTML = summaryHtml;
+        wrap.append(box);
+      }
+      let reasonInput = null;
+      if (requireReason) {
+        const lbl = document.createElement('label');
+        lbl.className = 'field';
+        const span = document.createElement('span');
+        span.textContent = reasonLabel;
+        reasonInput = document.createElement('input');
+        reasonInput.name = 'reason';
+        reasonInput.required = true;
+        reasonInput.maxLength = 160;
+        lbl.append(span, reasonInput);
+        wrap.append(lbl);
+      }
+      const actions = document.createElement('div');
+      actions.className = 'defter-dialog-actions';
+      const cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.className = 'button secondary';
+      cancelBtn.textContent = cancelLabel;
+      const confirmBtn = document.createElement('button');
+      confirmBtn.type = 'submit';
+      confirmBtn.className = `button${danger ? ' danger' : ''}`;
+      confirmBtn.textContent = confirmLabel;
+      actions.append(cancelBtn, confirmBtn);
+      wrap.append(actions);
+
+      const layer = openModal({
+        title,
+        content: wrap,
+        size: 'sm',
+        closeOnBackdrop: false,
+        closeOnEsc: true,
+        trigger,
+        onClose: () => done({ confirmed: false })
+      });
+
+      cancelBtn.addEventListener('click', () => layer?.close('cancel'));
+      wrap.addEventListener('submit', event => {
+        event.preventDefault();
+        if (requireReason && reasonInput && !reasonInput.value.trim()) {
+          showFieldError(reasonInput, 'Gerekçe yazın.');
+          reasonInput.focus();
+          return;
+        }
+        const reason = reasonInput ? reasonInput.value.trim() : undefined;
+        done({ confirmed: true, ...(reason !== undefined ? { reason } : {}) });
+        layer?.close('confirmed');
+      });
+    });
+  }
+
   const exportsObj = {
     toast,
     clearToasts,
     showBanner,
     clearBanner,
     showFieldError,
-    clearFieldError
+    clearFieldError,
+    openModal,
+    openDrawer,
+    confirmCritical,
+    getLayerCount: () => layerStack.length
   };
   root.DefterUI = exportsObj;
   if (typeof globalThis !== 'undefined') globalThis.DefterUI = exportsObj;

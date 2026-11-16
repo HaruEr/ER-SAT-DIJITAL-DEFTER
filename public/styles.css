@@ -1013,3 +1013,23 @@ main:has(#summary-result) .summary-filters { gap:16px; }
 .defter-toast-body { overflow-wrap: anywhere; }
 .defter-toast-close { flex: 0 0 auto; min-width: 32px; min-height: 32px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; font-size: 18px; line-height: 1; cursor: pointer; }
 .defter-toast-close:hover { background: var(--hover); }
+.defter-dialog { padding: 0; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); color: var(--ink); box-shadow: 0 18px 48px rgb(0 0 0 / 28%); max-width: calc(100vw - 24px); max-height: calc(100dvh - 24px); overflow: hidden; display: flex; flex-direction: column; }
+.defter-dialog:not([open]) { display: none; }
+.defter-dialog::backdrop { background: rgb(24 22 19 / 58%); backdrop-filter: blur(2px); }
+.defter-modal { width: min(560px, calc(100vw - 24px)); margin: auto; }
+.defter-dialog--sm { width: min(460px, calc(100vw - 24px)); }
+.defter-dialog--lg { width: min(760px, calc(100vw - 24px)); }
+.defter-drawer { width: min(480px, 100vw); height: 100dvh; max-height: 100dvh; max-width: 100vw; margin: 0 0 0 auto; border-radius: var(--radius) 0 0 var(--radius); border-right: 0; }
+.defter-dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--line); background: var(--surface-soft); }
+.defter-dialog-head h2 { margin: 0; font-size: 19px; line-height: 1.3; }
+.defter-dialog-subtitle { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+.defter-dialog-close { flex: 0 0 auto; min-width: 36px; min-height: 36px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font-size: 20px; line-height: 1; cursor: pointer; }
+.defter-dialog-close:hover { background: var(--hover); }
+.defter-dialog-body { padding: 18px 20px; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+.defter-confirm-form { display: grid; gap: 14px; }
+.defter-confirm-impact { margin: 0; line-height: 1.5; }
+.defter-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; margin-top: 8px; }
+@media (max-width: 700px) {
+  .defter-drawer { width: 100vw; border-radius: 0; border-left: 0; }
+  .defter-dialog-head, .defter-dialog-body { padding: 14px 16px; }
+}
