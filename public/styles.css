@@ -990,3 +990,13 @@ main:has(#summary-result) .summary-filters { gap:16px; }
 .flow-track { fill: var(--surface-soft); }
 .chart-in { fill: var(--gold); }
 .chart-out { fill: var(--red); }
+.trade-form.stepper-active { display: block; }
+.stepper-bar { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 18px; }
+.stepper-tab { display: flex; align-items: center; gap: 8px; min-height: 46px; padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-soft); color: var(--muted); font-size: 14px; font-weight: 600; text-align: left; }
+.stepper-tab span { display: inline-grid; place-items: center; flex: 0 0 24px; width: 24px; height: 24px; border-radius: 50%; background: var(--line); color: var(--ink); font-size: 13px; font-weight: 700; }
+.stepper-tab.is-active { border-color: var(--gold); background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.stepper-tab.is-active span { background: var(--gold); color: var(--on-action); }
+.trade-form.stepper-active [data-step-panel]:not(.is-active) { display: none; }
+.stepper-nav { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.stepper-nav-back { margin-bottom: 14px; padding-top: 0; border-top: 0; }
+@media (max-width: 700px) { .stepper-bar { grid-template-columns: 1fr; } }
