@@ -247,7 +247,7 @@ function approvalField(name, label) {
 }
 function field(name, label, { value = '', hint = '', type = 'text', required = true, full = false, options, max = 160 } = {}) {
   const attrs = `name="${esc(name)}" id="f-${esc(name)}" ${required ? 'required aria-required="true"' : ''}${hint ? ` aria-describedby="f-${esc(name)}-hint"` : ''}`;
-  const control = options ? `<select ${attrs}>${options.map(([v, t]) => `<option value="${esc(v)}"${v === value ? ' selected' : ''}>${esc(t)}</option>`).join('')}</select>` : `<input ${attrs} type="${type}" value="${esc(value)}" ${type === 'text' ? `maxlength="${max}"` : ''} ${type === 'text' && /quantity|cash|pos|bank|total|value|opening|gross|fee|count|balance/i.test(name) ? 'inputmode="decimal" autocomplete="off"' : ''}>`;
+  const control = options ? `<select ${attrs}>${options.map(([v, t]) => `<option value="${esc(v)}"${v === value ? ' selected' : ''}>${esc(t)}</option>`).join('')}</select>` : `<input ${attrs} type="${type}" value="${esc(value)}" ${type === 'text' ? `maxlength="${max}"` : ''} ${type === 'text' && /quantity|cash|pos|bank|total|value|opening|gross|fee|count|balance|weight|net|fineness/i.test(name) ? 'inputmode="decimal" autocomplete="off"' : ''}>`;
   return `<label class="field${full ? ' full' : ''}" for="f-${esc(name)}"><span>${label}${required ? '<span class="field-required" aria-hidden="true">zorunlu</span>' : ''}</span>${control}${hint ? `<small class="field-hint" id="f-${esc(name)}-hint">${esc(hint)}</small>` : ''}</label>`;
 }
 function connectFieldHints(container) {
@@ -1107,13 +1107,23 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
     });
   };
   if (!isStock) {
-    form.querySelectorAll('[data-step-target]').forEach(btn => btn.addEventListener('click', () => setStep(Number(btn.dataset.stepTarget))));
+    const validateStep = stepNum => {
+      const panel = form.querySelector(`[data-step-panel="${stepNum}"]`);
+      const invalid = panel && [...panel.querySelectorAll('input,select,textarea')].find(el => !el.disabled && !el.checkValidity());
+      if (invalid) { setStep(stepNum); invalid.reportValidity(); return false; }
+      return true;
+    };
+    form.querySelectorAll('[data-step-target]').forEach(btn => btn.addEventListener('click', () => {
+      const target = Number(btn.dataset.stepTarget);
+      const current = Number(form.querySelector('[data-step-panel].is-active')?.dataset.stepPanel || 1);
+      if (target > current) for (let s = current; s < target; s++) if (!validateStep(s)) return;
+      setStep(target);
+    }));
     form.querySelectorAll('[data-step-next], [data-step-prev]').forEach(btn => btn.addEventListener('click', () => {
       const next = Number(btn.dataset.stepNext || btn.dataset.stepPrev);
       if (btn.dataset.stepNext) {
-        const currentPanel = btn.closest('[data-step-panel]');
-        const invalid = [...currentPanel.querySelectorAll('input,select,textarea')].find(el => !el.disabled && !el.checkValidity());
-        if (invalid) { invalid.reportValidity(); return; }
+        const current = Number(btn.closest('[data-step-panel]')?.dataset.stepPanel || 1);
+        if (!validateStep(current)) return;
       }
       setStep(next);
       form.querySelector(`[data-step-panel="${next}"]`)?.scrollIntoView?.({ block: 'nearest', behavior: 'instant' });
@@ -1361,7 +1371,7 @@ function renderTransactionEditor(container, original) {
 
 
 function measureTable(accounts, prefix, optional = false) {
-  return '<div class="table-wrap"><table class="count-table"><caption id="' + prefix + '-guide">Fark = ölçülen − beklenen. Pozitif fark fazlalık, negatif fark eksiktir. ' + (optional ? 'Boş alan ölçülmedi demektir; 0 gerçek sıfır ölçümüdür.' : 'Boş alan tamamlanmamıştır; 0 fiziksel sayım sonucudur.') + '</caption><thead><tr><th>Hesap / birim</th><th class="numeric">Beklenen</th><th>' + (optional ? 'Tartılan · boşsa ölçülmedi' : 'Sayılan') + '</th><th class="numeric">Fark</th><th>Fark gerekçesi</th></tr></thead><tbody>' + accounts.map(a => '<tr><td><strong>' + esc(a.name) + '</strong><br><span class="muted">' + esc(units[a.unit].label) + '</span></td><td class="numeric" id="' + prefix + '-expected-' + esc(a.id) + '">' + (a.id === 'gramToplam' && state.nominalUnconfirmed ? 'Açılış onayı bekliyor' : esc(formatted(state.balances[a.id], a.unit))) + '</td><td><label class="field" for="' + prefix + '-count-' + esc(a.id) + '"><span class="sr-only">' + esc(a.name) + ' ölçülen</span><input id="' + prefix + '-count-' + esc(a.id) + '" name="count-' + esc(a.id) + '" inputmode="decimal" autocomplete="off" maxlength="24" ' + (optional ? '' : 'required') + ' aria-describedby="' + prefix + '-guide ' + prefix + '-expected-' + esc(a.id) + '" data-measure="' + esc(a.id) + '" aria-label="' + esc(a.name + ' · ' + units[a.unit].label + (optional ? ' tartılan miktar' : ' günlük sayım miktarı')) + '"></label></td><td class="numeric count-diff" id="' + prefix + '-diff-' + esc(a.id) + '">—</td><td><label class="field" for="' + prefix + '-reason-' + esc(a.id) + '"><span class="sr-only">' + esc(a.name) + ' fark gerekçesi</span><input id="' + prefix + '-reason-' + esc(a.id) + '" name="reason-' + esc(a.id) + '" maxlength="160" aria-describedby="' + prefix + '-diff-' + esc(a.id) + '" aria-label="' + esc(a.name) + ' fark gerekçesi" placeholder="Fark varsa zorunlu"></label></td></tr>').join('') + '</tbody></table></div>';
+  return '<div class="table-wrap"><table class="count-table"><caption id="' + prefix + '-guide">Fark = ölçülen − beklenen. Pozitif fark fazlalık, negatif fark eksiktir. ' + (optional ? 'Boş alan ölçülmedi demektir; 0 gerçek sıfır ölçümüdür.' : 'Boş alan tamamlanmamıştır; 0 fiziksel sayım sonucudur.') + '</caption><thead><tr><th scope="col">Hesap / birim</th><th scope="col" class="numeric">Beklenen</th><th scope="col">' + (optional ? 'Tartılan · boşsa ölçülmedi' : 'Sayılan') + '</th><th scope="col" class="numeric">Fark</th><th scope="col">Fark gerekçesi</th></tr></thead><tbody>' + accounts.map(a => '<tr><td><strong>' + esc(a.name) + '</strong><br><span class="muted">' + esc(units[a.unit].label) + '</span></td><td class="numeric" id="' + prefix + '-expected-' + esc(a.id) + '">' + (a.id === 'gramToplam' && state.nominalUnconfirmed ? 'Açılış onayı bekliyor' : esc(formatted(state.balances[a.id], a.unit))) + '</td><td><label class="field" for="' + prefix + '-count-' + esc(a.id) + '"><span class="sr-only">' + esc(a.name) + ' ölçülen</span><input id="' + prefix + '-count-' + esc(a.id) + '" name="count-' + esc(a.id) + '" inputmode="decimal" autocomplete="off" maxlength="24" ' + (optional ? '' : 'required') + ' aria-describedby="' + prefix + '-guide ' + prefix + '-expected-' + esc(a.id) + '" data-measure="' + esc(a.id) + '" aria-label="' + esc(a.name + ' · ' + units[a.unit].label + (optional ? ' tartılan miktar' : ' günlük sayım miktarı')) + '"></label></td><td class="numeric count-diff" id="' + prefix + '-diff-' + esc(a.id) + '">—</td><td><label class="field" for="' + prefix + '-reason-' + esc(a.id) + '"><span class="sr-only">' + esc(a.name) + ' fark gerekçesi</span><input id="' + prefix + '-reason-' + esc(a.id) + '" name="reason-' + esc(a.id) + '" maxlength="160" aria-describedby="' + prefix + '-diff-' + esc(a.id) + '" aria-label="' + esc(a.name) + ' fark gerekçesi" placeholder="Fark varsa zorunlu"></label></td></tr>').join('') + '</tbody></table></div>';
 }
 function bindMeasureForm(formId, accounts, prefix, type) {
   const form = document.getElementById(formId), revision = state.revision, date = state.date;
@@ -1903,7 +1913,7 @@ function renderJournal() {
           if (current() && form.reportValidity()) submit({type:'reverse',originalId:event.id,note:form.elements.note.value},'Hurda alış bağlantısı iptal edildi.');
         });
       }
-      if(event.type==='saleReturn'&&!event.meta.exchangeId&&!reversed.has(event.id))article.insertAdjacentHTML('beforeend',`<details><summary>İade kaydını iptal et</summary><p class="context-note">Yanlış iadenin stok ve ödeme etkileri geri alınır. Asıl satış korunur; ardından doğru bilgilerle yeniden iade kaydedebilirsiniz.</p><form class="reverse-form" data-original="${esc(event.id)}"><label class="field"><span>Gerekçe<input name="note" required maxlength="160"></span></label><button class="button danger compact" type="submit">İade düzeltmesini gözden geçir</button></form></details>`);
+      if(event.type==='saleReturn'&&!event.meta.exchangeId&&!reversed.has(event.id))article.insertAdjacentHTML('beforeend',`<details><summary>İade kaydını iptal et</summary><p class="context-note">Yanlış iadenin stok ve ödeme etkileri geri alınır. Asıl satış korunur; ardından doğru bilgilerle yeniden iade kaydedebilirsiniz.</p><form class="reverse-form" data-original="${esc(event.id)}"><label class="field"><span>Gerekçe</span><input name="note" required maxlength="160"></label><button class="button danger compact" type="submit">İade düzeltmesini gözden geçir</button></form></details>`);
     });
     // D07: presentation only. Existing forms, guards and submit handlers stay intact.
     list.querySelectorAll('.journal-item').forEach((article,index)=>{

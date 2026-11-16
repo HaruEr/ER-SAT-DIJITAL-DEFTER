@@ -379,13 +379,23 @@ const setCheckoutStep = step => {
     tab.setAttribute('aria-current', active ? 'step' : 'false');
   });
 };
-$('trade').querySelectorAll('[data-step-target]').forEach(btn => btn.addEventListener('click', () => setCheckoutStep(Number(btn.dataset.stepTarget))));
+const validateCheckoutStep = stepNum => {
+  const panel = $('trade').querySelector(`[data-step-panel="${stepNum}"]`);
+  const invalid = panel && [...panel.querySelectorAll('input,select,textarea')].find(el => !el.disabled && !el.checkValidity());
+  if (invalid) { setCheckoutStep(stepNum); invalid.reportValidity(); return false; }
+  return true;
+};
+$('trade').querySelectorAll('[data-step-target]').forEach(btn => btn.addEventListener('click', () => {
+  const target = Number(btn.dataset.stepTarget);
+  const current = Number($('trade').querySelector('[data-step-panel].is-active')?.dataset.stepPanel || 1);
+  if (target > current) for (let s = current; s < target; s++) if (!validateCheckoutStep(s)) return;
+  setCheckoutStep(target);
+}));
 $('trade').querySelectorAll('[data-step-next], [data-step-prev]').forEach(btn => btn.addEventListener('click', () => {
   const next = Number(btn.dataset.stepNext || btn.dataset.stepPrev);
   if (btn.dataset.stepNext) {
-    const currentPanel = btn.closest('[data-step-panel]');
-    const invalid = [...currentPanel.querySelectorAll('input,select,textarea')].find(el => !el.disabled && !el.checkValidity());
-    if (invalid) { invalid.reportValidity(); return; }
+    const current = Number(btn.closest('[data-step-panel]')?.dataset.stepPanel || 1);
+    if (!validateCheckoutStep(current)) return;
   }
   setCheckoutStep(next);
 }));
