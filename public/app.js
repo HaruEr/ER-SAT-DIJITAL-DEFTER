@@ -403,20 +403,27 @@ function renderOpening() {
   $('#demo-seed')?.addEventListener('click',seedDemo);
 }
 
+function overviewFlowChart(flow) {
+  const rows = [
+    ['Bugün Giren', Math.max(0, flow.incoming || 0), 'chart-in'],
+    ['Bugün Çıkan', Math.max(0, flow.outgoing || 0), 'chart-out']
+  ];
+  const max = Math.max(1, ...rows.map(r => r[1]));
+  return `<section class="section overview-flow" aria-label="Gün içi TL akış özeti"><div class="section-header"><div><h2>Gün İçi TL Akışı</h2><p class="muted">Nakit, POS ve banka giriş-çıkış dengesi (kâr hesabı değildir).</p></div></div><div class="flow-bars">${rows.map(([label, val, cls]) => {
+    const pct = val > 0 ? Math.max(4, Math.round((val / max) * 100)) : 0;
+    return `<div class="flow-bar-row"><div class="flow-bar-head"><span>${label}</span><strong>${esc(formatted(val))}</strong></div><svg class="flow-svg" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect x="0" y="0" width="100" height="8" rx="4" class="flow-track"/><rect x="0" y="0" width="${pct}" height="8" rx="4" class="${cls}"/></svg></div>`;
+  }).join('')}</div></section>`;
+}
 function renderOverview() {
   const flow=state.moneyFlow||{incoming:0,outgoing:0,byUnit:{}};
   const foreign=direction=>Object.entries(flow.byUnit||{}).filter(([unit,row])=>unit!=='TL'&&row[direction]).map(([unit,row])=>`<small>${esc(formatted(row[direction],unit))}</small>`).join('');
   const cash=activeAccounts().filter(a=>a.kind==='asset'&&a.physical&&a.unit==='TL').reduce((sum,a)=>sum+(state.balances[a.id]||0),0);
   const physical=activeAccounts().filter(isStockAccount),count=state.overview?.todaysCount??state.journal.filter(e=>e.date===state.date).length;
   $('#main').innerHTML='<div class="overview-screen">'+heading('Günün Görünümü','Kasayı, günlük ödemeleri ve stokları tek bakışta takip edin.')+
-    `<div class="stats">${[['Kasadaki Nakit',cash,'Fiziki TL kasalarının anlık toplamı','primary',''],['Bugün Giren',flow.incoming,'Nakit + POS + havale / EFT','','incoming'],['Bugün Çıkan',flow.outgoing,'Yapılan ödemeler ve nakit çıkışları','','outgoing'],['Bekleyen POS',state.balances.pos,'Henüz bankaya geçmeyen alacak','','']].map(([label,value,note,cls,direction])=>`<div class="stat ${cls}"><span class="stat-label">${label}</span><strong class="stat-value"${formatted(value).length>16?' tabindex="0"':''}>${esc(formatted(value))}</strong>${direction?`<div class="stat-subtotals">${foreign(direction)}</div>`:''}<span class="stat-note">${note}</span></div>`).join('')}</div><p class="context-note">İşletme içi kasa–banka aktarımı ve POS'un bankaya geçişi yeniden giriş/çıkış sayılmaz. Dövizler kendi biriminde gösterilir.</p>
-    <section class="quick-actions" aria-label="Sık kullanılan işlemler">${[['sale','transaction','Satış Yap','Ürün ve tahsilat'],['purchase','transaction','Alış Yap','Müşteriden ürün al'],['collection','transaction','Cari Tahsilat / Ödeme','Borç ve alacak kapat'],['closing','closing','Günlük Sayım','Say ve günü tamamla']].map(([id,target,title,note],i)=>`<button type="button" class="quick-action" data-quick-action="${id}" data-go="${target}"><span class="quick-icon" aria-hidden="true">${['↗','↙','⇄','✓'][i]}</span><strong>${title}</strong><small>${note}</small></button>`).join('')}</section>
-    <div class="split"><section class="section"><div class="section-header"><div><h2>Anlık Stok Durumu</h2><p class="muted">Ürün adedi ve terazi gramı ayrı takip edilir.</p></div><button class="button text" type="button" data-go="stocks">Stok Ekranı →</button></div><div class="table-wrap"><table class="inventory-table"><thead><tr><th>Ürün / stok grubu</th><th class="numeric">Mevcut</th><th>Kontrol</th></tr></thead><tbody>${physical.map(a=>`<tr><td><strong>${esc(a.name)}</strong></td><td class="numeric">${esc(formatted(state.balances[a.id],a.unit))}</td><td><span class="badge">${a.countPolicy==='periodic'?'Dönemsel tartım':'Günlük sayım'}</span></td></tr>`).join('')}</tbody></table></div></section><div><section class="section"><div class="section-header"><h2>Son hareketler</h2><span class="badge gold">${count} işlem · açık gün</span></div>${state.journal.slice(-4).reverse().map(e=>`<div class="balance-row"><span>${esc(e.label)}<small>${esc(day(e.date))}</small></span><span class="badge">${e.meta.revenue?esc(formatted(e.meta.revenue)):e.meta.total?esc(formatted(e.meta.total)):'Kayıtlı'}</span></div>`).join('')}<button class="button secondary" type="button" data-go="journal">Günlük İşlemler</button></section><section class="section"><h2>Hesaplara hızlı erişim</h2><div class="workbench-actions"><button class="button secondary" type="button" data-go="accounts">Müşteriler</button><button class="button secondary" type="button" data-go="suppliers">Toptancılar</button><button class="button secondary" type="button" data-go="banks">Banka/Pos/Kasa</button></div><p class="context-note">Giriş ve çıkış tutarları kâr değildir. Açık alacaklar Müşteri ve Toptancı ekranlarında izlenir.</p></section></div></div></div>`;
-  // Match reading and keyboard order to the desktop task hierarchy.
-  const overview=$('#main .overview-screen');
-  overview.querySelector('.stats').before(overview.querySelector('.quick-actions'));
-  const detail=overview.querySelector('.split');
-  detail.prepend(detail.lastElementChild);
+    `<section class="quick-actions" aria-label="Sık kullanılan işlemler">${[['sale','transaction','Satış Yap','Ürün ve tahsilat'],['purchase','transaction','Alış Yap','Müşteriden ürün al'],['collection','transaction','Cari Tahsilat / Ödeme','Borç ve alacak kapat'],['closing','closing','Günlük Sayım','Say ve günü tamamla']].map(([id,target,title,note],i)=>`<button type="button" class="quick-action" data-quick-action="${id}" data-go="${target}"><span class="quick-icon" aria-hidden="true">${['↗','↙','⇄','✓'][i]}</span><strong>${title}</strong><small>${note}</small></button>`).join('')}</section>`+
+    `<div class="stats">${[['Kasadaki Nakit',cash,'Fiziki TL kasalarının anlık toplamı','primary',''],['Bugün Giren',flow.incoming,'Nakit + POS + havale / EFT','','incoming'],['Bugün Çıkan',flow.outgoing,'Yapılan ödemeler ve nakit çıkışları','','outgoing'],['Bekleyen POS',state.balances.pos,'Henüz bankaya geçmeyen alacak','','']].map(([label,value,note,cls,direction])=>`<div class="stat ${cls}"><span class="stat-label">${label}</span><strong class="stat-value"${formatted(value).length>16?' tabindex="0"':''}>${esc(formatted(value))}</strong>${direction?`<div class="stat-subtotals">${foreign(direction)}</div>`:''}<span class="stat-note">${note}</span></div>`).join('')}</div><p class="context-note">İşletme içi kasa–banka aktarımı ve POS'un bankaya geçişi yeniden giriş/çıkış sayılmaz. Dövizler kendi biriminde gösterilir.</p>`+
+    overviewFlowChart(flow)+
+    `<div class="split"><div><section class="section"><div class="section-header"><h2>Son hareketler</h2><span class="badge gold">${count} işlem · açık gün</span></div>${state.journal.slice(-4).reverse().map(e=>`<div class="balance-row"><span>${esc(e.label)}<small>${esc(day(e.date))}</small></span><span class="badge">${e.meta.revenue?esc(formatted(e.meta.revenue)):e.meta.total?esc(formatted(e.meta.total)):'Kayıtlı'}</span></div>`).join('')}<button class="button secondary" type="button" data-go="journal">Günlük İşlemler</button></section><section class="section"><h2>Hesaplara hızlı erişim</h2><div class="workbench-actions"><button class="button secondary" type="button" data-go="accounts">Müşteriler</button><button class="button secondary" type="button" data-go="suppliers">Toptancılar</button><button class="button secondary" type="button" data-go="banks">Banka/Pos/Kasa</button></div><p class="context-note">Giriş ve çıkış tutarları kâr değildir. Açık alacaklar Müşteri ve Toptancı ekranlarında izlenir.</p></section></div><section class="section"><div class="section-header"><div><h2>Anlık Stok Durumu</h2><p class="muted">Ürün adedi ve terazi gramı ayrı takip edilir.</p></div><button class="button text" type="button" data-go="stocks">Stok Ekranı →</button></div><div class="table-wrap"><table class="inventory-table"><thead><tr><th>Ürün / stok grubu</th><th class="numeric">Mevcut</th><th>Kontrol</th></tr></thead><tbody>${physical.map(a=>`<tr><td><strong>${esc(a.name)}</strong></td><td class="numeric">${esc(formatted(state.balances[a.id],a.unit))}</td><td><span class="badge">${a.countPolicy==='periodic'?'Dönemsel tartım':'Günlük sayım'}</span></td></tr>`).join('')}</tbody></table></div></section></div></div>`;
 }
 function isStockAccount(a){return a.kind==='asset'&&(a.isSaleable||a.isPurchasable||a.pairedGroups?.length||['bilezik22','taki14','taki22'].includes(a.id));}
 function balanceRow(a) {
@@ -2057,17 +2064,17 @@ async function start() {
   applyTheme(localStorage.getItem('defter-theme')||'light');
   $('#theme-toggle')?.addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));
   const shell=document.querySelector('.shell'), collapseBtn=$('#sidebar-collapse');
-  const applyCollapsed=collapsed=>{
+  const applyCollapsed=(collapsed, persist=false)=>{
     if(!shell||!collapseBtn)return;
     shell.classList.toggle('sidebar-collapsed',collapsed);
     collapseBtn.setAttribute('aria-expanded',String(!collapsed));
     collapseBtn.textContent=collapsed?'»':'«';
     collapseBtn.setAttribute('aria-label',collapsed?'Menüyü genişlet':'Menüyü daralt');
     collapseBtn.title=collapsed?'Menüyü genişlet':'Menüyü daralt';
-    try{localStorage.setItem('defter-sidebar-collapsed',collapsed?'1':'0');}catch{}
+    if(persist){try{if(collapsed)localStorage.setItem('defter-sidebar-collapsed','1');else localStorage.removeItem('defter-sidebar-collapsed');}catch{}}
   };
-  applyCollapsed((()=>{try{return localStorage.getItem('defter-sidebar-collapsed')==='1';}catch{return false;}})());
-  collapseBtn?.addEventListener('click',()=>applyCollapsed(!shell.classList.contains('sidebar-collapsed')));
+  applyCollapsed((()=>{try{return localStorage.getItem('defter-sidebar-collapsed')==='1';}catch{return false;}})(), false);
+  collapseBtn?.addEventListener('click',()=>applyCollapsed(!shell.classList.contains('sidebar-collapsed'), true));
   $('#workspace').value = workspace;
   await refresh(false);
 }
