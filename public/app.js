@@ -977,7 +977,7 @@ function renderAccounts(stock=false){
   const rows=activeAccounts().filter(a=>stock?isStockAccount(a):a.kind==='receivable'&&(a.partyType||'customer')==='customer');
   const prefix=stock?'stock':'account';
   $('#main').innerHTML=heading(stock?'Stok Ekranı':'Müşteri Ekranı',stock?'Stokları inceleyin, kart ekleyin ve ürün adlarını düzenleyin.':'Müşterilerinizi bulun, bakiyelerini ve işlem dökümlerini inceleyin.',`<button type="button" class="button" id="${stock?'add-stock':'add-account'}">+ ${stock?'Stok ekle':'Müşteri ekle'}</button>`)+
-    `${stock?'<section class="section"><div class="workbench-actions"><button class="button secondary" type="button" id="stock-movement">Stok Girişi / Çıkışı</button><button class="button secondary" type="button" data-go="closing">Sayım ile stok düzelt</button></div><div class="workbench-tabs" role="tablist" aria-label="Stok görünüm sekmeleri"><button type="button" class="workbench-tab" role="tab" data-stocks-tab="all" aria-selected="true">Tümü</button><button type="button" class="workbench-tab" role="tab" data-stocks-tab="groups" aria-selected="false">Stok Grupları</button><button type="button" class="workbench-tab" role="tab" data-stocks-tab="items" aria-selected="false">Tekil Ürünler</button></div><div id="special-operation"></div></section>':''}<section class="section" id="card-editor" hidden></section><div class="workbench-split" data-split-view="${expectedView}"><section class="section" id="${prefix}-list-section"><div class="workbench-filters"><label class="field"><span>${stock?'Stok ara':'İsim, telefon veya TC/VKN ara'}</span><input id="${prefix}-search" type="search" maxlength="160" placeholder="${stock?'Ürün veya ayar':'İsim, numara, TC / VKN'}" autocomplete="off"></label><label class="field"><span>Birim</span><select id="${prefix}-unit"><option value="">Bütün birimler</option>${[...new Set(rows.map(a=>a.unit))].map(unit=>`<option value="${esc(unit)}">${esc(units[unit].label)}</option>`).join('')}</select></label>${stock?'':'<label class="field"><span>Bakiye durumu</span><select id="account-sign"><option value="all">Tümü</option><option value="claim">Alacağımız olanlar</option><option value="debt">Borcumuz olanlar</option><option value="zero">Bakiyesi sıfır</option></select></label>'}</div><p id="workbench-status" class="context-note" role="status" aria-live="polite"></p><div id="${prefix}-list" class="${stock?'stock-grid':'account-grid'}"></div><div id="workbench-pagination" class="workbench-pagination" hidden></div></section><section id="account-detail" class="section" hidden></section></div>`;
+    `${stock?'<section class="section"><div class="workbench-actions"><button class="button secondary" type="button" id="stock-movement">Stok Girişi / Çıkışı</button><button class="button secondary" type="button" data-go="closing">Sayım ile stok düzelt</button></div><div class="workbench-tabs" role="tablist" aria-label="Stok görünüm sekmeleri"><button type="button" class="workbench-tab" role="tab" data-stocks-tab="all" aria-selected="true">Tümü</button><button type="button" class="workbench-tab" role="tab" data-stocks-tab="groups" aria-selected="false">Stok Grupları</button><button type="button" class="workbench-tab" role="tab" data-stocks-tab="items" aria-selected="false">Tekil Ürünler</button></div><div id="special-operation"></div></section>':''}<section class="section" id="card-editor" hidden></section><div class="workbench-split" data-split-view="${expectedView}"><section class="section" id="${prefix}-list-section"><div class="workbench-filters"><label class="field"><span>${stock?'Stok ara':'İsim, telefon veya TC/VKN ara'}</span><input id="${prefix}-search" type="search" maxlength="160" placeholder="${stock?'Ürün veya ayar':'İsim, numara, TC / VKN'}" autocomplete="off"></label><label class="field"><span>Birim</span><select id="${prefix}-unit"><option value="">Bütün birimler</option>${[...new Set(rows.map(a=>a.unit))].map(unit=>`<option value="${esc(unit)}">${esc(units[unit].label)}</option>`).join('')}</select></label>${stock?'':'<label class="field"><span>Bakiye durumu</span><select id="account-sign"><option value="all">Tümü</option><option value="claim">Alacağımız olanlar</option><option value="debt">Borcumuz olanlar</option><option value="zero">Bakiyesi sıfır</option></select></label>'}</div><div class="toolbar"><p id="workbench-status" class="context-note" role="status" aria-live="polite"></p><button type="button" class="button secondary compact" id="${prefix}-clear" disabled>Filtreleri temizle</button></div><div id="${prefix}-list" class="${stock?'stock-grid':'account-grid'}"></div><div id="workbench-pagination" class="workbench-pagination" hidden></div></section><section id="account-detail" class="section" hidden></section></div>`;
   if (stock) {
     renderInventoryCards();
     const groupsSec = $('#stock-list-section');
@@ -1000,15 +1000,31 @@ function renderAccounts(stock=false){
   const openEditor=existing=>{captureDrafts();if(existing&&partyReturnContext?.ownerView===view)partyReturnContext=null;remember({editor:existing?.id||'new',operation:null,guided:null});const special=$('#special-operation');if(special)special.innerHTML='';editor.hidden=false;stock?renderStockForm(editor,existing):renderPartyForm(editor,false,existing);};
   $(`#${stock?'add-stock':'add-account'}`).addEventListener('click',()=>{captureDrafts();if(partyReturnContext?.ownerView===view)partyReturnContext=null;const form=editor.querySelector('form');if(!editor.hidden&&(form?.id==='account-form'||form?.dataset.draftEntity==='new')){remember({editor:null});editor.hidden=true;editor.innerHTML='';}else{openEditor();editor.scrollIntoView?.({block:'nearest'});}});
   $('#stock-movement')?.addEventListener('click',()=>openOperation('stock'));
-  const search=$(`#${prefix}-search`),unit=$(`#${prefix}-unit`),sign=$('#account-sign'),list=$(`#${prefix}-list`),pagination=$('#workbench-pagination');
+  const search=$(`#${prefix}-search`),unit=$(`#${prefix}-unit`),sign=$('#account-sign'),clearBtn=$(`#${prefix}-clear`),list=$(`#${prefix}-list`),pagination=$('#workbench-pagination');
   search.value=memory.q;unit.value=memory.unit;if(sign)sign.value=memory.sign;
+  function clearFilters(){
+    search.value='';
+    unit.value='';
+    if(sign)sign.value='all';
+    draw();
+    search.focus({preventScroll:true});
+  }
   const draw=(resetLimit=true)=>{
     if (resetLimit) visibleLimit = 50;
+    const hasActiveFilters = Boolean(search.value.trim() || unit.value || (sign && sign.value !== 'all'));
+    clearBtn.disabled = !hasActiveFilters;
     const q=normalize(search.value.trim());remember({q:search.value,unit:unit.value,sign:sign?.value||'all'});
     const matches=a=>(!q||normalize([a.name,a.phone,a.taxId].join(' ')).includes(q))&&(!unit.value||unit.value===a.unit)&&(!sign||sign.value==='all'||(sign.value==='claim'?state.balances[a.id]>0:sign.value==='debt'?state.balances[a.id]<0:!state.balances[a.id]));
     const selected=rows.filter(matches);
+    if (selectedDetailId) {
+      const selectedIndex = selected.findIndex(a => a.id === selectedDetailId);
+      if (selectedIndex >= visibleLimit) {
+        visibleLimit = Math.ceil((selectedIndex + 1) / 50) * 50;
+      }
+    }
     const paged=selected.slice(0, visibleLimit);
-    list.innerHTML=paged.length?paged.map(a=>{const balance=state.balances[a.id]||0,isSel=selectedDetailId===a.id;return `<article class="account-card ${stock?'stock-card':''}${isSel?' is-selected':''}"><div><button class="button text" type="button" data-account-detail="${esc(a.id)}"${isSel?' aria-current="true"':''}>${esc(a.name)}</button><small>${stock?a.countPolicy==='periodic'?'Terazi · dönemsel kontrol':'Günlük sayım':balance>0?'Alacağımız':balance<0?'Borcumuz':'Bakiyesi sıfır'}</small>${!stock&&a.phone?`<small>${esc(a.phone)}</small>`:''}</div><strong class="numeric ${balance<0?'negative':''}">${esc(formatted(stock?balance:Math.abs(balance),a.unit))}</strong></article>`;}).join(''):'<div class="workbench-empty">Eşleşen hesap bulunamadı. Aramayı veya filtreleri değiştirin.</div>';
+    list.innerHTML=paged.length?paged.map(a=>{const balance=state.balances[a.id]||0,isSel=selectedDetailId===a.id;return `<article class="account-card ${stock?'stock-card':''}${isSel?' is-selected':''}"><div><button class="button text" type="button" data-account-detail="${esc(a.id)}"${isSel?' aria-current="true"':''}>${esc(a.name)}</button><small>${stock?a.countPolicy==='periodic'?'Terazi · dönemsel kontrol':'Günlük sayım':balance>0?'Alacağımız':balance<0?'Borcumuz':'Bakiyesi sıfır'}</small>${!stock&&a.phone?`<small>${esc(a.phone)}</small>`:''}</div><strong class="numeric ${balance<0?'negative':''}">${esc(formatted(stock?balance:Math.abs(balance),a.unit))}</strong></article>`;}).join(''):hasActiveFilters?`<div class="workbench-empty"><p>Eşleşen hesap bulunamadı. Aramayı veya filtreleri değiştirin.</p><button type="button" id="${prefix}-empty-clear" class="button secondary compact">Filtreleri temizle</button></div>`:'<div class="workbench-empty">Eşleşen hesap bulunamadı. Aramayı veya filtreleri değiştirin.</div>';
+    list.querySelector(`#${prefix}-empty-clear`)?.addEventListener('click', clearFilters);
     $('#workbench-status').textContent=`${selected.length} / ${rows.length} ${stock?'stok kartı':'müşteri hesabı'}`;
     if (selected.length > paged.length) {
       pagination.hidden = false;
@@ -1105,7 +1121,7 @@ function renderAccounts(stock=false){
       }catch(error){if(current()){result.textContent='Ekstre alınamadı: '+error.message;status.textContent='Filtreleri kontrol edip yeniden deneyin.';}}
     };$('#statement-filter').addEventListener('submit',e=>{e.preventDefault();load();});load();
   };
-  search.addEventListener('input',draw);unit.addEventListener('change',draw);sign?.addEventListener('change',draw);draw();
+  search.addEventListener('input',()=>draw());unit.addEventListener('change',()=>draw());sign?.addEventListener('change',()=>draw());clearBtn.addEventListener('click',clearFilters);draw();
   if(memory.editor==='new')openEditor();
   else if(memory.editor&&rows.some(a=>a.id===memory.editor))openEditor(account(memory.editor));
   else if(stock&&memory.operation==='stock')openOperation(memory.operation);
@@ -2192,21 +2208,44 @@ function renderTransactionEditor(container, original) {
 
 
 function measureTable(accounts, prefix, optional = false) {
-  return '<div class="table-wrap"><table class="count-table"><caption id="' + prefix + '-guide">Fark = ölçülen − beklenen. Pozitif fark fazlalık, negatif fark eksiktir. ' + (optional ? 'Boş alan ölçülmedi demektir; 0 gerçek sıfır ölçümüdür.' : 'Boş alan tamamlanmamıştır; 0 fiziksel sayım sonucudur.') + '</caption><thead><tr><th scope="col">Hesap / birim</th><th scope="col" class="numeric">Beklenen</th><th scope="col">' + (optional ? 'Tartılan · boşsa ölçülmedi' : 'Sayılan') + '</th><th scope="col" class="numeric">Fark</th><th scope="col">Fark gerekçesi</th></tr></thead><tbody>' + accounts.map(a => '<tr><td><strong>' + esc(a.name) + '</strong><br><span class="muted">' + esc(units[a.unit].label) + '</span></td><td class="numeric" id="' + prefix + '-expected-' + esc(a.id) + '">' + (a.id === 'gramToplam' && state.nominalUnconfirmed ? 'Açılış onayı bekliyor' : esc(formatted(state.balances[a.id], a.unit))) + '</td><td><label class="field" for="' + prefix + '-count-' + esc(a.id) + '"><span class="sr-only">' + esc(a.name) + ' ölçülen</span><input id="' + prefix + '-count-' + esc(a.id) + '" name="count-' + esc(a.id) + '" inputmode="decimal" autocomplete="off" maxlength="24" ' + (optional ? '' : 'required') + ' aria-describedby="' + prefix + '-guide ' + prefix + '-expected-' + esc(a.id) + '" data-measure="' + esc(a.id) + '" aria-label="' + esc(a.name + ' · ' + units[a.unit].label + (optional ? ' tartılan miktar' : ' günlük sayım miktarı')) + '"></label></td><td class="numeric count-diff" id="' + prefix + '-diff-' + esc(a.id) + '">—</td><td><label class="field" for="' + prefix + '-reason-' + esc(a.id) + '"><span class="sr-only">' + esc(a.name) + ' fark gerekçesi</span><input id="' + prefix + '-reason-' + esc(a.id) + '" name="reason-' + esc(a.id) + '" maxlength="160" aria-describedby="' + prefix + '-diff-' + esc(a.id) + '" aria-label="' + esc(a.name) + ' fark gerekçesi" placeholder="Fark varsa zorunlu"></label></td></tr>').join('') + '</tbody></table></div>';
+  return '<div class="table-wrap"><table class="count-table"><caption id="' + prefix + '-guide">Fark = ölçülen − beklenen. Pozitif fark fazlalık, negatif fark eksiktir. ' + (optional ? 'Boş alan ölçülmedi demektir; 0 gerçek sıfır ölçümüdür.' : 'Boş alan tamamlanmamıştır; 0 fiziksel sayım sonucudur.') + '</caption><thead><tr><th scope="col">Hesap / birim</th><th scope="col" class="numeric">Beklenen</th><th scope="col">' + (optional ? 'Tartılan · boşsa ölçülmedi' : 'Sayılan') + '</th><th scope="col" class="numeric">Fark</th><th scope="col">Fark gerekçesi</th></tr></thead><tbody>' + accounts.map(a => '<tr><td><strong>' + esc(a.name) + '</strong><br><span class="muted">' + esc(units[a.unit].label) + '</span></td><td class="numeric" id="' + prefix + '-expected-' + esc(a.id) + '">' + (a.id === 'gramToplam' && state.nominalUnconfirmed ? 'Açılış onayı bekliyor' : esc(formatted(state.balances[a.id], a.unit))) + '</td><td><label class="field" for="' + prefix + '-count-' + esc(a.id) + '"><span class="sr-only">' + esc(a.name) + ' ölçülen</span><input id="' + prefix + '-count-' + esc(a.id) + '" name="count-' + esc(a.id) + '" inputmode="decimal" autocomplete="off" maxlength="24" ' + (optional ? '' : 'required') + ' aria-describedby="' + prefix + '-guide ' + prefix + '-expected-' + esc(a.id) + '" data-measure="' + esc(a.id) + '" aria-label="' + esc(a.name + ' · ' + units[a.unit].label + (optional ? ' tartılan miktar' : ' günlük sayım miktarı')) + '"></label></td><td class="numeric count-diff" data-diff-state="empty" id="' + prefix + '-diff-' + esc(a.id) + '">—</td><td><label class="field" for="' + prefix + '-reason-' + esc(a.id) + '"><span class="sr-only">' + esc(a.name) + ' fark gerekçesi</span><input id="' + prefix + '-reason-' + esc(a.id) + '" name="reason-' + esc(a.id) + '" maxlength="160" aria-describedby="' + prefix + '-diff-' + esc(a.id) + '" aria-label="' + esc(a.name) + ' fark gerekçesi" placeholder="Fark varsa zorunlu"></label></td></tr>').join('') + '</tbody></table></div>';
 }
 function bindMeasureForm(formId, accounts, prefix, type) {
   const form = document.getElementById(formId), revision = state.revision, date = state.date;
+  let pendingDisambigInput = null;
+  form.addEventListener('click', event => {
+    const box = event.target?.closest?.('.amount-disambiguation');
+    pendingDisambigInput = box ? (box.closest('label, .field, td')?.querySelector('[data-measure]') || null) : null;
+  }, true);
+  form.addEventListener('click', () => {
+    const target = pendingDisambigInput;
+    pendingDisambigInput = null;
+    if (target?.isConnected && (!document.activeElement || document.activeElement === document.body)) {
+      target.focus({ preventScroll: true });
+    }
+  });
   if (type === 'close') {
     form.insertAdjacentHTML('afterbegin','<div class="count-status"><p id="count-progress" role="status" aria-live="polite"></p><div class="count-tools"><label><input type="checkbox" id="count-differences-only"> Yalnız fark olan satırları göster</label></div><small>Gizlenen boş satırlar tamamlanmış sayılmaz. Bütün günlük hesaplar fiziksel olarak sayılmalıdır.</small></div>');
-    const updateProgress = () => {
+    const updateProgress = (activeEl = document.activeElement) => {
       let completed=0,differences=0;
+      const filterOnly = $('#count-differences-only').checked;
       for (const input of form.querySelectorAll('[data-measure]')) {
-        const a=account(input.dataset.measure);let counted=null;
-        try { if(input.value.trim())counted=parseAmount(input,a.unit); } catch {}
-        if(counted!==null)completed++;
-        const different=counted!==null&&counted!==(state.balances[a.id]||0);
+        const a = account(input.dataset.measure), row = input.closest('tr');
+        const activeInDisambig = Boolean((activeEl?.closest?.('.amount-disambiguation') && row?.contains(activeEl)) || pendingDisambigInput === input);
+        let counted = null, isCompleted = false, different = false;
+        if (activeInDisambig) {
+          const ds = document.getElementById(prefix + '-diff-' + a.id)?.dataset.diffState;
+          isCompleted = ['negative', 'positive', 'zero'].includes(ds);
+          different = ds === 'negative' || ds === 'positive';
+        } else {
+          try { counted = parseAmount(input, a.unit); } catch {}
+          isCompleted = counted !== null;
+          different = counted !== null && counted !== (state.balances[a.id] || 0);
+        }
+        if(isCompleted)completed++;
         if(different)differences++;
-        input.closest('tr').hidden=$('#count-differences-only').checked&&!different;
+        const keepVisibleForFocus = Boolean((activeEl && row?.contains(activeEl)) || (pendingDisambigInput && row?.contains(pendingDisambigInput)));
+        row.hidden = filterOnly && !different && !keepVisibleForFocus;
       }
       $('#count-progress').textContent=`${completed} / ${accounts.length} hesap sayıldı · ${accounts.length-completed} bekliyor · ${differences} fark. Kapanacak iş günü: ${day(date)}.`;
     };
@@ -2221,23 +2260,34 @@ function bindMeasureForm(formId, accounts, prefix, type) {
     form.addEventListener('invalid',event=>{
       if(event.target.closest('tr')?.hidden){$('#count-differences-only').checked=false;updateProgress();}
     },true);
-    form.addEventListener('input',updateProgress);$('#count-differences-only').addEventListener('change',updateProgress);updateProgress();
+    form.addEventListener('input', () => updateProgress());
+    form.addEventListener('focusin', () => updateProgress());
+    form.addEventListener('focusout', event => {
+      if (!$('#count-differences-only').checked) return;
+      updateProgress(event.relatedTarget || null);
+    });
+    $('#count-differences-only').addEventListener('change', () => updateProgress());
+    updateProgress();
   }
   for (const input of form.querySelectorAll('[data-measure]')) input.addEventListener('input', () => {
     const a = account(input.dataset.measure), text = input.value.trim();
-    const scaled = text ? parseAmount(input, a.unit) : null;
+    const scaled = parseAmount(input, a.unit);
     const valid = !text || scaled !== null;
     const delta = text && valid ? scaled - (state.balances[a.id] || 0) : null;
     const cell = document.getElementById(prefix + '-diff-' + a.id);
     cell.textContent = !text ? '—' : !valid ? (input.validationMessage || 'Geçersiz miktar') : formatted(delta, a.unit);
-    cell.className = 'numeric count-diff' + (delta || (!valid && text) ? ' negative' : '');
+    const diffState = delta === null ? (!text ? 'empty' : 'invalid') : delta < 0 ? 'negative' : delta > 0 ? 'positive' : 'zero';
+    cell.dataset.diffState = diffState;
+    cell.className = 'numeric count-diff' + (diffState === 'negative' ? ' negative' : diffState === 'positive' ? ' positive' : diffState === 'invalid' ? ' invalid' : '');
     document.getElementById(prefix + '-reason-' + a.id).required = delta !== null && delta !== 0;
   });
   form.addEventListener('submit', e => {
-    e.preventDefault(); const values = formValues(form);
+    e.preventDefault();
+    if (!form.reportValidity()) return;
+    const values = formValues(form);
     const selected = type === 'stocktake' ? accounts.filter(a => values['count-' + a.id].trim() !== '') : accounts;
     if (!selected.length) { inform('En az bir terazi hesabının gerçek tartımını girin. Boş alan sıfır değildir.', true); return; }
-    const command = { type, date, counts: Object.fromEntries(selected.map(a => [a.id, values['count-' + a.id]])), reasons: Object.fromEntries(selected.map(a => [a.id, values['reason-' + a.id]])), approvedBy: values[type === 'close' ? 'dailyApprovedBy' : 'stockApprovedBy'], ...(type==='close'?{nextDate:values.nextDate}:{}) };
+    const command = { type, date, counts: Object.fromEntries(selected.map(a => [a.id, canonicalValue(document.getElementById(prefix + '-count-' + a.id), a.unit)])), reasons: Object.fromEntries(selected.map(a => [a.id, values['reason-' + a.id]])), approvedBy: values[type === 'close' ? 'dailyApprovedBy' : 'stockApprovedBy'], ...(type==='close'?{nextDate:values.nextDate}:{}) };
     submit(command, type === 'close' ? 'Günlük sayım kaydedildi; gram havuzları tartım yapılmış sayılmadan ertesi güne devredildi.' : 'Dönemsel tartım ve gerekçeli gram farkları kaydedildi. İş günü ve günlük adetler değişmedi.', { id: crypto.randomUUID(), revision, command });
   });
 }
@@ -2271,17 +2321,19 @@ function renderClosing() {
     const panel=document.createElement('div');panel.className='count-approval';
     panel.setAttribute('role','group');panel.setAttribute('aria-labelledby',id+'-approval-title');
     const titleNode=document.createElement('h3');titleNode.id=id+'-approval-title';titleNode.textContent=title;panel.append(titleNode);
-    const nodes=[];for(let node=start;node;node=node.nextElementSibling)nodes.push(node);
+    const actionsEl=form.querySelector('.form-actions');
+    const nodes=[];for(let node=start;node&&node!==actionsEl;node=node.nextElementSibling)nodes.push(node);
     start.before(panel);panel.append(...nodes);
-    const actionsEl=panel.querySelector('.form-actions');
     if(actionsEl){
       const stickyBar=document.createElement('div');stickyBar.className='sticky-action-bar';
       const summarySpan=document.createElement('span');summarySpan.className='context-note';summarySpan.dataset.stickyDiffSummary='';summarySpan.setAttribute('aria-live','polite');
       summarySpan.textContent=id==='close-form'?'Sayım farkları ve onay çubuğu':'Dönemsel tartım onay çubuğu';
-      actionsEl.before(stickyBar);stickyBar.append(summarySpan,actionsEl);
+      stickyBar.append(summarySpan,actionsEl);
+      panel.after(stickyBar);
       const syncSticky=()=>{
-        const diffs=[...form.querySelectorAll('.count-diff')].filter(c=>c.classList.contains('negative')).length;
-        const filled=[...form.querySelectorAll('[data-measure]')].filter(i=>i.value.trim()!=='').length;
+        const diffCells=[...form.querySelectorAll('.count-diff')];
+        const diffs=diffCells.filter(c=>c.classList.contains('negative')||c.classList.contains('positive')).length;
+        const filled=diffCells.filter(c=>['negative','positive','zero'].includes(c.dataset.diffState)).length;
         const total=form.querySelectorAll('[data-measure]').length;
         summarySpan.textContent=`${filled} / ${total} sayıldı · ${diffs} fark`;
       };
