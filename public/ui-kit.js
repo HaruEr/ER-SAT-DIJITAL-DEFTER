@@ -2,6 +2,115 @@
   const activeToasts = new Set();
   const layerStack = [];
   const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  let layerSeq = 0;
+  const pushedLayerIds = new Set();
+  const historyLayerStack = [];
+  let pendingUnwindSteps = 0;
+  let unwindMicrotaskScheduled = false;
+  let unwindInFlight = false;
+  let unwindSafetyTimer = null;
+
+  function scheduleHistoryUnwind() {
+    if (unwindMicrotaskScheduled || pendingUnwindSteps <= 0) return;
+    unwindMicrotaskScheduled = true;
+    const schedule = typeof queueMicrotask === 'function' ? queueMicrotask : fn => Promise.resolve().then(fn);
+    schedule(() => {
+      unwindMicrotaskScheduled = false;
+      flushHistoryUnwind();
+    });
+  }
+
+  function flushDeferredHistoryPushes() {
+    for (const entry of historyLayerStack) {
+      if (entry.closed || entry.historyPushed || !entry.deferredHistoryPush) continue;
+      entry.deferredHistoryPush = false;
+      if (typeof window !== 'undefined' && window.history && typeof window.history.pushState === 'function') {
+        try {
+          const baseState = window.history.state && typeof window.history.state === 'object' ? window.history.state : {};
+          window.history.pushState({ ...baseState, defterLayerId: entry.layerId }, '', window.location?.href || '');
+          if (window.history.state?.defterLayerId === entry.layerId) {
+            entry.historyPushed = true;
+            pushedLayerIds.add(entry.layerId);
+          }
+        } catch {}
+      }
+    }
+  }
+
+  function unwindClosedTail() {
+    let steps = 0;
+    while (historyLayerStack.length > 0 && historyLayerStack[historyLayerStack.length - 1].closed) {
+      const popped = historyLayerStack.pop();
+      if (popped.historyPushed) {
+        popped.historyPushed = false;
+        steps++;
+      }
+    }
+    if (steps > 0) {
+      pendingUnwindSteps += steps;
+      scheduleHistoryUnwind();
+    }
+  }
+
+  function flushHistoryUnwind() {
+    if (unwindInFlight || pendingUnwindSteps <= 0) return;
+    const steps = pendingUnwindSteps;
+    pendingUnwindSteps = 0;
+    if (typeof window === 'undefined' || !window.history) {
+      flushDeferredHistoryPushes();
+      return;
+    }
+    const activeId = window.history.state?.defterLayerId;
+    if (!activeId || !pushedLayerIds.has(activeId)) {
+      flushDeferredHistoryPushes();
+      return;
+    }
+    const canBack = steps === 1 && typeof window.history.back === 'function';
+    const canGo = steps > 1 && typeof window.history.go === 'function';
+    if (!canBack && !canGo) {
+      flushDeferredHistoryPushes();
+      return;
+    }
+    unwindInFlight = true;
+    if (unwindSafetyTimer) clearTimeout(unwindSafetyTimer);
+    unwindSafetyTimer = setTimeout(() => {
+      unwindSafetyTimer = null;
+      if (!unwindInFlight) return;
+      unwindInFlight = false;
+      if (pendingUnwindSteps > 0) scheduleHistoryUnwind();
+      else flushDeferredHistoryPushes();
+    }, 250);
+    try {
+      if (steps === 1) window.history.back();
+      else window.history.go(-steps);
+    } catch {
+      if (unwindSafetyTimer) { clearTimeout(unwindSafetyTimer); unwindSafetyTimer = null; }
+      unwindInFlight = false;
+      flushDeferredHistoryPushes();
+    }
+  }
+
+  function handleWindowPopstate(event) {
+    if (unwindInFlight) {
+      if (unwindSafetyTimer) { clearTimeout(unwindSafetyTimer); unwindSafetyTimer = null; }
+      unwindInFlight = false;
+      event?.stopImmediatePropagation?.();
+      if (pendingUnwindSteps > 0) scheduleHistoryUnwind();
+      else flushDeferredHistoryPushes();
+      return;
+    }
+    if (layerStack.length > 0) {
+      const top = topLayer();
+      const hadPushed = Boolean(top?.historyPushed);
+      if (hadPushed) event?.stopImmediatePropagation?.();
+      top?.close('popstate');
+      unwindClosedTail();
+    }
+  }
+
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('popstate', handleWindowPopstate, true);
+  }
 
   function ensureToastRegion() {
     if (typeof document === 'undefined' || !document.body) return null;
@@ -160,7 +269,7 @@
     dialog.className = `defter-dialog defter-${kind} defter-dialog--${size}`;
     dialog.setAttribute('role', 'dialog');
     dialog.setAttribute('aria-modal', 'true');
-    const headingId = `defter-dialog-title-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const headingId = `defter-dialog-title-${++layerSeq}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     dialog.setAttribute('aria-labelledby', headingId);
 
     const header = document.createElement('header');
@@ -192,7 +301,7 @@
 
     let closed = false;
     const layerId = headingId;
-    const entry = { dialog, closeOnEsc, closeOnBackdrop, returnTarget, layerId, close: null };
+    const entry = { dialog, closeOnEsc, closeOnBackdrop, returnTarget, layerId, closed: false, historyPushed: false, deferredHistoryPush: false, close: null };
 
     const handleKeydown = event => {
       if (topLayer() !== entry) return;
@@ -235,6 +344,7 @@
     function close(reason = 'programmatic') {
       if (closed) return;
       closed = true;
+      entry.closed = true;
       const idx = layerStack.indexOf(entry);
       if (idx !== -1) layerStack.splice(idx, 1);
       dialog.removeEventListener('keydown', handleKeydown);
@@ -251,10 +361,17 @@
       }
       if (layerStack.length === 0) setBackgroundInert(false);
 
-      if (syncHistory && reason !== 'popstate' && typeof window !== 'undefined' && window.history && typeof window.history.replaceState === 'function' && window.history.state?.defterLayerId === layerId) {
-        try {
-          window.history.replaceState({ ...window.history.state, defterLayerId: null }, '', window.location?.href || '');
-        } catch {}
+      if (entry.deferredHistoryPush) {
+        entry.deferredHistoryPush = false;
+      }
+      const hIdx = historyLayerStack.indexOf(entry);
+      if (reason === 'popstate') {
+        if (hIdx !== -1) historyLayerStack.splice(hIdx, 1);
+        entry.historyPushed = false;
+      } else if (syncHistory && entry.historyPushed) {
+        unwindClosedTail();
+      } else if (hIdx !== -1 && !entry.historyPushed) {
+        historyLayerStack.splice(hIdx, 1);
       }
 
       if (returnTarget && typeof returnTarget.focus === 'function' && returnTarget.isConnected) {
@@ -270,7 +387,25 @@
     if (syncHistory && typeof window !== 'undefined' && window.history && typeof window.history.pushState === 'function') {
       try {
         const baseState = window.history.state && typeof window.history.state === 'object' ? window.history.state : {};
-        window.history.pushState({ ...baseState, defterLayerId: layerId }, '', window.location?.href || '');
+        if (pendingUnwindSteps === 1 && !unwindInFlight && typeof window.history.replaceState === 'function' && pushedLayerIds.has(baseState.defterLayerId)) {
+          pendingUnwindSteps--;
+          window.history.replaceState({ ...baseState, defterLayerId: layerId }, '', window.location?.href || '');
+          if (window.history.state?.defterLayerId === layerId) {
+            entry.historyPushed = true;
+            pushedLayerIds.add(layerId);
+            historyLayerStack.push(entry);
+          }
+        } else if (pendingUnwindSteps > 0 || unwindInFlight) {
+          entry.deferredHistoryPush = true;
+          historyLayerStack.push(entry);
+        } else {
+          window.history.pushState({ ...baseState, defterLayerId: layerId }, '', window.location?.href || '');
+          if (window.history.state?.defterLayerId === layerId) {
+            entry.historyPushed = true;
+            pushedLayerIds.add(layerId);
+            historyLayerStack.push(entry);
+          }
+        }
       } catch {}
     }
     dialog.style.zIndex = String(100 + layerStack.length * 2);

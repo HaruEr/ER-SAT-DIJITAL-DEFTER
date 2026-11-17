@@ -65,8 +65,8 @@
   }
   if (location.pathname === '/') return;
   const session = current();
-  if (!session || session.expiresAt <= Date.now()) { lock(); return; }
   const expected = location.pathname === '/checkout' ? 'employee' : 'owner';
+  if (!session || session.expiresAt <= Date.now() || session.actor?.role !== expected) { lock(); return; }
   async function verify() {
     try {
       const actor = await api('/api/auth/session');

@@ -10,7 +10,7 @@ for (const form of document.querySelectorAll('form')) {
   form.addEventListener('submit', async event => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(form));
-    const disable = form.id === 'disable';
+    const disable = form.getAttribute('id') === 'disable';
     if (disable) {
       const ok = window.DefterUI?.confirmCritical
         ? (await window.DefterUI.confirmCritical({
@@ -36,4 +36,7 @@ for (const form of document.querySelectorAll('form')) {
     finally { button.disabled = false; }
   });
 }
-refresh().catch(error => { status.textContent = error.message; });
+window.addEventListener('popstate', () => {
+  if (window.DefterUI?.getLayerCount?.() > 0) window.DefterUI.closeTopLayer('popstate');
+});
+if (current()) refresh().catch(error => { status.textContent = error.message; });

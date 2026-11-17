@@ -3,6 +3,7 @@ const { api, current } = window.DefterSession;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const codec = globalThis.DefterAmountCodec;
 const dateFmt = globalThis.DefterDateFormat;
+const uiKit = (typeof window !== 'undefined' && window.DefterUI) || globalThis.DefterUI || null;
 const normalize = value => String(value || '').toLocaleLowerCase('tr').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i');
 const scale = unit => codec ? codec.units[unit].scale : (unit === 'ADET' ? 1 : ['GRAM','HAS','SILVER'].includes(unit) ? 1000 : 100);
 const format = (value, unit='TL') => codec ? codec.formatAmount(value, unit) : ((value/scale(unit)).toLocaleString('tr-TR',{minimumFractionDigits:unit==='ADET'?0:unit==='GRAM'?3:2,maximumFractionDigits:scale(unit)===1000?3:2})+' '+({ADET:'adet',GRAM:'gr',HAS:'has gr',SILVER:'saf gümüş gr'}[unit] || unit));
@@ -16,6 +17,7 @@ const groupNames = {received:'İşletmeye alınan',given:'İşletmeden verilen',
 let snapshot, pending, review, selectedCustomer = null, writing = false, rendering = false, customerLoading = false;
 let workspace = $('workspace').value, operation = $('operation').value;
 let loadSequence = 0, customerSequence = 0, draftRevision, draftDate, draftDirty = false, externalRevision = 0, stockPage = 0;
+let activeCustomerDrawer = null, flowMode = 'quick', manualFlowMode = null, activeStep = 1;
 const defaultDraftStore = {
   PREFIX: 'defter-draft:v1:',
   PENDING_PREFIX: 'defter-draft:v1:pending:',
@@ -124,7 +126,51 @@ function saveStoredPending(val, selected=workspace) {
 const broadcast = typeof BroadcastChannel === 'function' ? new BroadcastChannel('defter-checkout-revisions') : null;
 const status = message => { $('status').textContent = message; };
 const isStale = () => snapshot && (draftRevision !== snapshot.revision || draftDate !== snapshot.date || externalRevision > snapshot.revision);
+function parseSignedTL(input, optional=false, allowZero=false) {
+  if (!input) return null;
+  const text = String(input.value ?? '').trim();
+  if (!text && optional) {
+    input.setCustomValidity('');
+    delete input.dataset.canonicalAmount;
+    return null;
+  }
+  if (codec) {
+    const negative = text.startsWith('-');
+    const unsigned = negative ? text.slice(1).trim() : text;
+    if (!unsigned) {
+      input.setCustomValidity('Geçerli TL tutarı girin.');
+      delete input.dataset.canonicalAmount;
+      return null;
+    }
+    const res = codec.parseUserAmount(unsigned, 'TL', { positive: false, allowZero: true });
+    if (res.status !== 'valid') {
+      input.setCustomValidity(res.reason || 'Geçerli TL tutarı girin.');
+      delete input.dataset.canonicalAmount;
+      return null;
+    }
+    if (!allowZero && res.scaled === 0) {
+      input.setCustomValidity('Tutar sıfırdan büyük olmalıdır.');
+      delete input.dataset.canonicalAmount;
+      return null;
+    }
+    const scaled = negative ? -res.scaled : res.scaled;
+    const canonicalText = negative && res.scaled > 0 ? '-' + res.canonical : res.canonical;
+    input.setCustomValidity('');
+    input.dataset.canonicalAmount = canonicalText;
+    return scaled;
+  }
+  input.setCustomValidity('');
+  const value=decimal(text);
+  if (!value && optional) return null;
+  const pattern=/^-?\d+(?:\.\d{1,2})?$/;
+  if (!pattern.test(value)) {input.setCustomValidity('Geçerli TL miktarı girin.');return null;}
+  const [whole,fraction='']=value.replace('-','').split('.');
+  const amount=(Number(whole)*100+Number(fraction.padEnd(2,'0')))*(value.startsWith('-')?-1:1);
+  if (!Number.isSafeInteger(amount) || Math.abs(amount)>1e12 || (!allowZero && amount===0)) {input.setCustomValidity('Geçerli, sınırlar içinde miktar girin.');return null;}
+  return amount;
+}
 function parse(input,unit='TL',signed=false,optional=false,allowZero=false) {
+  if (signed && unit === 'TL') return parseSignedTL(input, optional, allowZero);
   if (codec && !signed) {
     if (!String(input?.value ?? '').trim() && optional) { input?.setCustomValidity(''); return null; }
     return codec.parseInputElement(input, unit, !allowZero);
@@ -140,11 +186,45 @@ function parse(input,unit='TL',signed=false,optional=false,allowZero=false) {
   if (!Number.isSafeInteger(amount) || Math.abs(amount)>1e12 || (!signed && (amount<0 || (!allowZero && amount===0)))) {input.setCustomValidity('Geçerli, sınırlar içinde miktar girin.');return null;}
   return amount;
 }
+function parseReadOnlyAmount(rawValue, unit='TL') {
+  const text = String(rawValue ?? '').trim();
+  if (!text) return null;
+  if (codec) {
+    const res = codec.parseUserAmount(text, unit, { positive: true, allowZero: false });
+    return res.status === 'valid' ? res.scaled : null;
+  }
+  const normalized = decimal(text);
+  const digits = scale(unit) === 1 ? 0 : scale(unit) === 1000 ? 3 : 2;
+  const pattern = new RegExp('^\\d+' + (digits ? '(?:\\.\\d{1,' + digits + '})?' : '') + '$');
+  if (!pattern.test(normalized)) return null;
+  const [whole, fraction = ''] = normalized.split('.');
+  const amount = Number(whole) * scale(unit) + Number(fraction.padEnd(digits, '0'));
+  return Number.isSafeInteger(amount) && amount > 0 && amount <= 1e12 ? amount : null;
+}
+function isComplexCheckoutState() {
+  if ($('items').children.length > 1) return true;
+  const primaryKind = operation === 'sale' ? 'received' : 'given';
+  const oppositeKind = operation === 'sale' ? 'given' : 'received';
+  if ($(oppositeKind).children.length > 0) return true;
+  if ($('credits').children.length > 0 || $('debts').children.length > 0) return true;
+  const primaryRows = [...$(primaryKind).children];
+  if (primaryRows.length > 1) return true;
+  if (primaryRows.some(row => row.dataset.category !== 'money' || (allocationAccount(row)?.unit && allocationAccount(row).unit !== 'TL'))) return true;
+  return false;
+}
 function controls() {
   const blocked=writing || !!pending || !!review || !snapshot;
+  const complex=isComplexCheckoutState();
   $('trade-controls').disabled=blocked;
   for (const el of $('customer-form').elements) el.disabled=blocked;
   for (const id of ['search','customer','operation','clear-draft','add-item']) $(id).disabled=blocked;
+  if ($('open-customer-drawer')) $('open-customer-drawer').disabled=blocked;
+  const quickBtn = document.querySelector('[data-flow-mode="quick"]');
+  const guidedBtn = document.querySelector('[data-flow-mode="guided"]');
+  const escalateBtn = document.querySelector('[data-escalate-guided]');
+  if (quickBtn) quickBtn.disabled = blocked || complex;
+  if (guidedBtn) guidedBtn.disabled = blocked;
+  if (escalateBtn) escalateBtn.disabled = blocked;
   $('workspace').disabled=writing || !!review;
   $('logout').disabled=writing;
   $('refresh').disabled=writing || !!review;
@@ -169,12 +249,22 @@ function priceFields(row,data={}) {
   part.querySelector('button').addEventListener('click',()=>{part.remove();changed();});
   list.append(part);
 }
-function pricing(row) {
+function pricing(row, canonicalize = false) {
   const result={};
   const quoted=row.querySelector('[data-quoted]'),source=row.querySelector('[data-source]');
-  if (quoted.value.trim()) result.quotedTL=decimal(quoted.value);
+  if (quoted.value.trim()) result.quotedTL = canonicalize ? canonical(quoted, 'TL', false) : quoted.value.trim();
   if (source.value.trim()) result.source=source.value.trim();
-  const components=[...row.querySelector('[data-components]').children].map(part=>({label:part.querySelector('[data-component-name]').value.trim(),amountTL:decimal(part.querySelector('[data-component-value]').value)}));
+  const components=[...row.querySelector('[data-components]').children].map(part=>{
+    const valInput = part.querySelector('[data-component-value]');
+    let amountTL;
+    if (canonicalize) {
+      parseSignedTL(valInput, false, false);
+      amountTL = valInput.dataset.canonicalAmount || decimal(valInput.value);
+    } else {
+      amountTL = valInput.value.trim();
+    }
+    return {label:part.querySelector('[data-component-name]').value.trim(),amountTL};
+  });
   if (components.length) result.components=components;
   return Object.keys(result).length?result:null;
 }
@@ -305,10 +395,12 @@ function addAllocation(kind,data={}) {
 }
 function draft() {
   return {revision:draftRevision,date:draftDate,customer:selectedCustomer,note:$('note').value,
-    items:[...$('items').children].map(row=>({selection:row.querySelector('[data-product]').value,search:row.querySelector('[data-product-search]').value,quantity:row.querySelector('[data-quantity]').value,value:row.querySelector('[data-value]').value,weight:row.querySelector('[data-weight]').value,weightAccount:row.querySelector('[data-pool]').value,pricing:pricing(row)})),
+    flowMode, manualFlowMode, activeStep,
+    items:[...$('items').children].map(row=>({selection:row.querySelector('[data-product]').value,search:row.querySelector('[data-product-search]').value,quantity:row.querySelector('[data-quantity]').value,value:row.querySelector('[data-value]').value,weight:row.querySelector('[data-weight]').value,weightAccount:row.querySelector('[data-pool]').value,pricing:pricing(row,false)})),
     ...Object.fromEntries(groups.map(kind=>[kind,[...$(kind).children].map(row=>({category:row.dataset.category,accountId:row.querySelector('[data-account]').value,quantity:row.querySelector('[data-quantity]').value,valueTL:row.querySelector('[data-value]').value,weight:row.querySelector('[data-weight]').value,weightAccount:row.querySelector('[data-pool]').value}))]))};
 }
 function saveDraft() {
+  if (!current()) return;
   if (snapshot && !rendering && draftDirty) {
     const payload = draft();
     const store = getDraftStore();
@@ -331,7 +423,54 @@ function changed(event) {
   event?.target?.setCustomValidity?.('');
   draftDirty=true;
   review=null;$('review').hidden=true;
-  totals();saveDraft();controls();
+  totals();
+  syncFlowMode({ preferredStep: event?.preferredStep || (event?.target?.closest?.('[data-allocation]') ? 2 : null), notify: true });
+  saveDraft();controls();
+}
+function renderLiveSummary() {
+  const customerCard = $('summary-customer');
+  if (customerCard) {
+    if (!selectedCustomer) {
+      customerCard.innerHTML = '<h3>Müşteri</h3><p class="context-note">Peşin / kayıtsız müşteri · cari hesap etkisi yok</p>';
+    } else {
+      const balanceText = (val, unit) => `${format(Math.abs(val), unit)} · ${val > 0 ? 'Alacağımız' : val < 0 ? 'Borcumuz' : 'Bakiye sıfır'}`;
+      const rows = (selectedCustomer.accounts || []).map(acc => {
+        let net = 0, valid = true;
+        for (const kind of ['credits', 'debts']) {
+          for (const row of $(kind).children) {
+            if (row.querySelector('[data-account]').value !== acc.id) continue;
+            const qty = parseReadOnlyAmount(row.querySelector('[data-quantity]').value, acc.unit);
+            if (qty === null) valid = false;
+            else net += qty * (kind === 'credits' ? 1 : -1);
+          }
+        }
+        const next = (acc.balance || 0) + net;
+        const nextStr = valid && Number.isSafeInteger(next) ? balanceText(next, acc.unit) : 'Eksik';
+        return `<p><strong>${esc(acc.name)}</strong><span>${esc(balanceText(acc.balance || 0, acc.unit))} → ${esc(nextStr)}</span></p>`;
+      }).join('');
+      customerCard.innerHTML = `<h3>Müşteri cari özeti</h3>${rows || '<p class="context-note">Müşteri hesabı yok.</p>'}`;
+    }
+  }
+  const linesList = $('summary-lines');
+  if (linesList) {
+    const items = [];
+    for (const row of $('items').children) {
+      const { product } = itemProduct(row);
+      const qty = parseReadOnlyAmount(row.querySelector('[data-quantity]').value, product?.unit || 'ADET');
+      const val = parseReadOnlyAmount(row.querySelector('[data-value]').value, 'TL');
+      items.push(`<li><span>${esc(product?.name || 'Ürün')} · ${esc(qty === null ? 'Eksik' : format(qty, product?.unit || 'ADET'))}</span><strong>${esc(val === null ? 'Eksik' : format(val, 'TL'))}</strong></li>`);
+    }
+    const shortLabels = { received: 'Alınan', given: 'Verilen', credits: 'Cari alacak', debts: 'Cari borç' };
+    for (const kind of groups) {
+      for (const row of $(kind).children) {
+        const acc = allocationAccount(row);
+        const qty = acc ? parseReadOnlyAmount(row.querySelector('[data-quantity]').value, acc.unit) : null;
+        const val = parseReadOnlyAmount(row.querySelector('[data-value]').value, 'TL');
+        items.push(`<li><span>${esc(shortLabels[kind])} · ${esc(acc?.name || 'Hesap seçin')} · ${esc(qty === null || !acc ? 'Eksik' : format(qty, acc.unit))}</span><strong>${esc(val === null ? 'Eksik' : format(val, 'TL'))}</strong></li>`);
+      }
+    }
+    linesList.innerHTML = items.join('') || '<li class="context-note">Henüz satır yok.</li>';
+  }
 }
 function selectedPerson(person) {
   selectedCustomer=person;
@@ -339,6 +478,7 @@ function selectedPerson(person) {
   $('customer').value=person?.id || '';
   $('customer-balance').textContent=person?person.accounts.map(a=>a.name+' · '+(a.balance<0?'Borcumuz ':a.balance>0?'Alacağımız ':'Bakiye ')+format(Math.abs(a.balance),a.unit)).join(' / '):'';
   for(const kind of ['credits','debts'])for(const row of $(kind).children)allocationOptions(row);
+  renderLiveSummary();
 }
 function restoreDraft(saved) {
   rendering=true;
@@ -346,12 +486,16 @@ function restoreDraft(saved) {
   selectedPerson(saved?.customer || null);
   draftRevision=saved?.revision ?? snapshot.revision;draftDate=saved?.date ?? snapshot.date;
   draftDirty=Boolean(saved);
+  manualFlowMode=saved?.manualFlowMode ?? (saved?.flowMode === 'guided' ? 'guided' : null);
+  activeStep=[1,2,3].includes(Number(saved?.activeStep)) ? Number(saved.activeStep) : 1;
   for(const item of saved?.items || [{}])addItem(item);
   for(const kind of groups)for(const row of saved?.[kind] || [])addAllocation(kind,row);
   $('note').value=saved?.note || '';
   $('items-title').textContent=operation==='sale'?'Satılan ürünler':'Alınan ürünler';
   $('total-label').textContent=operation==='sale'?'Satış bedeli':'Alış bedeli';
-  rendering=false;totals();controls();
+  rendering=false;
+  syncFlowMode({ preferredStep: activeStep, notify: false });
+  totals();controls();
 }
 function totals() {
   let total=0,net=0,incomplete=0;
@@ -373,6 +517,7 @@ function totals() {
     eq.classList.toggle('is-error',!balanced&&!partial);
   }
   for(const btn of document.querySelectorAll('[data-add]'))btn.disabled=$(btn.dataset.add).children.length>=30;
+  renderLiveSummary();
   return {total,difference,incomplete};
 }
 function validateRow(row,product,primary) {
@@ -394,10 +539,10 @@ function command() {
     if(serial)item.inventoryCode=serial.code;
     if(product.weights.length)Object.assign(item,{weightAccount:row.querySelector('[data-pool]').value,weight:canonical(row.querySelector('[data-weight]'),'GRAM',true)});
     items.push(item);
-    const price=pricing(row);prices.push(price);
+    const price=pricing(row, true);prices.push(price);
     if(operation==='sale'&&price) {
       parse(row.querySelector('[data-quoted]'),'TL',false,true,true);
-      for(const part of row.querySelector('[data-components]').children) {part.querySelector('[data-component-name]').required=true;parse(part.querySelector('[data-component-value]'),'TL',true);}
+      for(const part of row.querySelector('[data-components]').children) {part.querySelector('[data-component-name]').required=true;parseSignedTL(part.querySelector('[data-component-value]'),false,false);}
     }
   }
   const result={type:operation,date:snapshot.date,counterpartyType:'customer',counterpartyId:selectedCustomer?.id || '',items};
@@ -484,10 +629,20 @@ async function sendPending() {
       saveDraft();
       $('customer-form').reset();$('new-customer').open=false;$('other-unit-field').hidden=true;
       $('customer-form').elements.currencyCode.required=false;
+      uiKit?.clearBanner?.($('customer-drawer-notice'));
+      activeCustomerDrawer?.close('saved');
+      uiKit?.toast?.('Müşteri kartı oluşturuldu ve seçildi.', { kind: 'success' });
       request.createdCustomer=result.account;
     }
   }catch(error){
     if(error.status>=400&&error.status<500){saveStoredPending(null,selected);pending=null;}
+    if(request.kind==='customer' && activeCustomerDrawer) {
+      if(error.status===409 || !(error.status>=400 && error.status<500)) {
+        activeCustomerDrawer.close(error.status===409 ? 'conflict' : 'pending');
+      } else {
+        uiKit?.showBanner?.($('customer-drawer-notice'), error.message, { kind: 'error', focus: false });
+      }
+    }
     message=error.message;
   }finally{
     writing=false;review=null;$('review').hidden=true;
@@ -503,20 +658,100 @@ function queue(envelope,kind) {
   saveStoredPending(pending,workspace);controls();
   void sendPending();
 }
+const openAncestorDetails = el => {
+  for (let d = el?.closest?.('details'); d; d = d.parentElement?.closest('details')) d.open = true;
+};
 const setCheckoutStep = step => {
-  $('trade').querySelectorAll('[data-step-panel]').forEach(panel => panel.classList.toggle('is-active', Number(panel.dataset.stepPanel) === step));
+  activeStep = [1, 2, 3].includes(Number(step)) ? Number(step) : 1;
+  $('trade').querySelectorAll('[data-step-panel]').forEach(panel => panel.classList.toggle('is-active', Number(panel.dataset.stepPanel) === activeStep));
   $('trade').querySelectorAll('[data-step-target]').forEach(tab => {
-    const active = Number(tab.dataset.stepTarget) === step;
+    const active = Number(tab.dataset.stepTarget) === activeStep;
     tab.classList.toggle('is-active', active);
     tab.setAttribute('aria-current', active ? 'step' : 'false');
   });
+  if (draftDirty && !rendering) saveDraft();
 };
+function syncFlowMode({ preferredStep = null, notify = false } = {}) {
+  const prevMode = flowMode;
+  const complex = isComplexCheckoutState();
+  flowMode = complex ? 'guided' : (manualFlowMode === 'guided' ? 'guided' : 'quick');
+  const trade = $('trade');
+  if (!trade) return;
+  trade.dataset.flowMode = flowMode;
+  trade.classList.toggle('checkout-trade-quick', flowMode === 'quick');
+  trade.classList.toggle('checkout-trade-stepper', flowMode === 'guided');
+  const stepperBar = trade.querySelector('.stepper-bar');
+  if (stepperBar) stepperBar.hidden = flowMode !== 'guided';
+  trade.querySelectorAll('.stepper-nav').forEach(nav => { nav.hidden = flowMode !== 'guided'; });
+  const quickExtras = trade.querySelector('.checkout-quick-extras');
+  if (quickExtras) quickExtras.hidden = flowMode === 'guided';
+  const primaryKind = operation === 'sale' ? 'received' : 'given';
+  const oppositeKind = operation === 'sale' ? 'given' : 'received';
+  for (const kind of ['received', 'given', 'credits', 'debts']) {
+    const groupEl = trade.querySelector(`[data-alloc-group="${kind}"]`);
+    if (groupEl) groupEl.dataset.quickSecondary = kind === primaryKind ? 'false' : 'true';
+  }
+  const quickBtn = trade.querySelector('[data-flow-mode="quick"]');
+  const guidedBtn = trade.querySelector('[data-flow-mode="guided"]');
+  if (quickBtn) {
+    quickBtn.setAttribute('aria-pressed', String(flowMode === 'quick'));
+    quickBtn.disabled = writing || !!pending || !!review || !snapshot || complex;
+  }
+  if (guidedBtn) {
+    guidedBtn.setAttribute('aria-pressed', String(flowMode === 'guided'));
+    guidedBtn.disabled = writing || !!pending || !!review || !snapshot;
+  }
+  const titleEl = $('checkout-flow-title');
+  const noteEl = $('checkout-flow-note');
+  if (titleEl && noteEl) {
+    if (flowMode === 'quick') {
+      titleEl.textContent = 'Hızlı tezgâh modu';
+      noteEl.textContent = 'Tek ürün, tek TL ödeme ve not için tek ekran.';
+    } else if (complex) {
+      titleEl.textContent = 'Rehberli adımlar (karma işlem)';
+      noteEl.textContent = 'Çoklu ürün, hurda, verilen karşılık, TL dışı ödeme veya cari satırı nedeniyle adım adım kontrol açık.';
+    } else {
+      titleEl.textContent = 'Rehberli adımlar';
+      noteEl.textContent = 'Ürünler, ödeme/karşılık ve onay adımlarıyla ilerleyin.';
+    }
+  }
+  if (prevMode === 'quick' && flowMode === 'guided') {
+    activeStep = preferredStep || activeStep;
+    if (notify && !rendering && complex) {
+      uiKit?.toast?.('Karma işlem algılandı; rehberli adımlara geçildi.', { kind: 'info', durationMs: 3000 });
+    }
+  } else if (preferredStep && flowMode === 'guided') {
+    activeStep = preferredStep;
+  }
+  setCheckoutStep(activeStep);
+}
 const validateCheckoutStep = stepNum => {
   const panel = $('trade').querySelector(`[data-step-panel="${stepNum}"]`);
   const invalid = panel && [...panel.querySelectorAll('input,select,textarea')].find(el => !el.disabled && !el.checkValidity());
-  if (invalid) { setCheckoutStep(stepNum); invalid.reportValidity(); return false; }
+  if (invalid) {
+    openAncestorDetails(invalid);
+    if (flowMode === 'guided') setCheckoutStep(stepNum);
+    invalid.reportValidity();
+    return false;
+  }
   return true;
 };
+$('trade').querySelectorAll('[data-flow-mode]').forEach(btn => btn.addEventListener('click', () => {
+  if (writing || pending || review || !snapshot) return;
+  const target = btn.dataset.flowMode;
+  if (target === 'quick' && isComplexCheckoutState()) return;
+  manualFlowMode = target === 'guided' ? 'guided' : null;
+  syncFlowMode({ preferredStep: activeStep, notify: false });
+  if (draftDirty) saveDraft();
+  controls();
+}));
+$('trade').querySelector('[data-escalate-guided]')?.addEventListener('click', () => {
+  if (writing || pending || review || !snapshot) return;
+  manualFlowMode = 'guided';
+  syncFlowMode({ preferredStep: 2, notify: false });
+  if (draftDirty) saveDraft();
+  controls();
+});
 $('trade').querySelectorAll('[data-step-target]').forEach(btn => btn.addEventListener('click', () => {
   const target = Number(btn.dataset.stepTarget);
   const current = Number($('trade').querySelector('[data-step-panel].is-active')?.dataset.stepPanel || 1);
@@ -532,12 +767,14 @@ $('trade').querySelectorAll('[data-step-next], [data-step-prev]').forEach(btn =>
   setCheckoutStep(next);
 }));
 $('trade').addEventListener('invalid', event => {
+  openAncestorDetails(event.target);
   const panel = event.target?.closest?.('[data-step-panel]');
-  if (panel) setCheckoutStep(Number(panel.dataset.stepPanel));
+  if (panel && flowMode === 'guided') setCheckoutStep(Number(panel.dataset.stepPanel));
 }, true);
 $('trade').addEventListener('submit',event=>{
   event.preventDefault();if(writing||pending||customerLoading||!snapshot||isStale())return;
   const totalsResult=totals(),c=command();
+  if(flowMode==='guided'&&(!validateCheckoutStep(1)||!validateCheckoutStep(2))){status('Ürün ve karşılık satırlarını tamamlayın.');return;}
   if(!$('trade').reportValidity() || !c.items.length){status('Ürün ve karşılık satırlarını tamamlayın.');return;}
   if(totalsResult.incomplete||totalsResult.difference!==0){status('Ürün bedeli ile karşılıkların TL dengesini tamamlayın.');return;}
   saveDraft();review={id:crypto.randomUUID(),revision:snapshot.revision,command:c};renderReview(c);
@@ -546,8 +783,42 @@ $('confirm').addEventListener('click',()=>{if(review&&!isStale())queue(review,'t
 $('edit').addEventListener('click',()=>{review=null;$('review').hidden=true;controls();$('record').focus();});
 $('trade').addEventListener('input',changed);
 $('trade').addEventListener('change',changed);
-$('add-item').addEventListener('click',()=>{const row=addItem();changed();row?.querySelector('input').focus();});
-for(const button of document.querySelectorAll('[data-add]'))button.addEventListener('click',()=>{const row=addAllocation(button.dataset.add,{category:button.dataset.category});changed();row?.querySelector('select').focus();});
+$('add-item').addEventListener('click',()=>{const row=addItem();changed({preferredStep:1});row?.querySelector('input').focus();});
+for(const button of document.querySelectorAll('[data-add]'))button.addEventListener('click',()=>{const row=addAllocation(button.dataset.add,{category:button.dataset.category});changed({preferredStep:2});row?.querySelector('select').focus();});
+function syncCustomerDrawerTrigger() {
+  const openBtn = $('open-customer-drawer');
+  const details = $('new-customer');
+  if (!openBtn || !details) return;
+  if (uiKit?.openDrawer) {
+    openBtn.hidden = false;
+    details.hidden = true;
+    details.open = false;
+  } else {
+    openBtn.hidden = true;
+    details.hidden = false;
+  }
+}
+$('open-customer-drawer')?.addEventListener('click', () => {
+  if (writing || pending || review || !snapshot || activeCustomerDrawer || !uiKit?.openDrawer) return;
+  const customerForm = $('customer-form');
+  if (!customerForm) return;
+  uiKit.clearBanner?.($('customer-drawer-notice'));
+  activeCustomerDrawer = uiKit.openDrawer({
+    title: 'Yeni Müşteri Kartı',
+    subtitle: 'Tezgâh taslağınız korunur; müşteri eklendiğinde otomatik seçilir.',
+    content: customerForm,
+    trigger: $('open-customer-drawer'),
+    onClose: () => {
+      activeCustomerDrawer = null;
+      uiKit.clearBanner?.($('customer-drawer-notice'));
+      const host = $('new-customer');
+      if (host && customerForm.parentElement !== host) host.append(customerForm);
+      controls();
+    }
+  });
+  controls();
+});
+syncCustomerDrawerTrigger();
 $('search').addEventListener('input',async()=>{
   const sequence=++customerSequence,selected=workspace,query=$('search').value.trim();
   customerLoading=false;controls();
@@ -568,6 +839,7 @@ $('customer-form').elements.unit.addEventListener('change',()=>{
 });
 $('customer-form').addEventListener('submit',event=>{
   event.preventDefault();if(writing||pending||!snapshot||!$('customer-form').reportValidity())return;
+  uiKit?.clearBanner?.($('customer-drawer-notice'));
   const fields=Object.fromEntries(new FormData($('customer-form')));
   const c={type:'account',date:snapshot.date,name:fields.name.trim(),unit:fields.unit==='other'?fields.currencyCode.toUpperCase():fields.unit,partyType:'customer',opening:'0'};
   for(const key of ['phone','taxId','address'])if(fields[key].trim())c[key]=fields[key].trim();
@@ -588,5 +860,34 @@ if(broadcast)broadcast.onmessage=event=>{
     externalRevision=message.revision;review=null;$('review').hidden=true;controls();status('Başka sekmede kayıt değişti. Mevcutları yenileyin.');
   }
 };
-window.addEventListener('pagehide',()=>{saveDraft();broadcast?.close();});
+function hasUnsavedCheckoutWork() {
+  if (pending || writing || draftDirty) return true;
+  const store = getDraftStore();
+  if (typeof store.listDrafts === 'function') {
+    if (store.listDrafts({ actorId: actorId(), scope: 'checkout' }).length > 0) return true;
+  }
+  for (const ws of ['demo', 'dukkan']) {
+    if (readStoredPending(ws)) return true;
+    for (const op of ['sale', 'purchase']) {
+      if (readStoredDraft(ws, op)) return true;
+    }
+  }
+  return false;
+}
+window.addEventListener('beforeunload', event => {
+  if (!current()) return;
+  saveDraft();
+  if (hasUnsavedCheckoutWork()) {
+    event.preventDefault();
+    event.returnValue = '';
+  }
+});
+window.addEventListener('popstate', () => {
+  if (window.DefterUI?.getLayerCount?.() > 0) window.DefterUI.closeTopLayer('popstate');
+});
+window.addEventListener('pagehide', () => {
+  if (current()) saveDraft();
+  else draftDirty = false;
+  broadcast?.close();
+});
 if(current())void refresh();

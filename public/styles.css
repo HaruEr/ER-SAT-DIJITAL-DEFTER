@@ -575,10 +575,10 @@ details[open] > summary { color: var(--ink); font-weight: 650; }
   .transaction-toolbar .transaction-group { flex: 0 1 540px; margin: 0; }
   .transaction-toolbar .transaction-tabs { margin: 0; }
   #transaction-content:has(.trade-form) { padding: 20px 24px; }
-  #sale-form.trade-form { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 0 28px; align-items: start; }
-  #sale-form.trade-form > .info { grid-column: 1 / -1; }
-  .trade-products, .trade-checkout { min-width: 0; }
-  .trade-checkout { padding-left: 24px; border-left: 1px solid var(--line); }
+  #sale-form.trade-form { display: grid; grid-template-columns: 1fr; gap: 20px; align-items: start; }
+  #sale-form.trade-form > .info, #sale-form.trade-form > .notice, #sale-form.trade-form > .draft-status { grid-column: 1 / -1; }
+  .trade-main, .trade-live-summary, .trade-products, .trade-checkout { min-width: 0; }
+  .trade-checkout { padding: 16px 0 0; border-top: 1px solid var(--line); }
   #sale-form .sale-items-heading { margin-top: 0; }
   #sale-form .allocation-section { margin-top: 0; }
   #sale-form .allocation-section > h3 { margin-top: 0; }
@@ -588,18 +588,19 @@ details[open] > summary { color: var(--ink); font-weight: 650; }
   #sale-form .trade-checkout .allocation-row .field:first-child { grid-column: 1 / -1; }
   #sale-form .trade-checkout .allocation-row .field:has([data-allocation-field="quantity"]) { grid-column: 1 / -1; }
   #sale-form .trade-checkout .allocation-row:has([data-allocation-field="valueTL"]:not([readonly])) .field:has([data-allocation-field="quantity"]) { grid-column: auto; }
-  #sale-form .trade-checkout .equation { grid-template-columns: 1fr; gap: 12px; }
-  #sale-form .trade-checkout .equation > div { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; }
-  #sale-form .trade-checkout .equation strong { font-size: 23px; }
-  #sale-form .trade-checkout .form-actions { flex-direction: column; align-items: stretch; gap: 10px; }
-  #sale-form .trade-checkout .form-actions .button { width: 100%; }
-  #sale-form .trade-checkout .form-actions .muted { flex: 0 0 auto; margin: 0; }
+  #sale-form .trade-checkout .equation, #sale-form .trade-live-summary .equation { grid-template-columns: 1fr; gap: 12px; }
+  #sale-form .trade-checkout .equation > div, #sale-form .trade-live-summary .equation > div { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; }
+  #sale-form .trade-checkout .equation strong, #sale-form .trade-live-summary .equation strong { font-size: 23px; }
+  #sale-form .trade-checkout .form-actions, #sale-form .trade-live-summary .form-actions { flex-direction: column; align-items: stretch; gap: 10px; margin-top: 0; }
+  #sale-form .trade-checkout .form-actions .button, #sale-form .trade-live-summary .form-actions .button { width: 100%; }
+  #sale-form .trade-checkout .form-actions .muted, #sale-form .trade-live-summary .form-actions .muted { flex: 0 0 auto; margin: 0; }
   #sale-form[data-operation="stock"] { grid-template-columns: 1fr; }
   #sale-form[data-operation="stock"] .trade-checkout { border: 0; padding: 0; }
   .trade-products input, .trade-checkout input { font-variant-numeric: tabular-nums; }
 }
 @media screen and (max-width: 1099px) {
-  #sale-form.trade-form { grid-template-columns: 1fr; }
+  #sale-form.trade-form:not([data-operation="stock"]) { grid-template-columns: 1fr; }
+  .trade-live-summary { position: static; }
   .trade-checkout { padding: 16px 0 0; border-left: 0; border-top: 1px solid var(--line); }
   .transaction-toolbar { align-items: stretch; flex-direction: column; gap: 12px; }
   .transaction-toolbar .transaction-group { flex-basis: auto; }
@@ -812,7 +813,10 @@ main:has(#summary-result) .summary-filters { gap:16px; }
 @media(max-width:600px) { .journal-filters-primary,.journal-filters-secondary { grid-template-columns:minmax(0,1fr); } }
 #trade-effects p { font-size:14px; line-height:1.6; overflow-wrap:anywhere; padding-block:8px; margin:0; border-bottom:1px solid var(--line); }
 #trade-effects p:last-child { border-bottom:0; }
-@media(min-width:1100px) { #sale-form.trade-form { grid-template-columns:minmax(0,1fr) minmax(0,1.15fr); } }
+@media screen and (min-width: 1100px) {
+  #sale-form.trade-form:not([data-operation="stock"]) { grid-template-columns: minmax(0, 1.35fr) minmax(300px, .85fr); gap: 20px 28px; }
+  .trade-live-summary { position: sticky; top: 18px; }
+}
 @media(max-width:600px) { #sale-form .trade-primary,#sale-form .trade-opposite,#sale-form .trade-cari { padding:12px; } }
 @media print {
  main:has(#summary-result) > .section { break-inside:auto; padding:0; border:0; margin-bottom:0; }
@@ -990,8 +994,31 @@ main:has(#summary-result) .summary-filters { gap:16px; }
 .flow-track { fill: var(--surface-soft); }
 .chart-in { fill: var(--gold); }
 .chart-out { fill: var(--red); }
-#sale-form.trade-form.stepper-active { display: block; }
 #sale-form.trade-form.stepper-active .trade-checkout { padding-left: 0; padding-top: 0; border-left: 0; border-top: 0; }
+.trade-flow-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; margin-bottom: 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-soft); }
+.trade-flow-info { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.trade-flow-reason { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.trade-party-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.sale-items-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.trade-quick-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 10px 0 6px; }
+.trade-live-summary { display: grid; gap: 14px; padding: 16px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface-soft); }
+.trade-live-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.trade-live-header h3 { margin: 0; font-size: 18px; }
+.trade-live-cari { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); font-size: 14px; line-height: 1.5; }
+.trade-live-cari strong { display: block; margin-bottom: 2px; }
+.trade-live-cari p { margin: 0; }
+.trade-live-summary .trade-effects { margin: 0; background: var(--surface); }
+.trade-form.flow-quick .stepper-bar,
+.trade-form.flow-quick .stepper-nav,
+.trade-form.flow-quick [data-step-panel="3"],
+.trade-form.flow-quick .trade-opposite,
+.trade-form.flow-quick .trade-cari,
+.trade-form.flow-quick [data-guided-review-note],
+.trade-form.flow-quick .payment-chip[data-payment-type="foreign"],
+.trade-form.flow-quick .payment-chip[data-payment-type="has"],
+.trade-form.flow-quick .payment-chip[data-payment-type="silver"],
+.trade-form.flow-quick .payment-chip[data-payment-type="asset"],
+.trade-form.flow-quick [data-add-allocation="scrap"] { display: none; }
 .stepper-bar { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 18px; }
 .stepper-tab { display: flex; align-items: center; gap: 8px; min-height: 46px; padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-soft); color: var(--muted); font-size: 14px; font-weight: 600; text-align: left; }
 .stepper-tab span { display: inline-grid; place-items: center; flex: 0 0 24px; width: 24px; height: 24px; border-radius: 50%; background: var(--line); color: var(--ink); font-size: 13px; font-weight: 700; }
@@ -1001,6 +1028,7 @@ main:has(#summary-result) .summary-filters { gap:16px; }
 .stepper-nav { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
 .stepper-nav-back { margin-bottom: 14px; padding-top: 0; border-top: 0; }
 @media (max-width: 700px) { .stepper-bar { grid-template-columns: 1fr; } }
+@media (max-width: 600px) { .trade-flow-bar { padding: 10px; } #sale-form .trade-live-summary { padding: 12px; } }
 .notice:not([hidden]) { position: sticky; top: 12px; z-index: 4; box-shadow: var(--shadow); }
 .amount-disambiguation { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--warning-soft); color: var(--warning-ink); }
 .amount-disambiguation small { flex: 1 1 100%; font-weight: 600; }
