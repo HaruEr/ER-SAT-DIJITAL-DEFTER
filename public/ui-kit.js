@@ -151,7 +151,7 @@
     return layerStack[layerStack.length - 1] || null;
   }
 
-  function openLayer({ kind = 'modal', title = '', subtitle = '', content = '', size = 'md', closeOnBackdrop = false, closeOnEsc = true, trigger = null, onClose = null } = {}) {
+  function openLayer({ kind = 'modal', title = '', subtitle = '', content = '', size = 'md', closeOnBackdrop = false, closeOnEsc = true, syncHistory = true, trigger = null, onClose = null } = {}) {
     if (typeof document === 'undefined' || !document.body) return null;
     const prevTop = topLayer();
     const returnTarget = trigger || document.activeElement;
@@ -191,7 +191,8 @@
     dialog.append(header, body);
 
     let closed = false;
-    const entry = { dialog, closeOnEsc, closeOnBackdrop, returnTarget, close: null };
+    const layerId = headingId;
+    const entry = { dialog, closeOnEsc, closeOnBackdrop, returnTarget, layerId, close: null };
 
     const handleKeydown = event => {
       if (topLayer() !== entry) return;
@@ -250,6 +251,12 @@
       }
       if (layerStack.length === 0) setBackgroundInert(false);
 
+      if (syncHistory && reason !== 'popstate' && typeof window !== 'undefined' && window.history && typeof window.history.replaceState === 'function' && window.history.state?.defterLayerId === layerId) {
+        try {
+          window.history.replaceState({ ...window.history.state, defterLayerId: null }, '', window.location?.href || '');
+        } catch {}
+      }
+
       if (returnTarget && typeof returnTarget.focus === 'function' && returnTarget.isConnected) {
         returnTarget.focus({ preventScroll: true });
       }
@@ -260,6 +267,12 @@
     if (prevTop) prevTop.dialog.setAttribute('aria-hidden', 'true');
     setBackgroundInert(true);
     layerStack.push(entry);
+    if (syncHistory && typeof window !== 'undefined' && window.history && typeof window.history.pushState === 'function') {
+      try {
+        const baseState = window.history.state && typeof window.history.state === 'object' ? window.history.state : {};
+        window.history.pushState({ ...baseState, defterLayerId: layerId }, '', window.location?.href || '');
+      } catch {}
+    }
     dialog.style.zIndex = String(100 + layerStack.length * 2);
     document.body.append(dialog);
 
@@ -478,7 +491,14 @@
     openPopover,
     closePopover,
     renderSkeleton,
-    getLayerCount: () => layerStack.length
+    getLayerCount: () => layerStack.length,
+    topLayer: () => topLayer(),
+    closeTopLayer: (reason = 'programmatic') => {
+      const top = topLayer();
+      if (!top) return false;
+      top.close(reason);
+      return true;
+    }
   };
   root.DefterUI = exportsObj;
   if (typeof globalThis !== 'undefined') globalThis.DefterUI = exportsObj;

@@ -3,6 +3,16 @@ const TASKS = [
   ['return','Ürün İade Et'],['history','Hareketleri İncele'],['statement','Ekstre / Mutabakat']
 ];
 const SUPPLIER_DRAFTS = new Map();
+const getDraftStore = () => (typeof window !== 'undefined' && window.DefterDraftStore) || (typeof globalThis !== 'undefined' && globalThis.DefterDraftStore);
+const getActorId = context => context?.actorId || (typeof window !== 'undefined' && window.DefterSession?.current()?.actor?.id) || (typeof globalThis !== 'undefined' && globalThis.DefterSession?.current()?.actor?.id) || 'owner';
+function supplierDraftKey(context, kind, entityId) {
+  const store = getDraftStore();
+  const actorId = getActorId(context);
+  if (store) {
+    return store.makeKey({ actorId, workspace: context.workspace || 'default', scope: 'supplier', type: kind, entityId: entityId || '' });
+  }
+  return 'supplier:draft:' + JSON.stringify([context.workspace || 'default', entityId || '', kind]);
+}
 const unitLabel=unit=>unit==='SILVER'?'Ag · saf gümüş':unit;
 function receiptSuffix(record, peers=[]){
   if(!record.id)return '';
@@ -67,7 +77,8 @@ export function renderSupplierWorkspace(container, context) {
     const handled=context.onTask?.({kind,partyId:selectedId,container:panel,context:{...context,state}});
     if(context.onTask && handled!==false)taskCleanup=handled;
     else if(['create','profile','reverse','unit','purchase','payment'].includes(kind)){
-      const saved=memory.get('supplier:draft:'+JSON.stringify([context.workspace||'default',selectedId||'',kind]));
+      const store=getDraftStore(),key=supplierDraftKey(context,kind,selectedId),legacyKey='supplier:draft:'+JSON.stringify([context.workspace||'default',selectedId||'',kind]);
+      const savedEnvelope=store?store.getDraft(key):null,saved=savedEnvelope?.data?{...savedEnvelope.data,stamp:{revision:savedEnvelope.meta.revision,date:savedEnvelope.meta.workday||savedEnvelope.meta.date}}:(savedEnvelope||memory.get(key)||memory.get(legacyKey));
       if(saved?.amend){let stopped=false,cleanup=null;const partyId=selectedId;const note=container.ownerDocument.createElement('p');note.textContent='Düzeltme önizlemesi yükleniyor…';panel.append(note);
         context.request('suppliers',undefined,context.workspace,{query:{supplierId:partyId,editOriginalId:saved.amend.originalId,limit:50}}).then(data=>{if(stopped)return;if(data.revision!==state.revision||data.amendment?.originalId!==saved.amend.originalId)throw Error('Düzeltme önizlemesi doğrulanamadı.');note.textContent='Düzeltme için eski etkinin geri alınmış önizlemesi';const previewState={...state,supplierParties:state.supplierParties.map(p=>p.id===partyId?{...p,accounts:p.accounts.map(a=>({...a,balance:data.amendment.balances[a.id]}))}:p)};cleanup=renderSupplierForm(panel,{...context,state:previewState,partyId,kind,editOriginalId:saved.amend.originalId});}).catch(error=>{if(!stopped)note.textContent=error.message;});taskCleanup=key=>{stopped=true;cleanup?.(key);};
       }else taskCleanup=renderSupplierForm(panel,{...context,state,partyId:selectedId,kind});
@@ -75,13 +86,15 @@ export function renderSupplierWorkspace(container, context) {
     else if(['allocation','offset','return','legacyLink'].includes(kind)){let stopped=false,cleanup=null;renderSupplierDocumentTask(panel,{...context,state,partyId:selectedId,kind,isCurrent:()=>!stopped&&panel.isConnected}).then(fn=>{if(stopped)fn?.();else cleanup=fn;});taskCleanup=key=>{stopped=true;cleanup?.(key);};}
     else if(['history','statement'].includes(kind))taskCleanup=renderSupplierRead(panel,{...context,state,partyId:selectedId,kind,onRecordAction(event,action){
       const command=event.editableCommand||event.meta?.editableCommand,task=action==='reverse'?'reverse':({supplierPurchase:'purchase',supplierPayment:'payment',supplierAllocation:'allocation',supplierOffset:'offset',supplierReturn:'return'})[command?.type];
-      const key='supplier:draft:'+JSON.stringify([context.workspace||'default',selectedId,task]);
-      if(memory.has(key)){status('Bu işlem için korunmuş bir taslak var. Önce taslağı tamamlayın.');return;}
+      const store=getDraftStore(),key=supplierDraftKey(context,task,selectedId),legacyKey='supplier:draft:'+JSON.stringify([context.workspace||'default',selectedId,task]);
+      if((store&&store.getDraft(key))||memory.has(key)||memory.has(legacyKey)){status('Bu işlem için korunmuş bir taslak var. Önce taslağı tamamlayın.');return;}
       const fields=action==='reverse'?{originalId:event.id,note:''}:{...Object.fromEntries(Object.entries(command).filter(([,value])=>typeof value==='string')),direction:command.received?.length&&!command.given?.length?'collect':'pay',advanceScope:command.advanceScope||'general'};
       const rows={};if(action!=='reverse')for(const name of ['items','charges','given','credits','received','debts'])rows[name]=command[name]||[];
       const links=(action!=='reverse'?(command.type==='supplierPurchase'||command.type==='supplierAllocation'?command.allocations:command.type==='supplierOffset'?(command.sourceUses||[]).map(row=>({...row,accountId:command.fromAccountId})):command.debtUses):[])||[];
       if(task==='return'){for(const line of command.items||[]){fields['returnQty-'+line.lineIndex]=line.quantity;if(line.weight)fields['returnWeight-'+line.lineIndex]=line.weight;}for(const row of command.reductions||[])fields['reduction-'+row.accountId]=row.quantity;}
-      memory.set(key,{fields,rows,arrays:rows,targets:command?.targetUses||[],stamp:{revision:state.revision,date:state.date},recordLabel:day(event.date)+' · '+event.label,...(action==='edit'?{amend:{originalId:event.id,note:''}}:{}),links:links.map(row=>({...row,choice:JSON.stringify([row.sourceId||'',row.accountId]),...(row.purchaseId?{purchase:JSON.stringify([row.purchaseId,row.accountId])}:{})})),debtLinks:(command?.type==='supplierPurchase'?command.debtUses||[]:[]).map(row=>({...row,choice:JSON.stringify([row.sourceId||'',row.accountId])}))});openTask(task);
+      const draftPayload={fields,rows,arrays:rows,targets:command?.targetUses||[],stamp:{revision:state.revision,date:state.date},recordLabel:day(event.date)+' · '+event.label,...(action==='edit'?{amend:{originalId:event.id,note:''}}:{}),links:links.map(row=>({...row,choice:JSON.stringify([row.sourceId||'',row.accountId]),...(row.purchaseId?{purchase:JSON.stringify([row.purchaseId,row.accountId])}:{})})),debtLinks:(command?.type==='supplierPurchase'?command.debtUses||[]:[]).map(row=>({...row,choice:JSON.stringify([row.sourceId||'',row.accountId])}))};
+      if(store){const actorId=getActorId(context);store.saveDraft(key,{meta:{actorId,workspace:context.workspace||'default',workday:state.date,revision:state.revision,formId:task,entityId:selectedId||''},data:draftPayload});}
+      memory.set(key,draftPayload);memory.set(legacyKey,draftPayload);openTask(task);
     }});
     else {const note=container.ownerDocument.createElement('p');note.className='info neutral';note.textContent='Bu işlem henüz hazır değil. Geliştirme aşamasında.';panel.append(note);}
     heading.focus();
@@ -112,9 +125,18 @@ function renderSupplierForm(panel, context) {
   const {escape:esc,state,kind,partyId}=context,doc=panel.ownerDocument;
   const party=state.supplierParties?.find(p=>p.id===partyId),nativeAccounts=party?.accounts||[];
   const catalog=(state.accounts||[]).filter(a=>!a.retired),drafts=context.memory||SUPPLIER_DRAFTS;
-  const key='supplier:draft:'+JSON.stringify([context.workspace||'default',partyId||'',kind]),saved=drafts.get(key);
+  const store=getDraftStore(),key=supplierDraftKey(context,kind,partyId),legacyKey='supplier:draft:'+JSON.stringify([context.workspace||'default',partyId||'',kind]);
+  const savedEnvelope=store?store.getDraft(key):null,legacySaved=drafts.get(key)||drafts.get(legacyKey);
+  const saved=savedEnvelope?.data?{...savedEnvelope.data,stamp:{revision:savedEnvelope.meta.revision,date:savedEnvelope.meta.workday||savedEnvelope.meta.date}}:(savedEnvelope||legacySaved);
   let sourcePicker=null,receiptPicker=null,sending=false,destroyed=false,completed=false,dirty=Boolean(saved),stamp=saved?.stamp||{revision:state.revision,date:state.date};
-  const stale=()=>stamp.revision!==state.revision||stamp.date!==state.date;
+  const stale=()=>{
+    if(store&&savedEnvelope){
+      const actorId=getActorId(context);
+      const checkValidation=store.validateDraft({meta:{...savedEnvelope.meta,revision:stamp.revision,workday:stamp.date,workspace:context.workspace,actorId},data:values()},state,{isCountForm:false});
+      if(checkValidation.status!=='VALID')return true;
+    }
+    return stamp.revision!==state.revision||stamp.date!==state.date;
+  };
   const field=(name,label,required=false)=>'<label class="field"><span>'+label+'</span><input name="'+name+'" maxlength="300"'+(required?' required':'')+'></label>';
   const form=doc.createElement('form');form.dataset.supplierForm=kind;form.dataset.kind=kind;form.className='supplier-task-form';panel.append(form);
   const groups=new Map();
@@ -178,7 +200,16 @@ function renderSupplierForm(panel, context) {
   review.addEventListener('click',()=>{stamp={revision:state.revision,date:state.date};review.hidden=true;remember();preview();info('Güncel hesap ve ürün seçimlerini kontrol edip kaydedin.');});
   const save=doc.createElement('button');save.type='submit';save.className='button';save.textContent=({create:'Firmayı ekle',profile:'Firma bilgilerini kaydet',reverse:'Ters kaydı kaydet',unit:'Hesap birimini ekle',purchase:'Ürün alışını kaydet',payment:'Ödemeyi / tahsilatı kaydet'})[kind];form.append(save,status);
   function values(){const fields={};for(const input of form.querySelectorAll('[name]'))fields[input.name]=input.value;const rows={};for(const [name,group]of groups)rows[name]=group.rows().map(row=>Object.fromEntries([...row.querySelectorAll('[data-field]')].filter(x=>!x.disabled).map(x=>[x.dataset.field,x.value])));return {fields,rows,stamp,...(saved?.amend?{amend:saved.amend,recordLabel:saved.recordLabel}:{}),...(kind==='reverse'?{recordLabel:saved?.recordLabel}:{}),links:sourcePicker?.snapshot()||[],debtLinks:receiptPicker?.snapshot()||[]};}
-  function remember(){if(!completed&&dirty)drafts.set(key,values());}
+  function remember(){
+    if(!completed&&dirty){
+      const val=values();
+      if(store){
+        const actorId=getActorId(context);
+        store.saveDraft(key,{meta:{actorId,workspace:context.workspace||'default',workday:state.date,revision:state.revision,formId:kind,entityId:partyId||''},data:val});
+      }
+      drafts.set(key,val);drafts.set(legacyKey,val);
+    }
+  }
   function scope(){if(kind!=='payment')return;const reserved=form.elements.direction.value==='pay'&&form.elements.advanceScope.value==='reserved';form.elements.agreementId.required=reserved;const details=form.querySelector('[data-agreement-details]');details.querySelector('summary').textContent=reserved?'Anlaşma / sipariş · zorunlu':'Anlaşma / sipariş · isteğe bağlı';if(reserved||form.elements.agreementId.value)details.open=true;}
   function revealInput(input){
     if(!input)return;for(let node=input.parentElement;node&&node!==form;node=node.parentElement)if(node.tagName==='DETAILS')node.open=true;
@@ -320,11 +351,11 @@ function renderSupplierForm(panel, context) {
       if(kind==='payment')command.advanceScope=data.fields.direction==='collect'?'general':data.fields.advanceScope;
     }
     sending=true;save.disabled=true;
-    try{if(await context.submit(saved?.amend?{type:'supplierAmend',date:state.date,originalId:saved.amend.originalId,note:data.fields.amendNote.trim(),replacement:command}:command,'Toptancı işlemi kaydedildi.',{supplierDraftKey:key})){completed=true;drafts.delete(key);if(form.isConnected){const message=doc.createElement('p');message.setAttribute('role','status');message.textContent='Kayıt tamamlandı.';form.replaceWith(message);}}}
+    try{if(await context.submit(saved?.amend?{type:'supplierAmend',date:state.date,originalId:saved.amend.originalId,note:data.fields.amendNote.trim(),replacement:command}:command,'Toptancı işlemi kaydedildi.',{supplierDraftKey:key})){completed=true;if(store)store.clearDraft(key);drafts.delete(key);drafts.delete(legacyKey);if(form.isConnected){const message=doc.createElement('p');message.setAttribute('role','status');message.textContent='Kayıt tamamlandı.';form.replaceWith(message);}}}
     catch(error){if(form.isConnected)info(error.message||'İşlem kaydedilemedi. Taslak korunuyor.');}
     finally{sending=false;if(form.isConnected)save.disabled=false;}
   });
-  return completedDraftKey=>{if(destroyed)return;destroyed=true;if(completedDraftKey===key)completed=true;if(!sending)remember();sourcePicker?.destroy();receiptPicker?.destroy();};
+  return completedDraftKey=>{if(destroyed)return;destroyed=true;if(completedDraftKey===key||completedDraftKey===legacyKey)completed=true;if(!sending)remember();sourcePicker?.destroy();receiptPicker?.destroy();};
 }
 
 
@@ -516,7 +547,10 @@ function attachSupplierSources(form, context, saved=[]) {
 async function renderSupplierDocumentTask(panel, context) {
   // Synchronous cleanup handle is installed by the caller; this worker uses a detached guard.
   const {escape:esc,format,day,state,partyId,kind}=context,doc=panel.ownerDocument;
-  const revision=state.revision,memory=context.memory||SUPPLIER_DRAFTS,key='supplier:draft:'+JSON.stringify([context.workspace||'default',partyId,kind]),saved=memory.get(key);
+  const revision=state.revision,memory=context.memory||SUPPLIER_DRAFTS;
+  const store=getDraftStore(),key=supplierDraftKey(context,kind,partyId),legacyKey='supplier:draft:'+JSON.stringify([context.workspace||'default',partyId,kind]);
+  const savedEnvelope=store?store.getDraft(key):null,legacySaved=memory.get(key)||memory.get(legacyKey);
+  const saved=savedEnvelope?.data?{...savedEnvelope.data,stamp:{revision:savedEnvelope.meta.revision,date:savedEnvelope.meta.workday||savedEnvelope.meta.date}}:(savedEnvelope||legacySaved);
   const status=doc.createElement('p');status.setAttribute('role','status');status.textContent='Açık belgeler yükleniyor…';panel.append(status);
   let data;
   try{data=await context.request('suppliers',undefined,context.workspace,{query:{supplierId:partyId,limit:50,...(saved?.amend?{editOriginalId:saved.amend.originalId}:{})}});if(!panel.isConnected||context.isCurrent?.()===false)return ()=>{};if(data.revision!==revision||data.supplier?.id!==partyId||!data.documents)throw Error('Açık belgeler doğrulanamadı. Yeniden açın.');}
@@ -525,7 +559,14 @@ async function renderSupplierDocumentTask(panel, context) {
   const accounts=saved?.amend?data.accounts.map(a=>({...a,balance:data.amendment.balances[a.id]})):data.accounts,catalog=(state.accounts||[]).filter(a=>!a.retired),documents=saved?.amend?data.amendment.documents:data.documents;
   const form=doc.createElement('form');form.dataset.supplierDocumentForm=kind;form.dataset.kind=kind;form.className='supplier-task-form';panel.append(form);
   let sending=false,completed=false,dirty=!!saved,stamp=saved?.stamp||{revision,date:state.date},sourcePicker=null;
-  const stale=()=>stamp.revision!==revision||stamp.date!==state.date;
+  const stale=()=>{
+    if(store&&savedEnvelope){
+      const actorId=getActorId(context);
+      const checkValidation=store.validateDraft({meta:{...savedEnvelope.meta,revision:stamp.revision,workday:stamp.date,workspace:context.workspace,actorId},data:capture()},state,{isCountForm:false});
+      if(checkValidation.status!=='VALID')return true;
+    }
+    return stamp.revision!==revision||stamp.date!==state.date;
+  };
   const field=(name,label,required=false)=>'<label class="field"><span>'+label+'</span><input name="'+name+'" inputmode="decimal" maxlength="300"'+(required?' required':'')+'></label>';
   const select=(name,label,options)=>'<label class="field"><span>'+label+'</span><select name="'+name+'" required><option value="">Seçin</option>'+options.map(([value,label])=>'<option value="'+esc(value)+'">'+esc(label)+'</option>').join('')+'</select></label>';
   const nativeOptions=list=>list.map(a=>[a.id,unitLabel(a.unit)+' · '+(a.balance<0?'Borcumuz ':a.balance>0?'Alacağımız ':'Bakiyesi sıfır ')+format(Math.abs(a.balance),a.unit)]);
@@ -601,7 +642,19 @@ async function renderSupplierDocumentTask(panel, context) {
     const targets=targetHost?[...targetHost.children].map(row=>Object.fromEntries([...row.querySelectorAll('[data-target-field]')].map(input=>[input.dataset.targetField,input.type==='checkbox'?input.checked:input.value]))):[];
     return {fields,arrays,targets,links:sourcePicker?.snapshot()||[],stamp,...(saved?.amend?{amend:saved.amend,recordLabel:saved.recordLabel}:{})};
   }
-  function remember(){if(dirty&&!completed)memory.set(key,capture());returnPreview();updateDocPreview();}
+  function remember(){
+    if(dirty&&!completed){
+      const val=capture();
+      if(store){
+        const actorId=getActorId(context);
+        store.saveDraft(key,{meta:{actorId,workspace:context.workspace||'default',workday:state.date,revision,formId:kind,entityId:partyId||''},data:val});
+      }
+      memory.set(key,val);
+      memory.set(legacyKey,val);
+    }
+    returnPreview();
+    updateDocPreview();
+  }
   function returnPreview(){
     const target=form.querySelector('[data-return-preview]');if(!target)return;
     const purchase=refundable.find(p=>p.id===form.elements.originalId.value);
@@ -653,6 +706,8 @@ async function renderSupplierDocumentTask(panel, context) {
   form.addEventListener('input',event=>{event.target.setCustomValidity?.('');dirty=true;remember();});form.addEventListener('change',event=>{event.target.setCustomValidity?.('');dirty=true;remember();});
   returnPreview();
   if(stale())status.textContent='Defter veya iş günü değişti. Güncel belgeleri kontrol edin.';else status.textContent=saved?.amend?'Düzeltme için eski etkinin geri alınmış önizlemesi':'Güncel açık belgeler hazır.';
+  const reviewBtn=doc.createElement('button');reviewBtn.type='button';reviewBtn.className='button secondary';reviewBtn.textContent='Güncel bilgilerle kontrol ettim';reviewBtn.hidden=!stale();form.append(reviewBtn);
+  reviewBtn.addEventListener('click',()=>{stamp={revision:state.revision,date:state.date};reviewBtn.hidden=true;remember();status.textContent='Güncel belgeler hazır. Kontrol edip kaydedin.';});
   form.addEventListener('submit',async event=>{
     event.preventDefault();if(sending||context.isPending?.())return;dirty=true;remember();if(stale()){status.textContent='Güncel belgeleri kontrol edin.';return;}
     const selectedSources=sourcePicker?.read();if(selectedSources?.error){status.textContent=selectedSources.error;return;}if(!form.reportValidity())return;
@@ -702,10 +757,10 @@ async function renderSupplierDocumentTask(panel, context) {
       if(!command.credits.length&&!command.received.length){status.textContent='Anlaşılan cari alacağı veya gerçek alınan karşılığı girin.';return;}
     }
     sending=true;save.disabled=true;
-    try{if(await context.submit(saved?.amend?{type:'supplierAmend',date:state.date,originalId:saved.amend.originalId,note:input.fields.amendNote.trim(),replacement:command}:command,'Toptancı belgesi kaydedildi.',{supplierDraftKey:key})){completed=true;memory.delete(key);if(form.isConnected){form.replaceChildren();status.textContent='Kayıt tamamlandı.';}}}
+    try{if(await context.submit(saved?.amend?{type:'supplierAmend',date:state.date,originalId:saved.amend.originalId,note:input.fields.amendNote.trim(),replacement:command}:command,'Toptancı belgesi kaydedildi.',{supplierDraftKey:key})){completed=true;if(store)store.clearDraft(key);memory.delete(key);memory.delete(legacyKey);if(form.isConnected){form.replaceChildren();status.textContent='Kayıt tamamlandı.';}}}
     catch(error){if(form.isConnected)status.textContent=error.message;}
     finally{sending=false;if(save.isConnected)save.disabled=false;}
   });
-  return completedDraftKey=>{if(completedDraftKey===key)completed=true;if(!sending)remember();sourcePicker?.destroy();};
+  return completedDraftKey=>{if(completedDraftKey===key||completedDraftKey===legacyKey)completed=true;if(!sending)remember();sourcePicker?.destroy();};
 }
 

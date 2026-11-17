@@ -15,12 +15,112 @@ const groups = ['received','given','credits','debts'];
 const groupNames = {received:'İşletmeye alınan',given:'İşletmeden verilen',credits:'Cari alacağımız artar / borcumuz azalır',debts:'Müşteriye borcumuz artar / alacağımız azalır'};
 let snapshot, pending, review, selectedCustomer = null, writing = false, rendering = false, customerLoading = false;
 let workspace = $('workspace').value, operation = $('operation').value;
-let loadSequence = 0, customerSequence = 0, draftRevision, draftDate, externalRevision = 0, stockPage = 0;
-const actorId = () => current()?.actor.id || '';
+let loadSequence = 0, customerSequence = 0, draftRevision, draftDate, draftDirty = false, externalRevision = 0, stockPage = 0;
+const defaultDraftStore = {
+  PREFIX: 'defter-draft:v1:',
+  PENDING_PREFIX: 'defter-draft:v1:pending:',
+  makeKey({ actorId = 'owner', workspace = 'dukkan', scope = 'checkout', type = 'trade', entityId = '' }) {
+    const clean = v => encodeURIComponent(String(v || 'unknown').trim().replace(/:/g, '_'));
+    return `${this.PREFIX}${clean(actorId)}:${clean(workspace)}:${clean(scope)}:${clean(type)}${entityId ? ':' + clean(entityId) : ''}`;
+  },
+  makePendingKey({ actorId = 'owner', workspace = 'dukkan', scope = 'checkout', type = 'trade' }) {
+    const clean = v => encodeURIComponent(String(v || 'unknown').trim().replace(/:/g, '_'));
+    return `${this.PENDING_PREFIX}${clean(actorId)}:${clean(workspace)}:${clean(scope)}:${clean(type)}`;
+  },
+  saveDraft(key, payload) {
+    try { sessionStorage.setItem(key, JSON.stringify(payload)); } catch {}
+  },
+  getDraft(key) {
+    try {
+      const raw = sessionStorage.getItem(key);
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+  },
+  clearDraft(key) {
+    try { sessionStorage.removeItem(key); } catch {}
+  },
+  savePending(key, envelope) {
+    try {
+      if (envelope === null || envelope === undefined) {
+        this.clearPending(key);
+        return null;
+      }
+      sessionStorage.setItem(key, JSON.stringify(envelope));
+      return envelope;
+    } catch { return null; }
+  },
+  getPending(key) {
+    try {
+      const raw = sessionStorage.getItem(key);
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+  },
+  clearPending(key) {
+    try { sessionStorage.removeItem(key); } catch {}
+  },
+  validateDraft(saved, state, options = {}) {
+    if (!saved) return { status: 'VALID', reason: null };
+    const meta = saved.meta || {};
+    if (state && Number.isSafeInteger(state.revision) && Number.isSafeInteger(meta.revision) && meta.revision !== state.revision) {
+      return { status: 'STALE_REVISION', reason: `Kayıt sürümü değişti (taslak: ${meta.revision}, güncel: ${state.revision}).` };
+    }
+    if (state && state.date && meta.workday && meta.workday !== state.date) {
+      return { status: 'STALE_WORKDAY', reason: `İş günü değişti (taslak: ${meta.workday}, güncel: ${state.date}).` };
+    }
+    return { status: 'VALID', reason: null };
+  }
+};
+function getDraftStore() {
+  if (typeof window !== 'undefined' && window.DefterDraftStore) return window.DefterDraftStore;
+  if (typeof globalThis !== 'undefined' && globalThis.DefterDraftStore) return globalThis.DefterDraftStore;
+  return defaultDraftStore;
+}
+const actorId = () => current()?.actor?.id || 'owner';
 const route = (path, selected=workspace) => '/api/'+path+'?workspace='+encodeURIComponent(selected);
-const pendingKey = (selected=workspace) => 'defter-sale-retry-'+actorId()+'-'+selected;
-const draftKey = (selected=workspace, kind=operation) => 'defter-pending-checkout-draft-'+actorId()+'-'+selected+'-'+kind;
+const draftStoreKey = (selected=workspace, kind=operation) => getDraftStore().makeKey({ actorId: actorId(), workspace: selected, scope: 'checkout', type: kind });
+const pendingStoreKey = (selected=workspace) => {
+  const store = getDraftStore();
+  if (typeof store.makePendingKey === 'function') {
+    return store.makePendingKey({ actorId: actorId(), workspace: selected, scope: 'checkout', type: 'trade' });
+  }
+  return store.makeKey({ actorId: actorId(), workspace: selected, scope: 'checkout', type: 'pending' });
+};
+const legacyDraftKey = (selected=workspace, kind=operation) => 'defter-pending-checkout-draft-'+actorId()+'-'+selected+'-'+kind;
+const legacyPendingKey = (selected=workspace) => 'defter-sale-retry-'+actorId()+'-'+selected;
 const readStored = key => { try {return JSON.parse(sessionStorage.getItem(key) || 'null');} catch {return null;} };
+function readStoredDraft(selected=workspace, kind=operation) {
+  const store = getDraftStore();
+  const stored = store.getDraft(draftStoreKey(selected, kind));
+  if (stored && stored.data) {
+    return { ...stored.data, revision: stored.meta?.revision ?? stored.data.revision, date: stored.meta?.workday ?? stored.data.date };
+  }
+  return readStored(legacyDraftKey(selected, kind));
+}
+function clearStoredDraft(selected=workspace, kind=operation) {
+  const store = getDraftStore();
+  store.clearDraft(draftStoreKey(selected, kind));
+  try { sessionStorage.removeItem(legacyDraftKey(selected, kind)); } catch {}
+  if (selected === workspace && kind === operation) draftDirty = false;
+}
+function readStoredPending(selected=workspace) {
+  const store = getDraftStore();
+  const stored = store.getPending?.(pendingStoreKey(selected));
+  if (stored) return stored;
+  return readStored(legacyPendingKey(selected));
+}
+function saveStoredPending(val, selected=workspace) {
+  const store = getDraftStore();
+  const pKey = pendingStoreKey(selected);
+  const legKey = legacyPendingKey(selected);
+  if (val) {
+    store.savePending?.(pKey, val);
+    try { sessionStorage.setItem(legKey, JSON.stringify(val)); } catch {}
+  } else {
+    store.clearPending?.(pKey);
+    if (typeof store.clearPending !== 'function') store.savePending?.(pKey, null);
+    try { sessionStorage.removeItem(legKey); } catch {}
+  }
+}
 const broadcast = typeof BroadcastChannel === 'function' ? new BroadcastChannel('defter-checkout-revisions') : null;
 const status = message => { $('status').textContent = message; };
 const isStale = () => snapshot && (draftRevision !== snapshot.revision || draftDate !== snapshot.date || externalRevision > snapshot.revision);
@@ -208,10 +308,28 @@ function draft() {
     items:[...$('items').children].map(row=>({selection:row.querySelector('[data-product]').value,search:row.querySelector('[data-product-search]').value,quantity:row.querySelector('[data-quantity]').value,value:row.querySelector('[data-value]').value,weight:row.querySelector('[data-weight]').value,weightAccount:row.querySelector('[data-pool]').value,pricing:pricing(row)})),
     ...Object.fromEntries(groups.map(kind=>[kind,[...$(kind).children].map(row=>({category:row.dataset.category,accountId:row.querySelector('[data-account]').value,quantity:row.querySelector('[data-quantity]').value,valueTL:row.querySelector('[data-value]').value,weight:row.querySelector('[data-weight]').value,weightAccount:row.querySelector('[data-pool]').value}))]))};
 }
-function saveDraft() {if(snapshot&&!rendering)sessionStorage.setItem(draftKey(),JSON.stringify(draft()));}
+function saveDraft() {
+  if (snapshot && !rendering && draftDirty) {
+    const payload = draft();
+    const store = getDraftStore();
+    store.saveDraft(draftStoreKey(), {
+      meta: {
+        actorId: actorId(),
+        workspace,
+        workday: draftDate ?? snapshot.date,
+        revision: draftRevision ?? snapshot.revision,
+        formId: 'checkout-' + operation,
+        type: operation
+      },
+      data: payload
+    });
+    try { sessionStorage.setItem(legacyDraftKey(), JSON.stringify(payload)); } catch {}
+  }
+}
 function changed(event) {
   if(rendering)return;
   event?.target?.setCustomValidity?.('');
+  draftDirty=true;
   review=null;$('review').hidden=true;
   totals();saveDraft();controls();
 }
@@ -227,6 +345,7 @@ function restoreDraft(saved) {
   for(const id of ['items',...groups])$(id).replaceChildren();
   selectedPerson(saved?.customer || null);
   draftRevision=saved?.revision ?? snapshot.revision;draftDate=saved?.date ?? snapshot.date;
+  draftDirty=Boolean(saved);
   for(const item of saved?.items || [{}])addItem(item);
   for(const kind of groups)for(const row of saved?.[kind] || [])addAllocation(kind,row);
   $('note').value=saved?.note || '';
@@ -319,7 +438,7 @@ async function refresh() {
   saveDraft();
   ++customerSequence;customerLoading=false;
   const sequence=++loadSequence,selected=workspace;
-  pending=readStored(pendingKey());
+  pending=readStoredPending(workspace);
   if(pending?.command && !pending.envelope) pending={envelope:pending,kind:'trade',operation:pending.command.type,workspace};
   snapshot=null;controls();$('trade').hidden=true;status('Mevcutlar yükleniyor…');
   try {
@@ -327,7 +446,7 @@ async function refresh() {
     if(sequence!==loadSequence || selected!==workspace)return;
     snapshot=fresh;externalRevision=Math.max(externalRevision,fresh.revision);
     $('date').textContent=fresh.initialized?'Açık iş günü · '+day(fresh.date):'Bu defterin açılışını işletme sahibi yapmalı.';
-    restoreDraft(readStored(draftKey()));stockTable();$('trade').hidden=!fresh.initialized;
+    restoreDraft(readStoredDraft(workspace, operation));stockTable();$('trade').hidden=!fresh.initialized;
     if(selectedCustomer && !pending) await lookupCustomer(selectedCustomer.id);
     if(sequence!==loadSequence || selected!==workspace)return;
     status('');
@@ -347,16 +466,16 @@ async function lookupCustomer(id) {
 }
 async function sendPending() {
   if(writing || !pending)return;
-  const request=pending,selected=workspace,key=pendingKey(selected);
+  const request=pending,selected=workspace;
   writing=true;controls();
   let message;
   try {
     const result=await api(route('command',selected),request.envelope);
-    sessionStorage.removeItem(key);pending=null;
+    saveStoredPending(null,selected);pending=null;
     broadcast?.postMessage({actorId:actorId(),workspace:selected,revision:result.revision});
     message=(result.duplicate?'Önceki kayıt doğrulandı. ':'İşlem kaydedildi. ')+'Kayıt '+result.id;
     if(request.kind==='trade') {
-      sessionStorage.removeItem(draftKey(selected,request.operation));
+      clearStoredDraft(selected,request.operation);
       $('search').value='';
       rendering=true;for(const id of ['items',...groups])$(id).replaceChildren();rendering=false;
       snapshot=null;
@@ -368,7 +487,7 @@ async function sendPending() {
       request.createdCustomer=result.account;
     }
   }catch(error){
-    if(error.status>=400&&error.status<500){sessionStorage.removeItem(key);pending=null;}
+    if(error.status>=400&&error.status<500){saveStoredPending(null,selected);pending=null;}
     message=error.message;
   }finally{
     writing=false;review=null;$('review').hidden=true;
@@ -381,7 +500,7 @@ function queue(envelope,kind) {
   if(pending || writing)return;
   ++customerSequence;customerLoading=false;
   pending={envelope,kind,operation,workspace};
-  sessionStorage.setItem(pendingKey(),JSON.stringify(pending));controls();
+  saveStoredPending(pending,workspace);controls();
   void sendPending();
 }
 const setCheckoutStep = step => {
@@ -454,12 +573,12 @@ $('customer-form').addEventListener('submit',event=>{
   for(const key of ['phone','taxId','address'])if(fields[key].trim())c[key]=fields[key].trim();
   saveDraft();queue({id:crypto.randomUUID(),revision:snapshot.revision,command:c},'customer');
 });
-$('operation').addEventListener('change',()=>{saveDraft();++customerSequence;customerLoading=false;operation=$('operation').value;review=null;restoreDraft(readStored(draftKey()));status('');});
+$('operation').addEventListener('change',()=>{saveDraft();++customerSequence;customerLoading=false;operation=$('operation').value;review=null;$('review').hidden=true;restoreDraft(readStoredDraft(workspace, operation));status('');});
 $('workspace').addEventListener('change',()=>{saveDraft();workspace=$('workspace').value;++customerSequence;customerLoading=false;selectedCustomer=null;externalRevision=0;snapshot=null;review=null;$('review').hidden=true;$('search').value='';void refresh();});
 $('refresh').addEventListener('click',()=>void refresh());
 $('retry').addEventListener('click',()=>void sendPending());
 $('accept-snapshot').addEventListener('click',()=>{if(snapshot){draftRevision=snapshot.revision;draftDate=snapshot.date;changed();}});
-$('clear-draft').addEventListener('click',()=>{++customerSequence;customerLoading=false;sessionStorage.removeItem(draftKey());restoreDraft(null);changed();status('Taslak temizlendi.');});
+$('clear-draft').addEventListener('click',()=>{++customerSequence;customerLoading=false;review=null;$('review').hidden=true;clearStoredDraft(workspace, operation);restoreDraft(null);status('Taslak temizlendi.');});
 $('stock-search').addEventListener('input',()=>{stockPage=0;stockTable();});
 $('stock-prev').addEventListener('click',()=>{stockPage--;stockTable();});
 $('stock-next').addEventListener('click',()=>{stockPage++;stockTable();});

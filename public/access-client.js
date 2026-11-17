@@ -20,7 +20,10 @@
   function clear() {
     sessionStorage.removeItem(key);
     for (const name of Object.keys(sessionStorage)) {
-      if (name.startsWith('defter-pending-') || name.startsWith('defter-sale-retry-')) sessionStorage.removeItem(name);
+      if (name.startsWith('defter-pending-') || name.startsWith('defter-sale-retry-') || name.startsWith('defter-draft:v1:')) sessionStorage.removeItem(name);
+    }
+    if (window.DefterDraftStore && typeof window.DefterDraftStore.clearSession === 'function') {
+      try { window.DefterDraftStore.clearSession(); } catch {}
     }
   }
   function lock() {

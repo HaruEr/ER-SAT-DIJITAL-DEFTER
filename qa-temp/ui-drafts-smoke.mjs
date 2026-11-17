@@ -7,10 +7,21 @@ import { INITIAL_ACCOUNTS } from '../domain.mjs';
 
 const JSDOM = await loadJSDOM();
 const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+const draftStoreSource = readFileSync(new URL('../public/draft-store.js', import.meta.url), 'utf8');
 const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 const checks = [];
 const check = (name, run) => checks.push({ name, run });
+function verifyControlledDraftStorage(sessionStorage) {
+  const SENSITIVE_PATTERN = /pass|pwd|token|auth|secret|bearer|credential|pin/i;
+  for (let i = 0; i < sessionStorage.length; i++) {
+    const key = sessionStorage.key(i);
+    assert.match(key, /^defter-draft:v1:/, `Key ${key} must follow defter-draft:v1:* prefix`);
+    assert.equal(SENSITIVE_PATTERN.test(key), false, `Draft key ${key} must not contain sensitive tokens`);
+    const val = sessionStorage.getItem(key);
+    assert.equal(SENSITIVE_PATTERN.test(val), false, `Draft content for ${key} must not contain sensitive tokens`);
+  }
+}
 async function fixture() {
   const repos = Object.fromEntries(['demo', 'dukkan'].map(workspace => [workspace, new Repository(':memory:', workspace)]));
   for (const repo of Object.values(repos)) repo.execute({ id: randomUUID(), revision: 0, command: { type: 'opening', date: '2026-10-28', balances: Object.fromEntries(INITIAL_ACCOUNTS.filter(a => !a.retired).map(a => [a.id, a.id === 'nakit' ? '10000' : a.id === 'gramToplam' ? '20' : '0'])) } });
@@ -28,6 +39,7 @@ async function fixture() {
     try { return { ok: true, status: 200, json: async () => repo.execute(envelope) }; }
     catch (error) { return { ok: false, status: error.status || 400, json: async () => ({ error: error.message }) }; }
   };
+  window.eval(draftStoreSource);
   window.eval(source + '\nwindow.__draftTest = { setView };'); await tick();
   const set = (selector, value) => { const input = document.querySelector(selector); assert.ok(input, selector); input.value = value; input.dispatchEvent(new window.Event(input.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })); };
   const tab = name => { window.__draftTest.setView('transaction'); document.querySelector(`[data-tab="${name}"]`).click(); };
@@ -43,7 +55,7 @@ check('sale draft survives navigation, operation changes and explicit refresh wi
   c.document.querySelector('[data-tab="purchase"]').click(); c.document.querySelector('[data-tab="sale"]').click();
   assert.equal(c.document.querySelector('[data-item-field="quantity"]').value, '2');
   c.document.querySelector('#refresh').click(); await tick(); assert.equal(c.document.querySelector('#f-note').value, 'Satış taslağı');
-  assert.deepEqual({ ...c.window.localStorage }, { 'defter-theme': 'light' }, 'Only the display preference may persist; no draft fields'); assert.equal(c.window.sessionStorage.length, 0);
+  assert.deepEqual({ ...c.window.localStorage }, { 'defter-theme': 'light' }, 'Only the display preference may persist; no draft fields'); verifyControlledDraftStorage(c.window.sessionStorage);
 });
 check('dynamic purchase products and HAS payment rows survive round trip', async c => {
   const repo = c.repos.demo; repo.execute({ id: randomUUID(), revision: repo.state().revision, command: { type: 'fundAccount', date: repo.state().date, name: 'Has kasa', unit: 'HAS', opening: '20', physical: true } });
@@ -127,7 +139,7 @@ check('routed account cannot silently validate a sale draft already stale before
 });
 check('leaving a dirty page warns without persisting draft content', async c => {
   c.tab('sale'); c.set('#f-note', 'Yalnız RAM'); const event = new c.window.Event('beforeunload', { cancelable: true }); c.window.dispatchEvent(event);
-  assert.equal(event.defaultPrevented, true); assert.deepEqual({ ...c.window.localStorage }, { 'defter-theme': 'light' }, 'No draft payload may persist'); assert.equal(c.window.sessionStorage.length, 0);
+  assert.equal(event.defaultPrevented, true); assert.deepEqual({ ...c.window.localStorage }, { 'defter-theme': 'light' }, 'No draft payload may persist'); verifyControlledDraftStorage(c.window.sessionStorage);
 });
 check('restore is blocked until current workspace drafts are explicitly discarded', async c => {
   c.tab('sale'); c.set('#f-note', 'Korunacak taslak'); c.nav('backup');

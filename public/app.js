@@ -4,6 +4,107 @@ const codec = globalThis.DefterAmountCodec;
 const dateFmt = globalThis.DefterDateFormat;
 const uiKit = globalThis.DefterUI;
 const units = codec ? codec.units : new Proxy({ TL: { scale: 100, digits: 2, label: 'TL' }, USD: { scale: 100, digits: 2, label: 'USD' }, EUR: { scale: 100, digits: 2, label: 'EUR' }, GRAM: { scale: 1000, digits: 3, label: 'gr' }, HAS: { scale: 1000, digits: 3, label: 'has gr' }, SILVER: { scale: 1000, digits: 3, label: 'saf gümüş gr' }, ADET: { scale: 1, digits: 0, label: 'adet' } }, { get: (known, code) => Object.hasOwn(known, code) ? known[code] : { scale: 100, digits: 2, label: String(code) } });
+
+function currentActorId() {
+  return (typeof window !== 'undefined' && window.DefterSession?.current()?.actor?.id) || (typeof globalThis !== 'undefined' && globalThis.DefterSession?.current()?.actor?.id) || 'owner';
+}
+
+const defaultDraftStore = {
+  makeKey: ({ actorId = 'owner', workspace = 'default', scope = 'retail', type = 'default', entityId } = {}) =>
+    `defter-draft:v1:${String(actorId).replace(/:/g, '_')}:${String(workspace).replace(/:/g, '_')}:${String(scope).replace(/:/g, '_')}:${String(type).replace(/:/g, '_')}${entityId !== undefined && entityId !== null && entityId !== '' ? ':' + entityId : ''}`,
+  saveDraft: (key, payload) => {
+    try { sessionStorage.setItem(key, JSON.stringify(payload)); } catch {}
+    return payload;
+  },
+  getDraft: key => {
+    try { const raw = sessionStorage.getItem(key); return raw ? JSON.parse(raw) : null; } catch { return null; }
+  },
+  clearDraft: key => {
+    try { sessionStorage.removeItem(key); sessionStorage.removeItem(key + ':pending'); } catch {}
+  },
+  clearSession: () => {},
+  clearWorkspace: ws => {
+    try {
+      const keys = [];
+      const cleanWs = String(ws).replace(/:/g, '_');
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const k = sessionStorage.key(i);
+        if (!k) continue;
+        if (k.startsWith('defter-draft:v1:')) {
+          const parts = k.split(':');
+          if (parts[3] === cleanWs) keys.push(k);
+        }
+      }
+      for (const k of keys) sessionStorage.removeItem(k);
+    } catch {}
+  },
+  listDrafts: ({ workspace: ws } = {}) => {
+    try {
+      const res = [];
+      const cleanWs = ws ? String(ws).replace(/:/g, '_') : null;
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const k = sessionStorage.key(i);
+        if (!k || !k.startsWith('defter-draft:v1:') || k.endsWith(':pending')) continue;
+        const parts = k.split(':');
+        if (cleanWs && parts[3] !== cleanWs) continue;
+        res.push(k);
+      }
+      return res;
+    } catch { return []; }
+  },
+  validateDraft: (draft, liveState, { isCountForm = false } = {}) => {
+    if (!draft || !liveState) return { status: 'INVALID', reasons: [] };
+    const meta = draft.meta || {};
+    const workdayMismatch = meta.workday && liveState.date && meta.workday !== liveState.date;
+    if (isCountForm && workdayMismatch) return { status: 'STALE_WORKDAY', reasons: ['Sayım yeni güne devredilemez.'] };
+    if (meta.revision !== undefined && liveState.revision !== undefined && Number(meta.revision) !== Number(liveState.revision)) return { status: 'STALE_REVISION', reasons: ['Revizyon değişti.'] };
+    if (workdayMismatch) return { status: 'STALE_WORKDAY', reasons: ['İş günü değişti.'] };
+    return { status: 'VALID', reasons: [] };
+  },
+  savePending: (key, env) => {
+    if (env === null || env === undefined) {
+      try { sessionStorage.removeItem(key + ':pending'); } catch {}
+      return null;
+    }
+    try { sessionStorage.setItem(key + ':pending', JSON.stringify(env)); } catch {}
+    return env;
+  },
+  getPending: key => {
+    try { const r = sessionStorage.getItem(key + ':pending'); return r ? JSON.parse(r) : null; } catch { return null; }
+  },
+  clearPending: key => {
+    try { sessionStorage.removeItem(key + ':pending'); } catch {}
+  }
+};
+function getDraftStore() {
+  return (typeof window !== 'undefined' && window.DefterDraftStore) || (typeof globalThis !== 'undefined' && globalThis.DefterDraftStore) || defaultDraftStore;
+}
+function pendingKeyForWorkspace(selected = (typeof workspace !== 'undefined' ? workspace : 'demo')) {
+  const store = getDraftStore();
+  const actorId = currentActorId();
+  return store.makeKey({ actorId, workspace: selected, scope: 'retail', type: 'pending' });
+}
+function readPending() {
+  const ws = typeof workspace !== 'undefined' ? workspace : (typeof localStorage !== 'undefined' && localStorage.getItem('defter-workspace') === 'dukkan' ? 'dukkan' : 'demo');
+  const store = getDraftStore();
+  const pKey = pendingKeyForWorkspace(ws);
+  const stored = store.getPending(pKey);
+  if (stored) return stored;
+  try { return JSON.parse(sessionStorage.getItem(`defter-pending-${ws}`)) || null; } catch { return null; }
+}
+function savePending(value) {
+  const store = getDraftStore();
+  const pKey = pendingKeyForWorkspace();
+  pending = value;
+  if (value) {
+    store.savePending(pKey, value);
+    try { sessionStorage.setItem(`defter-pending-${workspace}`, JSON.stringify(value)); } catch {}
+  } else {
+    store.clearPending(pKey);
+    try { sessionStorage.removeItem(`defter-pending-${workspace}`); } catch {}
+  }
+  $('#retry-bar').hidden = !pending;
+}
 let state, view = 'overview', transactionTab = 'sale', busy = false, editingTransaction = null, partyReturnContext = null;
 let busyControls = new Map();
 let recoveryGeneration = 0;
@@ -13,67 +114,183 @@ const journalFilterMemory = new Map();
 const workbenchMemory = new Map();
 const supplierMemory = new Map();
 let supplierModule, supplierWorkspace, supplierWorkspaceScope, supplierRenderGeneration=0, supplierCompletedDraftKey;
-// Drafts stay in this page's memory. Pending committed requests use their separate existing protocol.
-const drafts = new Map(), pendingDraftEffects = new Map();
+
+// Drafts are managed via window.DefterDraftStore (sessionStorage-backed, isolated per actor & workspace).
+const pendingDraftEffects = new Map();
 let restoringDraft = false;
 const draftForms = new Set(['opening-form','sale-form','movement-form','account-form','collection-form','transfer-form','settlement-form','close-form','stocktake-form','nominal-opening-form','stock-form','bank-form','bank-rename-form','account-edit-form']);
-function draftKey(form) { return `${workspace}:${view==='edit'&&editingTransaction?'edit:'+editingTransaction.original.id+':'+form.id:form.id === 'sale-form' ? form.dataset.operation || transactionTab : ['account-form','collection-form'].includes(form.id) ? view + ':' + form.id : form.id}${form.dataset.draftEntity?':'+form.dataset.draftEntity:''}`; }
+
+function draftKey(form) {
+  const store = getDraftStore();
+  const actorId = currentActorId();
+  const formOrOperation = view === 'edit' && editingTransaction
+    ? `edit:${editingTransaction.original.id}:${form.id}`
+    : form.id === 'sale-form'
+      ? form.dataset.operation || transactionTab
+      : ['account-form', 'collection-form'].includes(form.id)
+        ? `${view}:${form.id}`
+        : form.id;
+  const entityId = form.dataset.draftEntity || undefined;
+  return store.makeKey({ actorId, workspace, scope: 'retail', type: formOrOperation, entityId });
+}
+
 function draftFields(form) {
   return [...form.querySelectorAll('input,select,textarea')].filter(control => control.type !== 'file' && control.type !== 'password' && !control.matches('[data-item-field],[data-allocation-field]') && (control.name || control.id));
 }
+
 function captureDrafts() {
   if (restoringDraft) return;
+  const store = getDraftStore();
+  const actorId = currentActorId();
   for (const form of document.querySelectorAll('#main form[data-draft-key]')) {
     if (form.dataset.draftDirty !== 'true') continue;
-    drafts.set(form.dataset.draftKey, { revision: Number(form.dataset.draftRevision), date: form.dataset.draftDate, fields: Object.fromEntries(draftFields(form).map(control => [control.name || control.id, control.value])), sale: form.draftAdapter?.read() });
+    const key = form.dataset.draftKey;
+    const entityId = form.dataset.draftEntity || undefined;
+    const fields = Object.fromEntries(draftFields(form).map(control => [control.name || control.id, control.value]));
+    const draftRev = form.dataset.draftRevision !== undefined && form.dataset.draftRevision !== ''
+      ? Number(form.dataset.draftRevision)
+      : (state?.revision !== undefined ? Number(state.revision) : 0);
+    const draftDay = form.dataset.draftDate || state?.date || '';
+    store.saveDraft(key, {
+      meta: {
+        actorId,
+        workspace,
+        workday: draftDay,
+        revision: draftRev,
+        formId: form.id,
+        entityId
+      },
+      data: {
+        fields,
+        sale: form.draftAdapter?.read()
+      }
+    });
   }
 }
+
 function clearWorkspaceDrafts(selected = workspace) {
+  const store = getDraftStore();
   for (const key of supplierMemory.keys()) {
     if (key.startsWith('supplier:draft:')) {
-      try { if (JSON.parse(key.slice('supplier:draft:'.length))[0]===selected) supplierMemory.delete(key); } catch {}
+      try { if (JSON.parse(key.slice('supplier:draft:'.length))[0] === selected) supplierMemory.delete(key); } catch {}
     }
   }
-  for (const key of drafts.keys()) if (key.startsWith(selected + ':')) drafts.delete(key);
+  store.clearWorkspace(selected);
   if (partyReturnContext?.workspace === selected) partyReturnContext = null;
-  for (const form of document.querySelectorAll('#main form[data-draft-key]')) if (form.dataset.draftKey.startsWith(selected + ':')) form.dataset.draftDirty = 'false';
+  for (const form of document.querySelectorAll('#main form[data-draft-key]')) {
+    form.dataset.draftDirty = 'false';
+  }
 }
+
 function prepareDraftForms() {
+  const store = getDraftStore();
   for (const form of document.querySelectorAll('#main form')) {
     if ((!draftForms.has(form.id) && !form.id.startsWith('return-form-')) || form.dataset.draftKey) continue;
-    const key = draftKey(form), saved = drafts.get(key);
-    form.dataset.draftKey = key; form.dataset.draftRevision = String(saved?.revision ?? state.revision); form.dataset.draftDate = saved?.date ?? state.date ?? ''; form.dataset.draftDirty = String(Boolean(saved));
-    if (saved) {
+    const key = draftKey(form), saved = store.getDraft(key);
+    const count = ['close-form', 'stocktake-form'].includes(form.id);
+    const savedMeta = saved?.meta;
+    const savedData = saved?.data || saved;
+    form.dataset.draftKey = key;
+    form.dataset.draftRevision = String(savedMeta?.revision ?? saved?.revision ?? state.revision);
+    form.dataset.draftDate = savedMeta?.workday ?? savedMeta?.date ?? saved?.date ?? state.date ?? '';
+    form.dataset.draftDirty = String(Boolean(saved));
+
+    const validation = saved ? store.validateDraft(saved, state, { isCountForm: count }) : { status: 'VALID', reasons: [] };
+    const stale = validation.status !== 'VALID';
+    const isCountStaleWorkday = count && validation.status === 'STALE_WORKDAY';
+
+    if (saved && !isCountStaleWorkday) {
       restoringDraft = true;
       try {
+        const fields = savedData.fields || {};
         // Category/unit changes rebuild dependent selects; repeat once to restore their selected values.
-        for (let pass = 0; pass < 2; pass++) for (const control of draftFields(form)) if (Object.hasOwn(saved.fields, control.name || control.id)) {
-          const value = saved.fields[control.name || control.id];
-          if (control.tagName !== 'SELECT' || [...control.options].some(option => option.value === value)) control.value = value;
-          control.dispatchEvent(new Event(control.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true }));
+        for (let pass = 0; pass < 2; pass++) {
+          for (const control of draftFields(form)) {
+            if (Object.hasOwn(fields, control.name || control.id)) {
+              const value = fields[control.name || control.id];
+              if (control.tagName !== 'SELECT' || [...control.options].some(option => option.value === value)) control.value = value;
+              control.dispatchEvent(new Event(control.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true }));
+            }
+          }
         }
-        if (saved.sale) form.draftAdapter?.restore(saved.sale);
-      } finally { restoringDraft = false; }
+        if (savedData.sale) form.draftAdapter?.restore(savedData.sale);
+      } finally {
+        restoringDraft = false;
+      }
     }
-    const stale = saved && (saved.revision !== state.revision || saved.date !== (state.date ?? ''));
+
     form.dataset.draftStale = String(Boolean(stale));
-    const bar = document.createElement('div'); bar.className = stale ? 'info neutral' : 'draft-status';
-    const count = ['close-form','stocktake-form'].includes(form.id);
-    bar.innerHTML = `<${stale ? 'p' : 'span'}${stale ? ' data-draft-stale role="alert"' : ''}>${stale ? count ? 'Bu sayım eski kayıt sürümüne veya iş gününe ait. Değerler yalnız inceleme için korundu; taslağı temizleyip güncel mevcutlarla yeniden sayın.' : 'Bu taslak hazırlanırken defter değişti. Hesapları, miktarları ve karşılıkları güncel bilgilerle yeniden kontrol edin.' : 'Taslak · Bu sayfa kapanınca silinir.'}</${stale ? 'p' : 'span'}><button type="button" class="button secondary compact" data-clear-draft>Taslağı temizle</button>${stale && !count ? '<button type="button" class="button secondary compact" data-review-draft>Güncel bilgilerle kontrol ettim</button>' : ''}`;
+    const bar = document.createElement('div');
+    bar.className = stale ? 'info neutral' : 'draft-status';
+
+    let staleMessage = '';
+    if (stale) {
+      if (validation.status === 'DISABLED_ENTITY') {
+        staleMessage = validation.reasons?.[0] || 'Seçili kart kullanıma kapatılmış veya devre dışı bırakılmış. Taslak doğrudan kaydedilemez.';
+      } else if (count) {
+        staleMessage = 'Bu sayım eski kayıt sürümüne veya iş gününe ait. Değerler yalnız inceleme için korundu; taslağı temizleyip güncel mevcutlarla yeniden sayın.';
+      } else if (validation.status === 'STALE_WORKDAY') {
+        staleMessage = 'Bu taslak eski bir iş gününe ait. Bilgileri güncel iş günü için kontrol edin.';
+      } else {
+        staleMessage = 'Bu taslak hazırlanırken defter değişti. Hesapları, miktarları ve karşılıkları güncel bilgilerle yeniden kontrol edin.';
+      }
+    } else {
+      staleMessage = 'Taslak · Bu sayfa kapanınca silinir.';
+    }
+
+    const showReview = stale && !count && validation.status !== 'DISABLED_ENTITY';
+
+    bar.innerHTML = `<${stale ? 'p' : 'span'}${stale ? ' data-draft-stale role="alert"' : ''}>${esc(staleMessage)}</${stale ? 'p' : 'span'}><button type="button" class="button secondary compact" data-clear-draft>Taslağı temizle</button>${showReview ? '<button type="button" class="button secondary compact" data-review-draft>Güncel bilgilerle kontrol ettim</button>' : ''}`;
     form.prepend(bar);
-    if (stale) for (const button of form.querySelectorAll('button[type="submit"]')) button.disabled = true;
-    bar.querySelector('[data-clear-draft]').addEventListener('click', () => { if (pending) { inform('Önce sonucu belirsiz son isteği doğrulayın. Taslak temizlenmedi.', true); return; } drafts.delete(key); form.dataset.draftDirty = 'false'; render(); $('#main').focus({ preventScroll: true }); inform('Bu işlem taslağı temizlendi. Kayıtlı hareketler değiştirilmedi.'); });
-    bar.querySelector('[data-review-draft]')?.addEventListener('click', () => { captureDrafts(); const draft = drafts.get(key); if (draft) { draft.revision = state.revision; draft.date = state.date ?? ''; } form.dataset.draftDirty = 'false'; render(); $('#main').focus({ preventScroll: true }); });
-    form.addEventListener('submit', event => { if (form.dataset.draftStale === 'true') { event.preventDefault(); event.stopImmediatePropagation(); inform(count ? 'Eski sayım gönderilmedi. Taslağı temizleyip güncel sayımı yeniden girin.' : 'Taslak gönderilmedi. Önce güncel bilgileri kontrol ederek onaylayın.', true); } }, true);
+
+    if (stale) {
+      for (const button of form.querySelectorAll('button[type="submit"]')) button.disabled = true;
+    }
+
+    bar.querySelector('[data-clear-draft]').addEventListener('click', () => {
+      if (pending) {
+        inform('Önce sonucu belirsiz son isteği doğrulayın. Taslak temizlenmedi.', true);
+        return;
+      }
+      store.clearDraft(key);
+      form.dataset.draftDirty = 'false';
+      render();
+      $('#main').focus({ preventScroll: true });
+      inform('Bu işlem taslağı temizlendi. Kayıtlı hareketler değiştirilmedi.');
+    });
+
+    bar.querySelector('[data-review-draft]')?.addEventListener('click', () => {
+      form.dataset.draftRevision = String(state.revision);
+      form.dataset.draftDate = state.date ?? '';
+      form.dataset.draftStale = 'false';
+      captureDrafts();
+      const currentDraft = store.getDraft(key);
+      if (currentDraft) {
+        currentDraft.meta = currentDraft.meta || {};
+        currentDraft.meta.revision = state.revision;
+        currentDraft.meta.workday = state.date ?? '';
+        currentDraft.meta.date = state.date ?? '';
+        store.saveDraft(key, currentDraft);
+      }
+      form.dataset.draftDirty = 'false';
+      render();
+      $('#main').focus({ preventScroll: true });
+    });
+
+    form.addEventListener('submit', event => {
+      if (form.dataset.draftStale === 'true') {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        inform(count ? 'Eski sayım gönderilmedi. Taslağı temizleyip güncel sayımı yeniden girin.' : 'Taslak gönderilmedi. Önce güncel bilgileri kontrol ederek onaylayın.', true);
+      }
+    }, true);
   }
 }
 document.addEventListener('input', event => { const form = event.target.closest('form[data-draft-key]'); if (form && !restoringDraft) form.dataset.draftDirty = 'true'; });
 document.addEventListener('change', event => { const form = event.target.closest('form[data-draft-key]'); if (form && !restoringDraft) form.dataset.draftDirty = 'true'; });
-window.addEventListener('beforeunload', event => { captureDrafts(); if (drafts.size || pending) { event.preventDefault(); event.returnValue = ''; } });
+window.addEventListener('beforeunload', event => { captureDrafts(); if (getDraftStore().listDrafts({ workspace }).length || pending) { event.preventDefault(); event.returnValue = ''; } });
 const countGroupLabel = group => ({'ana-terazi':'ANA TERAZİ · 14 AYAR / 22 AYAR / BİLEZİK',gunluk:'GÜNLÜK DEFTER · ADET, PARA VE GRAM ALTIN TOPLAMI', 'gram-havuzu':'GRAM ALTIN · AYRI AĞIRLIK HAVUZU'})[group] || 'DİĞER MEVCUT';
 const api = path => `/api/${path}?workspace=${workspace}`;
-function readPending() { try { return JSON.parse(sessionStorage.getItem(`defter-pending-${workspace}`)) || null; } catch { return null; } }
-function savePending(value) { pending = value; if (value) sessionStorage.setItem(`defter-pending-${workspace}`, JSON.stringify(value)); else sessionStorage.removeItem(`defter-pending-${workspace}`); $('#retry-bar').hidden = !pending; }
 function formatted(value, unit = 'TL') { return codec ? codec.formatAmount(value, unit) : `${new Intl.NumberFormat('tr-TR', { minimumFractionDigits: units[unit].digits, maximumFractionDigits: units[unit].digits }).format((value || 0) / units[unit].scale)} ${units[unit].label}`; }
 function raw(value, unit) { return codec ? codec.canonicalFromScaled(value || 0, unit) : ((value || 0) / units[unit].scale).toFixed(units[unit].digits); }
 function day(value) { return dateFmt ? dateFmt.formatTurkishDate(value) : (value ? new Date(`${value}T12:00:00`).toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' }) : 'Başlangıç devri bekleniyor'); }
@@ -213,20 +430,32 @@ async function submit(command, message = 'İşlem kaydedildi.', envelope, effect
     if(!result?.found){sent=true;$('#retry-bar span').textContent='İşlem kaydediliyor…';result=await request('command', content);}
     savePending(null); state = result.state;
     const completed = pendingDraftEffects.get(content.id); pendingDraftEffects.delete(content.id);
-    if (completed?.key) drafts.delete(completed.key);
+    if (completed?.key) getDraftStore().clearDraft(completed.key);
     if (completed?.supplierDraftKey) {
       supplierMemory.delete(completed.supplierDraftKey);
+      getDraftStore().clearDraft(completed.supplierDraftKey);
       supplierCompletedDraftKey=completed.supplierDraftKey;
     }
     const returnContext = completed?.partyReturn;
     let createdPartyId;
     if (returnContext && returnContext.workspace === workspace && partyReturnContext === returnContext) {
-      const sale = drafts.get(returnContext.saleKey), created = state.accounts.find(a => a.id === 'cari-' + content.id && a.partyType === returnContext.partyType);
-      if (sale && created) {
+      const store = getDraftStore();
+      const saleEnvelope = store.getDraft(returnContext.saleKey);
+      const created = state.accounts.find(a => a.id === 'cari-' + content.id && a.partyType === returnContext.partyType);
+      if (saleEnvelope && created) {
         // Only our own account creation may advance a draft based on the immediately preceding state.
-        if (sale.revision === completed.baseRevision && sale.date === completed.baseDate) { sale.revision = state.revision; sale.date = state.date; }
-        sale.fields.counterpartyId = created.id;
-        if (!returnContext.mode.includes('purchase') && sale.sale && !sale.sale.debt.some(row => row.accountId === created.id) && sale.sale.debt.length < 30) sale.sale.debt.push({ accountId: created.id, quantity: '', valueTL: '' });
+        if (saleEnvelope.meta?.revision === completed.baseRevision && (saleEnvelope.meta?.workday || saleEnvelope.meta?.date) === completed.baseDate) {
+          saleEnvelope.meta.revision = state.revision;
+          saleEnvelope.meta.workday = state.date;
+          saleEnvelope.meta.date = state.date;
+        }
+        saleEnvelope.data = saleEnvelope.data || {};
+        saleEnvelope.data.fields = saleEnvelope.data.fields || {};
+        saleEnvelope.data.fields.counterpartyId = created.id;
+        if (!returnContext.mode.includes('purchase') && saleEnvelope.data.sale && !saleEnvelope.data.sale.debt.some(row => row.accountId === created.id) && saleEnvelope.data.sale.debt.length < 30) {
+          saleEnvelope.data.sale.debt.push({ accountId: created.id, quantity: '', valueTL: '' });
+        }
+        store.saveDraft(returnContext.saleKey, saleEnvelope);
         createdPartyId = created.id;
         applyPartyReturn(returnContext);
       }
@@ -244,10 +473,18 @@ async function submit(command, message = 'İşlem kaydedildi.', envelope, effect
     else inform(result.duplicate ? 'Bu işlem daha önce kaydedilmişti. İkinci kez yazılmadı.' : message);
     return true;
   } catch (e) {
+    if (e.status === 409) {
+      savePending(null);
+      pendingDraftEffects.delete(content.id);
+      setBusy(false);
+      void refresh(false);
+      inform('Defter değişti (revizyon çakışması). Bilgileri kontrol edip işlemi yeniden onaylayın.', true);
+      return false;
+    }
     if (sent && e.status >= 400 && e.status < 500) { savePending(null); pendingDraftEffects.delete(content.id); }
     const errorMessage=/Failed to fetch|NetworkError|Load failed/i.test(e.message)?'Sunucu yanıtı alınamadı. Kayıt sonucu belirsiz; yeniden denemeden önce mevcut kayıt sorgulanacak.':e.message;
     if(lookupOnly&&!state)renderLoadError(errorMessage);
-    inform(e.status === 409 || /başka sekmede|Veriler değişti|Yenileyip|Ekranı yenileyin/i.test(errorMessage) ? `${errorMessage} Üstteki Yenile düğmesine basın; açık formu ve sayımı yeniden kontrol edin.` : errorMessage, true);
+    inform(errorMessage, true);
     return false;
   } finally {
     $('#retry-bar span').textContent = 'Son isteğin sonucu doğrulanamadı. Yeniden denemeden önce mevcut kayıt sorgulanır; bulunmazsa aynı anahtarla gönderilir.';
@@ -292,12 +529,66 @@ function enhanceTables(container) {
 }
 function action(label, note = 'Tüm bağlı hareketler tek kayıt olarak işlenir.') { return `<div class="form-actions"><span class="muted">${note}</span><button class="button" type="submit">${label}</button></div>`; }
 const formValues = form => Object.fromEntries(new FormData(form).entries());
-function setView(next) {
+const VALID_VIEWS = new Set(['overview', 'transaction', 'closing', 'accounts', 'suppliers', 'stocks', 'banks', 'journal', 'summary', 'backup', 'edit']);
+function parseViewHash(hashStr = (typeof window !== 'undefined' ? window.location?.hash : '') || '') {
+  const raw = String(hashStr || '').replace(/^#/, '').trim();
+  if (!raw) return null;
+  const params = new URLSearchParams(raw.startsWith('?') ? raw.slice(1) : raw);
+  const v = params.get('v');
+  if (!v || !VALID_VIEWS.has(v)) return null;
+  const tab = params.get('tab');
+  if (v === 'edit' && (!editingTransaction || editingTransaction.workspace !== workspace)) {
+    return { view: 'journal', tab: null, normalized: true };
+  }
+  return {
+    view: v,
+    tab: v === 'transaction' && (tab === 'sale' || tab === 'movement') ? tab : null,
+    normalized: false
+  };
+}
+function formatViewHash(targetView = view, targetTab = transactionTab) {
+  if (targetView === 'transaction' && (targetTab === 'sale' || targetTab === 'movement')) {
+    return `#v=transaction&tab=${encodeURIComponent(targetTab)}`;
+  }
+  return `#v=${encodeURIComponent(targetView)}`;
+}
+function syncUrlHash(mode = 'push') {
+  if (typeof window === 'undefined' || !window.location || !window.history) return;
+  const targetHash = formatViewHash(view, transactionTab);
+  const currentHash = window.location.hash || '';
+  if (currentHash === targetHash) return;
+  const stateObj = { ...(window.history.state && typeof window.history.state === 'object' ? window.history.state : {}), view, tab: transactionTab, defterLayerId: null };
+  try {
+    if (mode === 'replace' && typeof window.history.replaceState === 'function') {
+      window.history.replaceState(stateObj, '', targetHash);
+    } else if (typeof window.history.pushState === 'function') {
+      window.history.pushState(stateObj, '', targetHash);
+    } else {
+      window.location.hash = targetHash;
+    }
+  } catch {}
+}
+function hasDirtyDraftInMain() {
+  const main = $('#main');
+  if (!main) return false;
+  return [...main.querySelectorAll('form[data-draft-dirty="true"]')].some(form => !form.closest('[hidden]'));
+}
+function setView(next, options = {}) {
+  const { fromHistory = false, replaceHistory = false } = options;
   setNavigationOpen(false);
+  const hadDirty = hasDirtyDraftInMain();
   captureDrafts();
   if (partyReturnContext && (partyReturnContext.workspace !== workspace || next !== partyReturnContext.ownerView)) partyReturnContext = null;
   uiKit?.clearToasts(); uiKit?.closePopover();
-  view = next; $('#notice').hidden = true; render(); $('#main').focus({ preventScroll: true });$('#main').scrollIntoView?.({block:'start',behavior:'instant'});
+  const prevView = view;
+  view = VALID_VIEWS.has(next) ? next : 'overview';
+  if (view === 'edit' && (!editingTransaction || editingTransaction.workspace !== workspace)) view = 'journal';
+  $('#notice').hidden = true; render();
+  if (fromHistory && hadDirty && prevView !== view) {
+    inform('Açık formdaki taslak geçici olarak saklandı; geri döndüğünüzde devam edebilirsiniz.', false);
+  }
+  syncUrlHash(fromHistory || replaceHistory ? 'replace' : 'push');
+  $('#main').focus({ preventScroll: true });$('#main').scrollIntoView?.({block:'start',behavior:'instant'});
 }
 function canonicalTransactionRoute() {
   if (view !== 'transaction') return false;
@@ -2097,7 +2388,7 @@ function bindRestoreForm({ revision, selectedWorkspace = workspace, recovery = f
     event.preventDefault(); if (busy || !current()) return;
     if (pending) { inform('Önce sonucu belirsiz son isteği doğrulayın.', true); return; }
     captureDrafts();
-    if (drafts.size) { inform('Geri yüklemeden önce açık işlem taslaklarını temizleyin.', true); return; }
+    if (getDraftStore().listDrafts({ workspace: selectedWorkspace }).length) { inform('Geri yüklemeden önce açık işlem taslaklarını temizleyin.', true); return; }
     const file = form.querySelector('#f-backupFile').files[0], confirmation = form.querySelector('#f-confirmation').value;
     const streamed = typeof file?.name === 'string' && /\.ndjson$/i.test(file.name);
     const fileLimit = (streamed ? 512 : 64) * 1024 * 1024;
@@ -2143,7 +2434,7 @@ function bindRestoreForm({ revision, selectedWorkspace = workspace, recovery = f
 function renderBackup() {
   $('#main').innerHTML = heading('Yedek ve çalışma alanı', 'Örnek ve dükkân kayıtları ayrı SQLite dosyalarında tutulur. Mevcut Excel dosyaları bu uygulamadan bağımsızdır.') + `<div class="split"><section class="section"><h2>Defter yedeği</h2><p class="subtitle">Yedek; bütün olay geçmişini ve bütünlük özetini içerir. İndirilen dosyayı ayrı bir diskte de saklayın.</p><div class="recovery-actions"><a class="button" href="${api('archive')}" download>Tam Arşivi İndir (.ndjson)</a><a class="button secondary" href="${api('backup')}" download>Taşınabilir Yedek İndir (.json)</a></div><p class="context-note">Günlük ve büyük defterler için Tam Arşiv (.ndjson, 512 MiB / 250.000 olay); küçük tek-dosya aktarımları için Taşınabilir Yedek (.json, 64 MiB) önerilir.</p><div class="info neutral">İndirme düğmesi tek başına yedeğin başka ortamda güvende olduğunu kanıtlamaz. Örnek çalışma alanında geri yükleme deneyin. Yedek yalnız alındığı çalışma alanına yüklenebilir; örnek yedek dükkân defterine taşınamaz. Bütünlük özeti dijital imza veya şifreleme değildir.</div><div class="restore-section"><h3>Yedekten geri yükle</h3><p class="subtitle">Seçili alanın aktif geçmişi yedekteki geçmişle değiştirilir. Sunucu önce mevcut geçmişi kendi veritabanında geri yükleme arşivine alır. İşlemden önce ayrıca uygun biçimde yedek indirin.</p><div id="restore-panel">${restoreFormMarkup()}</div></div></section><section class="section"><h2>Bu ilk sürümün sınırları</h2><ul class="helper-list"><li><b>Yerel kullanıcı hesapları</b><small>Ana bilgisayardaki editör kullanıcı oturumunu ve işlem yetkisini denetler. Telefon için ayrı kimlik doğrulamalı, salt okunur rapor portalı vardır; uzak bağlantı ayrıca devreye alınmalıdır.</small></li><li><b>Tek olay defteri</b><small>Satış, ödemeler ve stok aynı olayın bağlı hareketleridir. Sayım farkı açıklamalı ayrı iz bırakır.</small></li><li><b>Özgün birimler korunur</b><small>Para, gram, has gram ve adet birbirine otomatik çevrilmez. Fiyat katsayısı fiziksel saflık sayılmaz.</small></li><li><b>Henüz kapsam dışı</b><small>Emanet/konsinye, mülkiyet ve konum transferleri, ticari katsayı, otomatik maliyet tahsisi, atölye ve vergi hesabı.</small></li><li><b>Gerçek defterle doğrulanacak</b><small>Hurdanın terazi kapsamı, işçilik, has cari mahsuplaşması, POS valörü ve dükkânın kazanç hesabı. Günlük sayım ile dönemsel tartım ayrıdır.</small></li></ul></section></div>`;
   bindRestoreForm({ revision: state.revision });
-  const count = [...drafts.keys()].filter(key => key.startsWith(workspace + ':')).length;
+  const count = getDraftStore().listDrafts({ workspace }).length;
   if (count) {
     $('#restore-panel').insertAdjacentHTML('beforebegin', '<div class="info neutral" role="status"><p>Bu alanda ' + count + ' işlem taslağı var. Geri yükleme öncesinde bunları kontrol edip açıkça temizleyin. Diğer çalışma alanının taslakları korunur.</p><button type="button" class="button secondary compact" data-clear-workspace-drafts>Bu alandaki taslakları temizle</button></div>');
     $('#restore-form button[type="submit"]').disabled = true;
@@ -2188,6 +2479,49 @@ $('.sidebar')?.addEventListener('keydown', event => {
     setNavigationOpen(false); $('#navigation-toggle').focus(); event.preventDefault();
   }
 });
+let handlingHistoryNav = false;
+function handleBrowserNavigation() {
+  if (handlingHistoryNav) return;
+  handlingHistoryNav = true;
+  try {
+    if (uiKit?.getLayerCount?.() > 0) {
+      uiKit.closeTopLayer('popstate');
+      syncUrlHash('replace');
+      return;
+    }
+    if (pending) {
+      inform('Önce sonucu belirsiz son isteği doğrulayın.', true);
+      syncUrlHash('replace');
+      return;
+    }
+    const parsed = parseViewHash();
+    if (!parsed) {
+      syncUrlHash('replace');
+      return;
+    }
+    if (parsed.normalized) {
+      setView(parsed.view, { fromHistory: true });
+      return;
+    }
+    if (parsed.view !== view || (parsed.view === 'transaction' && parsed.tab && parsed.tab !== transactionTab)) {
+      if (parsed.view === 'transaction' && parsed.tab) transactionTab = parsed.tab;
+      setView(parsed.view, { fromHistory: true });
+    }
+  } finally {
+    handlingHistoryNav = false;
+  }
+}
+window.addEventListener('popstate', handleBrowserNavigation);
+window.addEventListener('hashchange', handleBrowserNavigation);
+window.addEventListener('beforeunload', event => {
+  if (pending || hasDirtyDraftInMain()) {
+    captureDrafts();
+    if (pending) {
+      event.preventDefault();
+      event.returnValue = '';
+    }
+  }
+});
 async function start() {
   applyTheme(localStorage.getItem('defter-theme')||'light');
   $('#theme-toggle')?.addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));
@@ -2203,8 +2537,14 @@ async function start() {
   };
   applyCollapsed((()=>{try{return localStorage.getItem('defter-sidebar-collapsed')==='1';}catch{return false;}})(), false);
   collapseBtn?.addEventListener('click',()=>applyCollapsed(!shell.classList.contains('sidebar-collapsed'), true));
+  const initialHash = parseViewHash();
+  if (initialHash) {
+    view = initialHash.view;
+    if (initialHash.view === 'transaction' && initialHash.tab) transactionTab = initialHash.tab;
+  }
   $('#workspace').value = workspace;
   await refresh(false);
+  syncUrlHash('replace');
 }
 start();
 
