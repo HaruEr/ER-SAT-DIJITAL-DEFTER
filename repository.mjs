@@ -5,7 +5,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { replay, fail, text, eventVersion, eventActor } from './domain.mjs';
 import { exportLedgerArchive, importLedgerArchive } from './archive.mjs';
-import { LEDGER_CACHE_MAX_BYTES, applyLedgerEvent, estimateLedgerBytes, hydrateLedger, normalizeJournalOptions, projectAccountStatement, projectJournal, projectLedger } from './ledger-view.mjs';
+import { LEDGER_CACHE_MAX_BYTES, applyLedgerEvent, estimateLedgerBytes, hydrateLedger, normalizeJournalOptions, projectAccountStatement, projectJournal, projectLedger, restoreLedgerSnapshot } from './ledger-view.mjs';
+const SNAPSHOT_VERSION = 1;
+const SNAPSHOT_MIN_EVENTS = 500;
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const BACKUP_MAX_BYTES = 64 * 1024 * 1024;
 const backupTooLarge = () => fail('JSON yedeği desteklenen 64 MiB sınırını aşıyor. Büyük defter için Yedek ekranındaki akışlı arşivi kullanın.', { status: 413, code: 'BACKUP_TOO_LARGE' });
@@ -15,18 +17,22 @@ export function assertBackupSize(backup) {
 export class Repository {
   #cache = null;
   #cacheMaxBytes;
+  #filename;
+  #snapshotDirty = false;
   #hits = 0;
   #misses = 0;
   constructor(filename = ':memory:', workspace = 'test', { cacheMaxBytes = LEDGER_CACHE_MAX_BYTES } = {}) {
     if (!Number.isSafeInteger(cacheMaxBytes) || cacheMaxBytes < 0 || cacheMaxBytes > LEDGER_CACHE_MAX_BYTES) throw new Error('Invalid ledger cache budget.');
     this.#cacheMaxBytes = cacheMaxBytes;
+    this.#filename = filename;
     this.workspace = workspace;
     this.db = new DatabaseSync(filename);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
       CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS meta(id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
       INSERT OR IGNORE INTO meta VALUES(1,0);
-      CREATE TABLE IF NOT EXISTS restore_archive(id INTEGER PRIMARY KEY, created_at TEXT, body TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS restore_archive(id INTEGER PRIMARY KEY, created_at TEXT, body TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS ledger_snapshot(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL, revision INTEGER NOT NULL, last_seq INTEGER NOT NULL, event_count INTEGER NOT NULL, sha256 TEXT NOT NULL, body TEXT NOT NULL);`);
   }
   events({ stream = false } = {}) {
     const rows = this.db.prepare('SELECT body FROM events ORDER BY seq').iterate();
@@ -50,17 +56,56 @@ export class Repository {
     const estimatedBytes = estimateLedgerBytes(ledger);
     this.#cache = estimatedBytes <= this.#cacheMaxBytes ? { ledger, key, estimatedBytes } : null;
   }
+  #loadSnapshot(revision) {
+    if (this.#cacheMaxBytes <= 0 || this.#filename === ':memory:') return null;
+    try {
+      const metaStats = this.db.prepare('SELECT COALESCE(MAX(seq), 0) AS last_seq, COUNT(*) AS event_count FROM events').get();
+      if (!metaStats || metaStats.event_count < SNAPSHOT_MIN_EVENTS) return null;
+      const row = this.db.prepare('SELECT version, revision, last_seq, event_count, sha256, body FROM ledger_snapshot WHERE id=1').get();
+      if (!row || row.version !== SNAPSHOT_VERSION || row.revision !== revision || row.last_seq !== metaStats.last_seq || row.event_count !== metaStats.event_count) return null;
+      if (createHash('sha256').update(row.body).digest('hex') !== row.sha256) return null;
+      const parsed = JSON.parse(row.body);
+      if (!parsed || !parsed.state || !Array.isArray(parsed.state.journal) || parsed.state.journal.length < metaStats.event_count) return null;
+      const ledger = restoreLedgerSnapshot(parsed);
+      ledger.state.revision = revision;
+      return ledger;
+    } catch { return null; }
+  }
+  #saveSnapshot(ledger, revision) {
+    if (this.#cacheMaxBytes <= 0 || this.#filename === ':memory:' || ledger.state.journal.length < SNAPSHOT_MIN_EVENTS) return;
+    try {
+      const metaStats = this.db.prepare('SELECT COALESCE(MAX(seq), 0) AS last_seq, COUNT(*) AS event_count FROM events').get();
+      if (!metaStats || metaStats.event_count < SNAPSHOT_MIN_EVENTS) return;
+      const body = JSON.stringify({ state: ledger.state, journalBytes: ledger.journalBytes });
+      const sha256 = createHash('sha256').update(body).digest('hex');
+      this.db.prepare('INSERT OR REPLACE INTO ledger_snapshot(id, version, revision, last_seq, event_count, sha256, body) VALUES(1, ?, ?, ?, ?, ?, ?)').run(SNAPSHOT_VERSION, revision, metaStats.last_seq, metaStats.event_count, sha256, body);
+      this.#snapshotDirty = false;
+    } catch { /* Snapshot persistence is best-effort; events remain authoritative. */ }
+  }
   #ownedLedger() {
     const ownTransaction = !this.db.isTransaction;
     if (ownTransaction) this.db.exec('BEGIN');
     try {
       const { revision, key } = this.#fingerprint();
-      let ledger;
+      let ledger, rebuiltFromEvents = false;
       if (this.#cache?.key === key) { this.#hits++; ledger = this.#cache.ledger; }
-      else { this.#misses++; ledger = hydrateLedger(this.events({ stream: true })); ledger.state.revision = revision; }
+      else {
+        this.#misses++;
+        ledger = this.#loadSnapshot(revision);
+        if (!ledger) {
+          ledger = hydrateLedger(this.events({ stream: true }));
+          ledger.state.revision = revision;
+          rebuiltFromEvents = true;
+        }
+      }
       if (ownTransaction) {
         this.db.exec('COMMIT');
-        this.#remember(ledger, key);
+        if (rebuiltFromEvents) {
+          this.#saveSnapshot(ledger, revision);
+          this.#remember(ledger, this.#fingerprint().key);
+        } else {
+          this.#remember(ledger, key);
+        }
       }
       return ledger;
     } catch (error) {
@@ -131,7 +176,7 @@ export class Repository {
       this.db.exec('UPDATE meta SET revision=revision+1 WHERE id=1');
       ledger.state.revision = revision + 1;
       const { key } = this.#fingerprint();
-      this.db.exec('COMMIT'); this.#remember(ledger, key); return { state: projectLedger(ledger, compact), duplicate: false };
+      this.db.exec('COMMIT'); this.#snapshotDirty = true; this.#remember(ledger, key); return { state: projectLedger(ledger, compact), duplicate: false };
     } catch (e) { this.#cache = null; if (this.db.isTransaction) this.db.exec('ROLLBACK'); throw e; }
   }
   #backupSnapshot({ bounded = false } = {}) {
@@ -172,7 +217,7 @@ export class Repository {
       if (revision !== this.db.prepare('SELECT revision FROM meta WHERE id=1').get().revision) fail('Veriler değişti. Geri yüklemeden önce yenileyin.', { status: 409, code: 'REVISION_CONFLICT' });
       // Preserve the previous history even when it exceeds the supported export size.
       this.db.prepare('INSERT INTO restore_archive(created_at,body) VALUES(?,?)').run(new Date().toISOString(), JSON.stringify(this.#backupSnapshot()));
-      this.db.exec('DELETE FROM events');
+      this.db.exec('DELETE FROM events; DELETE FROM ledger_snapshot;');
       const insert = this.db.prepare('INSERT INTO events(id,body) VALUES(?,?)');
       for (const event of backup.events) insert.run(event.id, JSON.stringify(event));
       this.db.exec('UPDATE meta SET revision=revision+1 WHERE id=1');
@@ -181,5 +226,9 @@ export class Repository {
       this.db.exec('COMMIT'); this.#remember(ledger, key); return projectLedger(ledger, compact);
     } catch (e) { this.#cache = null; if (this.db.isTransaction) this.db.exec('ROLLBACK'); throw e; }
   }
-  close() { this.#cache = null; this.db.close(); }
+  close() {
+    if (this.#snapshotDirty && this.#cache?.ledger) this.#saveSnapshot(this.#cache.ledger, this.#cache.ledger.state.revision);
+    this.#cache = null;
+    this.db.close();
+  }
 }

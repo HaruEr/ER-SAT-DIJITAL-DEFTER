@@ -2,14 +2,15 @@ import { createHash } from 'node:crypto';
 import { projectSupplierParties } from './supplier-view.mjs';
 import {supplierDocuments} from './supplier-ledger.mjs';
 import { purchaseCostOffer } from './inventory.mjs';
-import { applyEvent, emptyState, fail, validDate, currentCountPolicy, priorScrapChoices, scrapCustomerResolver, scrapAdvanceSources } from './domain.mjs';
+import { applyEvent, emptyState, fail, validDate, currentCountPolicy, priorScrapChoices, scrapCustomerResolver, scrapAdvanceSources, getAccountIndex } from './domain.mjs';
 
 export const LEDGER_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 const blankTotals = () => ({ todaysCount: 0, revenue: 0, expenses: 0, salesCash: 0, totalEntries: 0, items: [], flowByUnit: {} });
 const ordinaryMoneyFlow = entry => entry && (['sale','saleReturn','purchase','collection','orderAdvance','orderRefund','supplierPurchase','supplierPayment','supplierReturn'].includes(entry.type) || (entry.type === 'movement' && entry.label !== 'Açılış düzeltmesi'));
 function financialRows(ledger, entries) {
+  const byId = getAccountIndex(ledger.state.accounts).byId;
   return entries.flatMap(row => {
-    const a = ledger.state.accounts.find(a => a.id === row.accountId);
+    const a = byId.get(row.accountId);
     return a?.kind === 'asset' && (['TL','HAS','SILVER'].includes(a.unit) || /^[A-Z]{3}$/.test(a.unit)) && row.delta ? [{ unit: a.unit, delta: row.delta }] : [];
   });
 }
@@ -41,7 +42,17 @@ function indexMoneyFlow(ledger, day, entry) {
   }
 }
 
-function indexEntry(ledger, entry) {
+function connectReceiptLink(ledger, from, to) {
+  if (!to || to === from) return;
+  let setFrom = ledger.receiptLinks.get(from);
+  if (!setFrom) { setFrom = new Set(); ledger.receiptLinks.set(from, setFrom); }
+  setFrom.add(to);
+  let setTo = ledger.receiptLinks.get(to);
+  if (!setTo) { setTo = new Set(); ledger.receiptLinks.set(to, setTo); }
+  setTo.add(from);
+}
+
+function indexEntry(ledger, entry, { measureBytes = true } = {}) {
   let day = ledger.byDate.get(entry.date);
   if (!day) { day = blankTotals(); ledger.byDate.set(entry.date, day); ledger.indexBytes += 160; }
   day.items.push(entry); day.todaysCount++;
@@ -52,14 +63,45 @@ function indexEntry(ledger, entry) {
   day.totalEntries += entry.entries.length; ledger.totalEntries += entry.entries.length;
   indexMoneyFlow(ledger, day, entry);
   if (['reverse','supplierReverse'].includes(entry.type)) ledger.reversed.add(entry.meta.originalId);
+  if (entry.type === 'saleReturn' && entry.meta.originalId) {
+    let list = ledger.saleReturnsByOriginal.get(entry.meta.originalId);
+    if (!list) { list = []; ledger.saleReturnsByOriginal.set(entry.meta.originalId, list); }
+    list.push(entry);
+  }
+  const orderIndex = ledger.byId.size;
   ledger.byId.set(entry.id, entry);
-  ledger.journalBytes += Buffer.byteLength(JSON.stringify(entry)) + 1;
+  ledger.orderById.set(entry.id, orderIndex);
+  for (const id of [entry.meta.originalId, entry.meta.amendsOriginalId, entry.meta.amendmentId, entry.meta.exchangeId, ...(['scrapAdvanceTransfer','scrapAdvanceUndo'].includes(entry.type) ? [entry.meta.purchaseId] : []), entry.meta.orderId, entry.meta.advanceId,
+    ...(entry.meta.advanceAllocations || []).map(row => row.advanceId),
+    ...(entry.meta.allocations || []).flatMap(row=>[row.sourceId,row.purchaseId]),
+    ...(entry.meta.sourceUses || []).map(row=>row.sourceId),...(entry.meta.debtUses || []).map(row=>row.sourceId),...(entry.meta.uses || []).map(row=>row.sourceId)]) {
+    connectReceiptLink(ledger, entry.id, id);
+  }
+  if (entry.type === 'linkScrapPurchase') {
+    for (const ref of [entry.id, entry.meta.saleId, entry.meta.purchaseId]) {
+      if (!ref) continue;
+      let list = ledger.scrapLinksByRef.get(ref);
+      if (!list) { list = []; ledger.scrapLinksByRef.set(ref, list); }
+      list.push(entry);
+    }
+  }
+  if (measureBytes) ledger.journalBytes += Buffer.byteLength(JSON.stringify(entry)) + 1;
   // Conservative accounting for index keys/references; this is not a V8/RSS measurement.
   ledger.indexBytes += 128 + Buffer.byteLength(entry.id) * 2;
 }
 
+export function restoreLedgerSnapshot({ state, journalBytes }) {
+  const ledger = { state, seen: new Set(), byDate: new Map(), byId: new Map(), orderById: new Map(), reversed: new Set(), saleReturnsByOriginal: new Map(), receiptLinks: new Map(), scrapLinksByRef: new Map(), searchCache: new Map(), supplierPartiesCache: null, totalEntries: 0, journalBytes: journalBytes || 2, indexBytes: 0 };
+  for (const entry of state.journal) {
+    ledger.seen.add(entry.id);
+    if (entry.meta?.amendmentId) ledger.seen.add(`${entry.id}:undo`);
+    indexEntry(ledger, entry, { measureBytes: !journalBytes });
+  }
+  return ledger;
+}
+
 export function hydrateLedger(events) {
-  const ledger = { state: emptyState(), seen: new Set(), byDate: new Map(), byId: new Map(), reversed: new Set(), totalEntries: 0, journalBytes: 2, indexBytes: 0 };
+  const ledger = { state: emptyState(), seen: new Set(), byDate: new Map(), byId: new Map(), orderById: new Map(), reversed: new Set(), saleReturnsByOriginal: new Map(), receiptLinks: new Map(), scrapLinksByRef: new Map(), searchCache: new Map(), supplierPartiesCache: null, totalEntries: 0, journalBytes: 2, indexBytes: 0 };
   const iterator = events[Symbol.iterator]();
   try {
     while (true) {
@@ -78,6 +120,7 @@ export function applyLedgerEvent(ledger, event) {
   // This state is privately owned. Any failure evicts it at the Repository boundary.
   const before = ledger.state.journal.length;
   applyEvent(ledger.state, event, ledger.seen);
+  if (['accountUpdate', 'stockUpdate', 'fundUpdate', 'supplierFirmUpdate'].includes(event.command?.type)) ledger.searchCache.clear();
   for (const entry of ledger.state.journal.slice(before)) indexEntry(ledger, entry);
 }
 
@@ -90,7 +133,11 @@ export function projectLedger(ledger, compact = false) {
   const accounts = ledger.state.accounts.map(a => a.countPolicy ? { ...a, countPolicy: currentCountPolicy(a) } : a);
   const day = ledger.byDate.get(ledger.state.date) || blankTotals();
   const moneyFlow = { incoming: day.flowByUnit.TL?.incoming || 0, outgoing: day.flowByUnit.TL?.outgoing || 0, byUnit: day.flowByUnit };
-  const supplierParties = projectSupplierParties(ledger.state);
+  const cacheKey = `${ledger.state.journal.length}:${ledger.state.accounts.length}`;
+  if (!ledger.supplierPartiesCache || ledger.supplierPartiesCache.key !== cacheKey) {
+    ledger.supplierPartiesCache = { key: cacheKey, value: projectSupplierParties(ledger.state) };
+  }
+  const supplierParties = ledger.supplierPartiesCache.value;
   if (!compact) return structuredClone({ ...ledger.state, accounts, moneyFlow, supplierParties });
   const inventoryItems = ledger.state.inventoryItems?.map(item => {
     const id = item.purchaseLine?.id;
@@ -140,33 +187,33 @@ function matchesJournalAccount(ledger, entry, accountId, inheritParty, resolvePa
 
 function projectReceiptContext(ledger, items) {
   if (!items.length) return [];
-  const linked = new Map();
-  const connect = (from, to) => {
-    if (!to || to === from || !ledger.byId.has(to)) return;
-    if (!linked.has(from)) linked.set(from, new Set());
-    if (!linked.has(to)) linked.set(to, new Set());
-    linked.get(from).add(to); linked.get(to).add(from);
-  };
   const visible = new Set(items.map(entry => entry.id)), related = new Set(visible), pending = [...visible];
-  for (const entry of ledger.state.journal) {
-    for (const id of [entry.meta.originalId, entry.meta.amendsOriginalId, entry.meta.amendmentId, entry.meta.exchangeId, ...(['scrapAdvanceTransfer','scrapAdvanceUndo'].includes(entry.type) ? [entry.meta.purchaseId] : []), entry.meta.orderId, entry.meta.advanceId,
-      ...(entry.meta.advanceAllocations || []).map(row => row.advanceId),
-      ...(entry.meta.allocations || []).flatMap(row=>[row.sourceId,row.purchaseId]),
-      ...(entry.meta.sourceUses || []).map(row=>row.sourceId),...(entry.meta.debtUses || []).map(row=>row.sourceId),...(entry.meta.uses || []).map(row=>row.sourceId)]) connect(entry.id, id);
-    if (entry.type !== 'linkScrapPurchase') continue;
-    // A shared purchase contributes only directly associated records to this page.
-    const refs = [entry.id, entry.meta.saleId, entry.meta.purchaseId];
-    if (!refs.some(id => visible.has(id))) continue;
-    for (const id of refs) if (!related.has(id)) { related.add(id); pending.push(id); }
-  }
+  const expandScrap = id => {
+    for (const entry of ledger.scrapLinksByRef.get(id) || []) {
+      for (const ref of [entry.id, entry.meta.saleId, entry.meta.purchaseId]) {
+        if (ref && ledger.byId.has(ref) && !related.has(ref)) {
+          related.add(ref);
+          pending.push(ref);
+        }
+      }
+    }
+  };
+  for (const id of visible) expandScrap(id);
   for (let index = 0; index < pending.length; index++) {
-    for (const id of linked.get(pending[index]) || []) {
-      if (!related.has(id)) { related.add(id); pending.push(id); }
+    const cur = pending[index];
+    for (const id of ledger.receiptLinks.get(cur) || []) {
+      if (ledger.byId.has(id) && !related.has(id)) {
+        related.add(id);
+        pending.push(id);
+        expandScrap(id);
+      }
     }
   }
-  // Context is the selected page's linked families in original journal order,
-  // not extra result rows. Filters, pagination and financial totals stay intact.
-  return ledger.state.journal.filter(entry => related.has(entry.id) && !visible.has(entry.id));
+  const result = [];
+  for (const id of related) {
+    if (!visible.has(id)) result.push(ledger.byId.get(id));
+  }
+  return result.sort((a, b) => ledger.orderById.get(a.id) - ledger.orderById.get(b.id));
 }
 
 export function projectJournal(ledger, { scope, q, type, limit, cursor, startDate = '', endDate = '', accountId = '', scrapForSale = '', scrapForAdvance = '' }) {
@@ -194,12 +241,17 @@ export function projectJournal(ledger, { scope, q, type, limit, cursor, startDat
   const scrapChoices = scrapForSale ? priorScrapChoices(ledger.state,scrapForSale,resolveParty) : advanceChoices;
   if (filtered) {
     const names = new Map(ledger.state.accounts.map(account => [account.id, account.name]));
+    const searchCache = ledger.searchCache;
     selected = selected.filter(entry => {
       if (scrapChoices && !scrapChoices.has(entry.id)) return false;
       if ((startDate && entry.date < startDate) || (endDate && entry.date > endDate) || (accountId && !matchesJournalAccount(ledger, entry, accountId, inheritParty, resolveParty))) return false;
       if (type !== 'all' && !(typeGroups[type] || [type]).includes(entry.type)) return false;
       if (!q) return true;
-      const text = normalizeSearch([entry.label, entry.date, entry.id, entry.meta.note, entry.meta.productCategory, names.get(entry.meta.counterpartyId), ...entry.entries.map(row => names.get(row.accountId) || '')].filter(Boolean).join(' '));
+      let text = searchCache.get(entry.id);
+      if (text === undefined) {
+        text = normalizeSearch([entry.label, entry.date, entry.id, entry.meta.note, entry.meta.productCategory, names.get(entry.meta.counterpartyId), ...entry.entries.map(row => names.get(row.accountId) || '')].filter(Boolean).join(' '));
+        searchCache.set(entry.id, text);
+      }
       return text.includes(q);
     });
   }
@@ -219,18 +271,18 @@ export function projectJournal(ledger, { scope, q, type, limit, cursor, startDat
   if (returnInfo.size) {
     // The visible sale page may exclude every return and every cancellation.
     // Derive availability from the full owned ledger without mutating its events.
-    for (const event of ledger.state.journal) {
-      if (event.type !== 'saleReturn' || ledger.reversed.has(event.id)) continue;
-      const info = returnInfo.get(event.meta.originalId);
-      if (!info) continue;
-      for (const line of event.meta.lines) {
-        const remaining = info.lines.find(row => row.lineIndex === line.lineIndex);
-        if (!remaining) continue;
-        remaining.remainingQuantity -= line.quantity;
-        remaining.remainingWeight -= line.weight;
+    for (const [saleId, info] of returnInfo) {
+      for (const event of ledger.saleReturnsByOriginal.get(saleId) || []) {
+        if (ledger.reversed.has(event.id)) continue;
+        for (const line of event.meta.lines) {
+          const remaining = info.lines.find(row => row.lineIndex === line.lineIndex);
+          if (!remaining) continue;
+          remaining.remainingQuantity -= line.quantity;
+          remaining.remainingWeight -= line.weight;
+        }
       }
+      info.eligible = info.eligible && info.lines.some(line => line.remainingQuantity > 0);
     }
-    for (const info of returnInfo.values()) info.eligible = info.eligible && info.lines.some(line => line.remainingQuantity > 0);
   }
   const nextOffset = offset + items.length;
   return structuredClone({
