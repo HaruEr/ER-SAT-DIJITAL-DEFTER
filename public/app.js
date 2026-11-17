@@ -847,11 +847,39 @@ function renderOverview() {
   const foreign=direction=>Object.entries(flow.byUnit||{}).filter(([unit,row])=>unit!=='TL'&&row[direction]).map(([unit,row])=>`<small>${esc(formatted(row[direction],unit))}</small>`).join('');
   const cash=activeAccounts().filter(a=>a.kind==='asset'&&a.physical&&a.unit==='TL').reduce((sum,a)=>sum+(state.balances[a.id]||0),0);
   const physical=activeAccounts().filter(isStockAccount),count=state.overview?.todaysCount??state.journal.filter(e=>e.date===state.date).length;
+  const openOrders=(state.customerOrders||[]).filter(o=>o.status==='open').length;
+  const liquidByUnit=new Map();
+  for(const a of financialAccounts()){const b=state.balances[a.id]||0;if(b||a.unit==='TL')liquidByUnit.set(a.unit,(liquidByUnit.get(a.unit)||0)+b);}
+  const partyByUnit=partyType=>{
+    const m=new Map();
+    for(const a of activeAccounts().filter(x=>x.kind==='receivable'&&(x.partyType||'customer')===partyType)){
+      const b=state.balances[a.id]||0;if(!b)continue;
+      const cur=m.get(a.unit)||{claim:0,debt:0};
+      if(b>0)cur.claim+=b;else cur.debt+=(-b);
+      m.set(a.unit,cur);
+    }
+    return [...m.entries()];
+  };
+  const custUnits=partyByUnit('customer'),suppUnits=partyByUnit('supplier');
+  const recentEvents=state.journal.slice(-4).reverse();
   $('#main').innerHTML='<div class="overview-screen">'+heading('Günün Görünümü','Kasayı, günlük ödemeleri ve stokları tek bakışta takip edin.')+
+    `<div class="overview-status-strip" role="region" aria-label="Günlük durum şeridi"><span>Açık gün: <b>${esc(day(state.date))}</b></span><span>·</span><span><b>${count}</b> işlem</span><span>·</span><span><b>${openOrders}</b> açık sipariş</span>${pending?'<span>·</span><span class="badge gold">Bekleyen istek var</span>':''}</div>`+
     `<section class="quick-actions" aria-label="Sık kullanılan işlemler">${[['sale','transaction','Satış Yap','Ürün ve tahsilat'],['purchase','transaction','Alış Yap','Müşteriden ürün al'],['collection','transaction','Cari Tahsilat / Ödeme','Borç ve alacak kapat'],['closing','closing','Günlük Sayım','Say ve günü tamamla']].map(([id,target,title,note],i)=>`<button type="button" class="quick-action" data-quick-action="${id}" data-go="${target}"><span class="quick-icon" aria-hidden="true">${['↗','↙','⇄','✓'][i]}</span><strong>${title}</strong><small>${note}</small></button>`).join('')}</section>`+
     `<div class="stats">${[['Kasadaki Nakit',cash,'Fiziki TL kasalarının anlık toplamı','primary',''],['Bugün Giren',flow.incoming,'Nakit + POS + havale / EFT','','incoming'],['Bugün Çıkan',flow.outgoing,'Yapılan ödemeler ve nakit çıkışları','','outgoing'],['Bekleyen POS',state.balances.pos,'Henüz bankaya geçmeyen alacak','','']].map(([label,value,note,cls,direction])=>`<div class="stat ${cls}"><span class="stat-label">${label}</span><strong class="stat-value"${formatted(value).length>16?' tabindex="0"':''}>${esc(formatted(value))}</strong>${direction?`<div class="stat-subtotals">${foreign(direction)}</div>`:''}<span class="stat-note">${note}</span></div>`).join('')}</div><p class="context-note">İşletme içi kasa–banka aktarımı ve POS'un bankaya geçişi yeniden giriş/çıkış sayılmaz. Dövizler kendi biriminde gösterilir.</p>`+
+    `<section class="overview-blocks" aria-label="Birim izolasyonlu özet blokları">`+
+      `<article class="overview-block"><h3>1. Likit Varlıklar</h3><p class="context-note">Kasa, banka ve POS toplamları kendi birimindedir.</p>${[...liquidByUnit.entries()].map(([u,v])=>`<div class="balance-row"><span>${esc(units[u]?.label||u)}</span><strong>${esc(formatted(v,u))}</strong></div>`).join('')}</article>`+
+      `<article class="overview-block"><h3>2. Stok Özeti</h3><p class="context-note">${physical.filter(a=>a.countPolicy==='daily').length} günlük adet · ${physical.filter(a=>a.countPolicy==='periodic').length} dönemsel terazi grubu</p><button class="button secondary compact" type="button" data-go="stocks">Stokları incele</button></article>`+
+      `<article class="overview-block"><h3>3. Cari Net Durum</h3><p class="context-note">Müşteri ve toptancı bakiyeleri birim bazlıdır.</p>${custUnits.map(([u,r])=>`<div class="balance-row"><span>Müşteri (${esc(u)})</span><span>+${esc(formatted(r.claim,u))} / −${esc(formatted(r.debt,u))}</span></div>`).join('')||'<p class="muted">Açık müşteri bakiyesi yok.</p>'}${suppUnits.map(([u,r])=>`<div class="balance-row"><span>Toptancı (${esc(u)})</span><span>+${esc(formatted(r.claim,u))} / −${esc(formatted(r.debt,u))}</span></div>`).join('')}</article>`+
+      `<article class="overview-block"><h3>4. Günün Nabzı</h3><p class="context-note">Son hareketlerin hızlı özeti</p>${recentEvents.map((e,idx)=>`<div class="balance-row"><span>${esc(e.label)}</span><button type="button" class="button text compact" data-overview-popover="${idx}">Özet</button></div>`).join('')||'<p class="muted">Bugün henüz hareket yok.</p>'}</article>`+
+    `</section>`+
     overviewFlowChart(flow)+
-    `<div class="split"><div><section class="section"><div class="section-header"><h2>Son hareketler</h2><span class="badge gold">${count} işlem · açık gün</span></div>${state.journal.slice(-4).reverse().map(e=>`<div class="balance-row"><span>${esc(e.label)}<small>${esc(day(e.date))}</small></span><span class="badge">${e.meta.revenue?esc(formatted(e.meta.revenue)):e.meta.total?esc(formatted(e.meta.total)):'Kayıtlı'}</span></div>`).join('')}<button class="button secondary" type="button" data-go="journal">Günlük İşlemler</button></section><section class="section"><h2>Hesaplara hızlı erişim</h2><div class="workbench-actions"><button class="button secondary" type="button" data-go="accounts">Müşteriler</button><button class="button secondary" type="button" data-go="suppliers">Toptancılar</button><button class="button secondary" type="button" data-go="banks">Banka/Pos/Kasa</button></div><p class="context-note">Giriş ve çıkış tutarları kâr değildir. Açık alacaklar Müşteri ve Toptancı ekranlarında izlenir.</p></section></div><section class="section"><div class="section-header"><div><h2>Anlık Stok Durumu</h2><p class="muted">Ürün adedi ve terazi gramı ayrı takip edilir.</p></div><button class="button text" type="button" data-go="stocks">Stok Ekranı →</button></div><div class="table-wrap"><table class="inventory-table"><thead><tr><th>Ürün / stok grubu</th><th class="numeric">Mevcut</th><th>Kontrol</th></tr></thead><tbody>${physical.map(a=>`<tr><td><strong>${esc(a.name)}</strong></td><td class="numeric">${esc(formatted(state.balances[a.id],a.unit))}</td><td><span class="badge">${a.countPolicy==='periodic'?'Dönemsel tartım':'Günlük sayım'}</span></td></tr>`).join('')}</tbody></table></div></section></div></div>`;
+    `<div class="split"><div><section class="section"><div class="section-header"><h2>Son hareketler</h2><span class="badge gold">${count} işlem · açık gün</span></div>${recentEvents.map(e=>`<div class="balance-row"><span>${esc(e.label)}<small>${esc(day(e.date))}</small></span><span class="badge">${e.meta.revenue?esc(formatted(e.meta.revenue)):e.meta.total?esc(formatted(e.meta.total)):'Kayıtlı'}</span></div>`).join('')}<button class="button secondary" type="button" data-go="journal">Günlük İşlemler</button></section><section class="section"><h2>Hesaplara hızlı erişim</h2><div class="workbench-actions"><button class="button secondary" type="button" data-go="accounts">Müşteriler</button><button class="button secondary" type="button" data-go="suppliers">Toptancılar</button><button class="button secondary" type="button" data-go="banks">Banka/Pos/Kasa</button></div><p class="context-note">Giriş ve çıkış tutarları kâr değildir. Açık alacaklar Müşteri ve Toptancı ekranlarında izlenir.</p></section></div><section class="section"><div class="section-header"><div><h2>Anlık Stok Durumu</h2><p class="muted">Ürün adedi ve terazi gramı ayrı takip edilir.</p></div><button class="button text" type="button" data-go="stocks">Stok Ekranı →</button></div><div class="table-wrap"><table class="inventory-table"><thead><tr><th>Ürün / stok grubu</th><th class="numeric">Mevcut</th><th>Kontrol</th></tr></thead><tbody>${physical.map(a=>`<tr><td><strong>${esc(a.name)}</strong></td><td class="numeric">${esc(formatted(state.balances[a.id],a.unit))}</td><td><span class="badge">${a.countPolicy==='periodic'?'Dönemsel tartım':'Günlük sayım'}</span></td></tr>`).join('')}</tbody></table></div></section></div></div>`;
+  document.querySelectorAll('[data-overview-popover]').forEach(btn=>btn.addEventListener('click',()=>{
+    const ev=recentEvents[Number(btn.dataset.overviewPopover)];
+    if(!ev||!uiKit?.openPopover)return;
+    const content=`<p><b>${esc(day(ev.date))}</b></p>${ev.meta.note?`<p>${esc(ev.meta.note)}</p>`:''}<p>${ev.entries.map(r=>`${esc(account(r.accountId).name)}: ${r.delta>0?'+':''}${esc(formatted(r.delta,account(r.accountId).unit))}`).join('<br>')}</p>`;
+    uiKit.openPopover(btn,{title:ev.label,content});
+  }));
 }
 function isStockAccount(a){return a.kind==='asset'&&(a.isSaleable||a.isPurchasable||a.pairedGroups?.length||['bilezik22','taki14','taki22'].includes(a.id));}
 function balanceRow(a) {
@@ -949,9 +977,20 @@ function renderAccounts(stock=false){
   const rows=activeAccounts().filter(a=>stock?isStockAccount(a):a.kind==='receivable'&&(a.partyType||'customer')==='customer');
   const prefix=stock?'stock':'account';
   $('#main').innerHTML=heading(stock?'Stok Ekranı':'Müşteri Ekranı',stock?'Stokları inceleyin, kart ekleyin ve ürün adlarını düzenleyin.':'Müşterilerinizi bulun, bakiyelerini ve işlem dökümlerini inceleyin.',`<button type="button" class="button" id="${stock?'add-stock':'add-account'}">+ ${stock?'Stok ekle':'Müşteri ekle'}</button>`)+
-    `${stock?'<section class="section"><div class="workbench-actions"><button class="button secondary" type="button" id="stock-movement">Stok Girişi / Çıkışı</button><button class="button secondary" type="button" data-go="closing">Sayım ile stok düzelt</button></div><div id="special-operation"></div></section>':''}<section class="section" id="card-editor" hidden></section><section class="section"><div class="workbench-filters"><label class="field"><span>${stock?'Stok ara':'İsim, telefon veya TC/VKN ara'}</span><input id="${prefix}-search" type="search" maxlength="160" placeholder="${stock?'Ürün veya ayar':'İsim, numara, TC / VKN'}" autocomplete="off"></label><label class="field"><span>Birim</span><select id="${prefix}-unit"><option value="">Bütün birimler</option>${[...new Set(rows.map(a=>a.unit))].map(unit=>`<option value="${esc(unit)}">${esc(units[unit].label)}</option>`).join('')}</select></label>${stock?'':'<label class="field"><span>Bakiye durumu</span><select id="account-sign"><option value="all">Tümü</option><option value="claim">Alacağımız olanlar</option><option value="debt">Borcumuz olanlar</option><option value="zero">Bakiyesi sıfır</option></select></label>'}</div><p id="workbench-status" class="context-note" role="status" aria-live="polite"></p><div id="${prefix}-list" class="${stock?'stock-grid':'account-grid'}"></div></section><section id="account-detail" class="section" hidden></section>`;
-  if (stock) renderInventoryCards();
-  const editor=$('#card-editor');
+    `${stock?'<section class="section"><div class="workbench-actions"><button class="button secondary" type="button" id="stock-movement">Stok Girişi / Çıkışı</button><button class="button secondary" type="button" data-go="closing">Sayım ile stok düzelt</button></div><div class="workbench-tabs" role="tablist" aria-label="Stok görünüm sekmeleri"><button type="button" class="workbench-tab" role="tab" data-stocks-tab="all" aria-selected="true">Tümü</button><button type="button" class="workbench-tab" role="tab" data-stocks-tab="groups" aria-selected="false">Stok Grupları</button><button type="button" class="workbench-tab" role="tab" data-stocks-tab="items" aria-selected="false">Tekil Ürünler</button></div><div id="special-operation"></div></section>':''}<section class="section" id="card-editor" hidden></section><div class="workbench-split" data-split-view="${expectedView}"><section class="section" id="${prefix}-list-section"><div class="workbench-filters"><label class="field"><span>${stock?'Stok ara':'İsim, telefon veya TC/VKN ara'}</span><input id="${prefix}-search" type="search" maxlength="160" placeholder="${stock?'Ürün veya ayar':'İsim, numara, TC / VKN'}" autocomplete="off"></label><label class="field"><span>Birim</span><select id="${prefix}-unit"><option value="">Bütün birimler</option>${[...new Set(rows.map(a=>a.unit))].map(unit=>`<option value="${esc(unit)}">${esc(units[unit].label)}</option>`).join('')}</select></label>${stock?'':'<label class="field"><span>Bakiye durumu</span><select id="account-sign"><option value="all">Tümü</option><option value="claim">Alacağımız olanlar</option><option value="debt">Borcumuz olanlar</option><option value="zero">Bakiyesi sıfır</option></select></label>'}</div><p id="workbench-status" class="context-note" role="status" aria-live="polite"></p><div id="${prefix}-list" class="${stock?'stock-grid':'account-grid'}"></div><div id="workbench-pagination" class="workbench-pagination" hidden></div></section><section id="account-detail" class="section" hidden></section></div>`;
+  if (stock) {
+    renderInventoryCards();
+    const groupsSec = $('#stock-list-section');
+    const itemsSec = $('#inventory-register')?.closest('section');
+    document.querySelectorAll('[data-stocks-tab]').forEach(tabBtn => tabBtn.addEventListener('click', () => {
+      const active = tabBtn.dataset.stocksTab;
+      document.querySelectorAll('[data-stocks-tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.stocksTab === active)));
+      if (groupsSec) groupsSec.hidden = active === 'items';
+      if (itemsSec) itemsSec.hidden = active === 'groups';
+    }));
+  }
+  const editor=$('#card-editor'), splitRoot=$('.workbench-split');
+  let selectedDetailId = null, visibleLimit = 50;
   const openOperation=kind=>{
     captureDrafts();
     if(partyReturnContext?.ownerView===view)partyReturnContext=null;
@@ -961,24 +1000,49 @@ function renderAccounts(stock=false){
   const openEditor=existing=>{captureDrafts();if(existing&&partyReturnContext?.ownerView===view)partyReturnContext=null;remember({editor:existing?.id||'new',operation:null,guided:null});const special=$('#special-operation');if(special)special.innerHTML='';editor.hidden=false;stock?renderStockForm(editor,existing):renderPartyForm(editor,false,existing);};
   $(`#${stock?'add-stock':'add-account'}`).addEventListener('click',()=>{captureDrafts();if(partyReturnContext?.ownerView===view)partyReturnContext=null;const form=editor.querySelector('form');if(!editor.hidden&&(form?.id==='account-form'||form?.dataset.draftEntity==='new')){remember({editor:null});editor.hidden=true;editor.innerHTML='';}else{openEditor();editor.scrollIntoView?.({block:'nearest'});}});
   $('#stock-movement')?.addEventListener('click',()=>openOperation('stock'));
-  const search=$(`#${prefix}-search`),unit=$(`#${prefix}-unit`),sign=$('#account-sign'),list=$(`#${prefix}-list`);
+  const search=$(`#${prefix}-search`),unit=$(`#${prefix}-unit`),sign=$('#account-sign'),list=$(`#${prefix}-list`),pagination=$('#workbench-pagination');
   search.value=memory.q;unit.value=memory.unit;if(sign)sign.value=memory.sign;
-  const draw=()=>{
+  const draw=(resetLimit=true)=>{
+    if (resetLimit) visibleLimit = 50;
     const q=normalize(search.value.trim());remember({q:search.value,unit:unit.value,sign:sign?.value||'all'});
     const matches=a=>(!q||normalize([a.name,a.phone,a.taxId].join(' ')).includes(q))&&(!unit.value||unit.value===a.unit)&&(!sign||sign.value==='all'||(sign.value==='claim'?state.balances[a.id]>0:sign.value==='debt'?state.balances[a.id]<0:!state.balances[a.id]));
     const selected=rows.filter(matches);
-    list.innerHTML=selected.length?selected.map(a=>{const balance=state.balances[a.id]||0;return `<article class="account-card ${stock?'stock-card':''}"><div><button class="button text" type="button" data-account-detail="${esc(a.id)}">${esc(a.name)}</button><small>${stock?a.countPolicy==='periodic'?'Terazi · dönemsel kontrol':'Günlük sayım':balance>0?'Alacağımız':balance<0?'Borcumuz':'Bakiyesi sıfır'}</small>${!stock&&a.phone?`<small>${esc(a.phone)}</small>`:''}</div><strong class="numeric ${balance<0?'negative':''}">${esc(formatted(stock?balance:Math.abs(balance),a.unit))}</strong></article>`;}).join(''):'<div class="workbench-empty">Eşleşen hesap bulunamadı. Aramayı veya filtreleri değiştirin.</div>';
+    const paged=selected.slice(0, visibleLimit);
+    list.innerHTML=paged.length?paged.map(a=>{const balance=state.balances[a.id]||0,isSel=selectedDetailId===a.id;return `<article class="account-card ${stock?'stock-card':''}${isSel?' is-selected':''}"><div><button class="button text" type="button" data-account-detail="${esc(a.id)}"${isSel?' aria-current="true"':''}>${esc(a.name)}</button><small>${stock?a.countPolicy==='periodic'?'Terazi · dönemsel kontrol':'Günlük sayım':balance>0?'Alacağımız':balance<0?'Borcumuz':'Bakiyesi sıfır'}</small>${!stock&&a.phone?`<small>${esc(a.phone)}</small>`:''}</div><strong class="numeric ${balance<0?'negative':''}">${esc(formatted(stock?balance:Math.abs(balance),a.unit))}</strong></article>`;}).join(''):'<div class="workbench-empty">Eşleşen hesap bulunamadı. Aramayı veya filtreleri değiştirin.</div>';
     $('#workbench-status').textContent=`${selected.length} / ${rows.length} ${stock?'stok kartı':'müşteri hesabı'}`;
+    if (selected.length > paged.length) {
+      pagination.hidden = false;
+      pagination.innerHTML = `<span class="context-note">Gösterilen: ${paged.length} / ${selected.length}</span><div class="workbench-actions"><button type="button" class="button secondary compact" id="workbench-load-more">Sonraki 50</button><button type="button" class="button secondary compact" id="workbench-show-all">Tümünü göster</button></div>`;
+      $('#workbench-load-more').addEventListener('click', () => { visibleLimit += 50; draw(false); });
+      $('#workbench-show-all').addEventListener('click', () => { visibleLimit = selected.length; draw(false); });
+    } else {
+      pagination.hidden = true;
+      pagination.innerHTML = '';
+    }
     list.querySelectorAll('[data-account-detail]').forEach(button=>button.addEventListener('click',()=>detail(button.dataset.accountDetail)));
   };
   let sequence=0;
   const detail=id=>{
     const a=account(id),panel=$('#account-detail');
-    list.closest('section').before(panel);panel.hidden=false;panel.tabIndex=-1;panel.setAttribute('aria-labelledby','statement-title');
-    panel.innerHTML=`<div class="section-header"><div><h2 id="statement-title">${esc(a.name)}${a.parentAccountId?' · '+esc(units[a.unit].label):''}</h2><p class="subtitle">${stock?'Stok hareketleri ve mevcut miktar':'Hesap ekstresi · '+esc(units[a.unit].label)}</p></div><div class="workbench-actions"><button class="button secondary" type="button" id="statement-back">${stock?'Stok listesine dön':'Müşteri listesine dön'}</button>${a.parentAccountId?'':`<button class="button secondary" type="button" id="edit-card">${stock?'Stok adını düzenle':'Kişi bilgilerini düzenle'}</button>`}</div></div>${!stock?`<p class="context-note">${[a.phone&&'Telefon: '+a.phone,a.taxId&&'TC/VKN: '+a.taxId,a.address&&'Adres: '+a.address].filter(Boolean).map(esc).join(' · ')||'İletişim bilgisi eklenmemiş.'}</p>`:''}<div data-current-balance></div><form id="statement-filter"><div class="form-grid"><label class="field"><span>Başlangıç tarihi · isteğe bağlı</span><input id="statement-start" type="date"></label><label class="field"><span>Bitiş tarihi · isteğe bağlı</span><input id="statement-end" type="date"></label></div>${action('Ekstreyi göster','Tarih seçmezseniz bütün hesap geçmişi gösterilir.')}</form><div id="statement-result"></div><p id="statement-status" role="status" aria-live="polite"></p>`;
-    if (!stock) renderCustomerOrders(panel, a);
+    selectedDetailId=id;
+    splitRoot?.classList.add('has-detail');
+    list.querySelectorAll('.account-card').forEach(card=>{
+      const btn=card.querySelector('[data-account-detail]');
+      const active=btn?.dataset.accountDetail===id;
+      card.classList.toggle('is-selected',active);
+      if(active)btn?.setAttribute('aria-current','true'); else btn?.removeAttribute('aria-current');
+    });
+    panel.hidden=false;panel.tabIndex=-1;panel.setAttribute('aria-labelledby','statement-title');
+    panel.innerHTML=`<div class="section-header"><div><h2 id="statement-title">${esc(a.name)}${a.parentAccountId?' · '+esc(units[a.unit].label):''}</h2><p class="subtitle">${stock?'Stok hareketleri ve mevcut miktar':'Hesap ekstresi · '+esc(units[a.unit].label)}</p></div><div class="workbench-actions"><button class="button secondary" type="button" id="statement-back">${stock?'Stok listesine dön':'Müşteri listesine dön'}</button>${a.parentAccountId?'':`<button class="button secondary" type="button" id="edit-card">${stock?'Stok adını düzenle':'Kişi bilgilerini düzenle'}</button>`}</div></div>${!stock?`<p class="context-note" data-detail-pane="summary">${[a.phone&&'Telefon: '+a.phone,a.taxId&&'TC/VKN: '+a.taxId,a.address&&'Adres: '+a.address].filter(Boolean).map(esc).join(' · ')||'İletişim bilgisi eklenmemiş.'}</p>`:''}<div class="workbench-tabs" role="tablist" aria-label="Hesap detay sekmeleri"><button type="button" class="workbench-tab" role="tab" data-detail-tab="all" aria-selected="true">Tümü</button><button type="button" class="workbench-tab" role="tab" data-detail-tab="summary" aria-selected="false">Özet</button><button type="button" class="workbench-tab" role="tab" data-detail-tab="statement" aria-selected="false">Ekstre</button>${!stock?'<button type="button" class="workbench-tab" role="tab" data-detail-tab="orders" aria-selected="false">Siparişler</button>':''}</div><div data-current-balance data-detail-pane="summary"></div><form id="statement-filter" data-detail-pane="statement"><div class="form-grid"><label class="field"><span>Başlangıç tarihi · isteğe bağlı</span><input id="statement-start" type="date"></label><label class="field"><span>Bitiş tarihi · isteğe bağlı</span><input id="statement-end" type="date"></label></div>${action('Ekstreyi göster','Tarih seçmezseniz bütün hesap geçmişi gösterilir.')}</form><div id="statement-result" data-detail-pane="statement"></div><p id="statement-status" role="status" aria-live="polite"></p>`;
+    if (!stock) { renderCustomerOrders(panel, a); panel.querySelector('.customer-orders')?.setAttribute('data-detail-pane', 'orders'); }
+    panel.querySelectorAll('[data-detail-tab]').forEach(tabBtn => tabBtn.addEventListener('click', () => {
+      const active = tabBtn.dataset.detailTab;
+      panel.querySelectorAll('[data-detail-tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.detailTab === active)));
+      panel.querySelectorAll('[data-detail-pane]').forEach(el => { el.hidden = active !== 'all' && el.dataset.detailPane !== active; });
+    }));
     $('#statement-back').addEventListener('click',()=>{
-      ++sequence;panel.hidden=true;panel.innerHTML='';
+      ++sequence;selectedDetailId=null;splitRoot?.classList.remove('has-detail');panel.hidden=true;panel.innerHTML='';
+      list.querySelectorAll('.account-card').forEach(c=>{c.classList.remove('is-selected');c.querySelector('[data-account-detail]')?.removeAttribute('aria-current');});
       const selected=[...list.querySelectorAll('[data-account-detail]')].find(button=>button.dataset.accountDetail===id);
       const target=selected||search;target.focus({preventScroll:true});target.scrollIntoView?.({block:'center',behavior:'instant'});
     });
@@ -2209,6 +2273,20 @@ function renderClosing() {
     const titleNode=document.createElement('h3');titleNode.id=id+'-approval-title';titleNode.textContent=title;panel.append(titleNode);
     const nodes=[];for(let node=start;node;node=node.nextElementSibling)nodes.push(node);
     start.before(panel);panel.append(...nodes);
+    const actionsEl=panel.querySelector('.form-actions');
+    if(actionsEl){
+      const stickyBar=document.createElement('div');stickyBar.className='sticky-action-bar';
+      const summarySpan=document.createElement('span');summarySpan.className='context-note';summarySpan.dataset.stickyDiffSummary='';summarySpan.setAttribute('aria-live','polite');
+      summarySpan.textContent=id==='close-form'?'Sayım farkları ve onay çubuğu':'Dönemsel tartım onay çubuğu';
+      actionsEl.before(stickyBar);stickyBar.append(summarySpan,actionsEl);
+      const syncSticky=()=>{
+        const diffs=[...form.querySelectorAll('.count-diff')].filter(c=>c.classList.contains('negative')).length;
+        const filled=[...form.querySelectorAll('[data-measure]')].filter(i=>i.value.trim()!=='').length;
+        const total=form.querySelectorAll('[data-measure]').length;
+        summarySpan.textContent=`${filled} / ${total} sayıldı · ${diffs} fark`;
+      };
+      form.addEventListener('input',syncSticky);syncSticky();
+    }
   }
   document.querySelectorAll('[data-count-mode]').forEach(button=>button.addEventListener('click',()=>{captureDrafts();const periodic=button.dataset.countMode==='periodic';dailySection.hidden=periodic;periodicSection.hidden=!periodic;document.querySelectorAll('[data-count-mode]').forEach(tab=>{const active=tab===button;tab.classList.toggle('active',active);tab.setAttribute('aria-pressed',String(active));});}));
 }
@@ -2639,11 +2717,24 @@ function renderJournal() {
   primaryFilters.className='journal-filters-primary';secondaryFilters.className='journal-filters-secondary';
   for(const control of [scope,search])primaryFilters.append(control.closest('label'));
   for(const control of [type,start,end,selectedAccount])secondaryFilters.append(control.closest('label'));
-  secondaryFilters.append($('#journal-clear'));filterShell.append(primaryFilters,secondaryFilters);
+  secondaryFilters.append($('#journal-clear'));
+  const advFilters=document.createElement('details');advFilters.className='journal-advanced-filters';
+  advFilters.innerHTML='<summary>Gelişmiş filtreler</summary>';
+  advFilters.append(secondaryFilters);
+  filterShell.append(primaryFilters,advFilters);
   filterShell.insertAdjacentHTML('afterend','<p id="journal-active-filters" class="context-note" role="status" aria-live="polite"></p>');
   const readFilters = () => ({scope:scope.value,q:search.value.trim(),type:type.value,startDate:start.value,endDate:end.value,accountId:selectedAccount.value});
   const savedFilters = journalFilterMemory.get(workspace);
   if (savedFilters) { scope.value=savedFilters.scope;search.value=savedFilters.q;type.value=savedFilters.type;start.value=savedFilters.startDate||'';end.value=savedFilters.endDate||'';selectedAccount.value=savedFilters.accountId||''; }
+  if (type.value !== 'all' || start.value || end.value || selectedAccount.value) advFilters.open = true;
+  const journalSplit = document.createElement('div');
+  journalSplit.className = 'workbench-split journal-split';
+  const detailPane = document.createElement('aside');
+  detailPane.id = 'journal-detail-pane';
+  detailPane.className = 'section journal-detail-pane';
+  detailPane.hidden = true;
+  list.before(journalSplit);
+  journalSplit.append(list, detailPane);
   const normalizeSearch = value => value.toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i');
   const searchable = event => normalizeSearch([event.label,event.date,event.id,event.meta.note,event.meta.productCategory,account(event.meta.counterpartyId)?.name,...event.entries.map(row => account(row.accountId).name)].filter(Boolean).join(' '));
   const current = () => list.isConnected && view === 'journal' && workspace === selectedWorkspace && state.revision === expectedRevision;
@@ -2677,6 +2768,16 @@ function renderJournal() {
         const button=document.createElement('button');button.type='button';button.className='button secondary compact';button.textContent='Firma hareketlerini aç';button.dataset.supplierHistory=event.meta.supplierId;
         button.addEventListener('click',()=>{supplierMemory.set('supplier:view:'+workspace,{partyId:event.meta.supplierId,kind:'history'});setView('suppliers');});article.append(button);
       }
+      const inspectBtn=document.createElement('button');inspectBtn.type='button';inspectBtn.className='button text compact';inspectBtn.textContent='Yan panelde incele';inspectBtn.dataset.journalInspect=event.id;
+      inspectBtn.addEventListener('click',()=>{
+        list.querySelectorAll('.journal-item').forEach(el=>el.classList.remove('is-selected'));
+        article.classList.add('is-selected');
+        journalSplit.classList.add('has-detail');
+        detailPane.hidden=false;
+        detailPane.innerHTML=`<div class="section-header"><div><h3>${esc(event.label)}</h3><p class="subtitle">${esc(day(event.date))} · ${esc(event.id)}</p></div><button type="button" class="button secondary compact" id="journal-detail-close">Kapat</button></div>${event.meta.note?`<p class="journal-note">${esc(event.meta.note)}</p>`:''}<div class="journal-lines">${event.entries.map(row=>{const a=account(row.accountId);return `<div class="journal-line"><span>${esc(a.name)}</span><strong class="${row.delta<0?'negative':'positive'}">${row.delta>0?'+':''}${esc(formatted(row.delta,a.unit))}</strong></div>`;}).join('')}</div>`;
+        detailPane.querySelector('#journal-detail-close').addEventListener('click',()=>{detailPane.hidden=true;journalSplit.classList.remove('has-detail');article.classList.remove('is-selected');});
+      });
+      article.append(inspectBtn);
       article.querySelector('.journal-head').insertAdjacentHTML('afterend',`<p class="journal-record-context">Kayıt: ${esc(event.id)}${event.meta.originalId?` · İlgili kayıt: ${esc(event.meta.originalId)}`:''}</p>`);
       const edit=article.querySelector('.journal-actions'),returns=article.querySelector('.sale-return-form')?.closest('details');
       const reverse=article.querySelector('.reverse-form')?.closest('details');

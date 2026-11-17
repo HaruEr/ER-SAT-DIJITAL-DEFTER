@@ -57,10 +57,10 @@ export function renderSupplierWorkspace(container, context) {
     const firm=firms().find(f=>f.id===selectedId);
     if(!firm)selectedId=null;
     if(firm) {
-      container.innerHTML=header+'<section class="section supplier-active-header"><div class="section-header"><h2 tabindex="-1" data-firm-heading>'+esc(firm.name)+'</h2><button type="button" class="button secondary" data-back-suppliers>Firma listesine dön</button></div>'+
+      container.innerHTML=header+'<div class="workbench-split" data-split-view="suppliers"><section class="section supplier-active-header"><div class="section-header"><h2 tabindex="-1" data-firm-heading>'+esc(firm.name)+'</h2><button type="button" class="button secondary" data-back-suppliers>Firma listesine dön</button></div>'+
         ([firm.phone,firm.taxId,firm.address].some(Boolean)?'<details class="supplier-contact-details"><summary>İletişim bilgileri</summary><p>'+[firm.phone,firm.taxId,firm.address].filter(Boolean).map(esc).join(' · ')+'</p></details>':'')+'<h3>Güncel hesaplar</h3><div class="supplier-balances">'+balanceMarkup(firm.accounts)+'</div>'+
         '<div class="workbench-actions supplier-identity-actions" aria-label="Firma bilgileri ve belge bağlantıları"><button type="button" class="button secondary" data-edit-supplier>Firma bilgilerini düzenle</button><button type="button" class="button secondary" data-add-supplier-unit'+(pending()?' disabled':'')+'>Hesap birimi ekle</button>'+
-        '<button type="button" class="button secondary" data-supplier-documents>Ödeme / avansı alışa bağla</button></div><div class="workbench-actions supplier-task-actions" aria-label="Firma işlemleri">'+TASKS.map(([kind,label])=>'<button type="button" class="button secondary" data-supplier-task="'+kind+'"'+(pending()&&!['history','statement'].includes(kind)?' disabled':'')+'>'+label+'</button>').join('')+'</div></section><section class="section" data-supplier-task-panel hidden></section>';
+        '<button type="button" class="button secondary" data-supplier-documents>Ödeme / avansı alışa bağla</button></div><div class="workbench-actions supplier-task-actions" aria-label="Firma işlemleri">'+TASKS.map(([kind,label])=>'<button type="button" class="button secondary" data-supplier-task="'+kind+'"'+(pending()&&!['history','statement'].includes(kind)?' disabled':'')+'>'+label+'</button>').join('')+'</div></section><section class="section" data-supplier-task-panel hidden></section></div>';
       if(focus)container.querySelector('[data-firm-heading]').focus();
     } else {
       container.innerHTML=header+'<div class="workbench-actions"><label class="field"><span>Firma ara</span><input type="search" data-supplier-search maxlength="160" value="'+esc(query)+'" autocomplete="off"></label><button type="button" class="button" data-create-firm'+(pending()?' disabled':'')+'>Firma ekle</button></div><div class="account-grid" data-supplier-list></div><section class="section" data-supplier-task-panel hidden></section>';
@@ -72,6 +72,7 @@ export function renderSupplierWorkspace(container, context) {
     if(pending()&&!['history','statement'].includes(kind)){status('Bekleyen işlemin sonucu doğrulanmadan yeni işlem başlatılamaz.');return;}
     activeTask=kind;memory.set(viewKey,{partyId:selectedId,kind});
     clearTask();const panel=container.querySelector('[data-supplier-task-panel]');panel.hidden=false;panel.replaceChildren();
+    container.querySelector('.workbench-split')?.classList.add('has-detail');
     const title=TASKS.find(([key])=>key===kind)?.[1]||({create:'Firma ekle',profile:'Firma bilgileri',reverse:'İşlemi ters kayıtla iptal et',unit:'Hesap birimi ekle',allocation:'Ödeme / avansı alışa bağla',legacyLink:'Eski tahsilatın ödeme kaynakları'}[kind]);
     const heading=container.ownerDocument.createElement('h3');heading.textContent=title;heading.tabIndex=-1;panel.append(heading);
     const handled=context.onTask?.({kind,partyId:selectedId,container:panel,context:{...context,state}});
@@ -157,8 +158,13 @@ function renderSupplierForm(panel, context) {
     if(!nativeAccounts.length)form.insertAdjacentHTML('beforeend','<p class="info neutral">Bu firmanın hesap birimi yok. İşlemden önce hesap birimi ekleyin.</p>');
     if(kind==='payment')form.insertAdjacentHTML('beforeend',select('direction','Ne yapılıyor?',[['pay','Firmaya ödeme / ön ödeme'],['collect','Firmadan tahsilat']]));
     const definitions=kind==='purchase'?
-      [['items','1. Aldığınız ürünler',true],['charges','2. Anlaştığınız alış borcu',false],['given','Ödediğiniz / verdiğiniz',true],['credits','Ödemenin borç / alacak karşılığı',false],['received','Ek olarak aldığınız',true],['debts','Aldığınızın borç / alacak karşılığı',false]]:
+      [['items','1. Aldığınız ürünler',true],['charges','2. Anlaşılan Borç (HAS / Döviz / TL — Otomatik Çevrilmez)',false],['given','Ödediğiniz / verdiğiniz',true],['credits','Ödemenin borç / alacak karşılığı',false],['received','Ek olarak aldığınız',true],['debts','Aldığınızın borç / alacak karşılığı',false]]:
       [['given','Ödediğiniz / verdiğiniz',true],['credits','Ödemenin borç / alacak karşılığı',false],['received','Aldığınız para / ürün',true],['debts','Aldığınızın borç / alacak karşılığı',false]];
+    if(kind==='purchase'){
+      const stepper=doc.createElement('div');stepper.className='workbench-tabs';stepper.setAttribute('role','tablist');stepper.dataset.supplierStepper='';
+      stepper.innerHTML='<button type="button" class="workbench-tab" role="tab" data-supplier-step="all" aria-selected="true">Tümü</button><button type="button" class="workbench-tab" role="tab" data-supplier-step="1" aria-selected="false">1. Alınan Ürünler</button><button type="button" class="workbench-tab" role="tab" data-supplier-step="2" aria-selected="false">2. Anlaşılan Borç</button><button type="button" class="workbench-tab" role="tab" data-supplier-step="3" aria-selected="false">3. Ödeme ve Ek Bilgiler</button>';
+      form.append(stepper);
+    }
     for(const [name,title,physical] of definitions){
       const section=doc.createElement('fieldset');section.dataset.group=name;section.innerHTML='<legend>'+title+'</legend><div data-rows></div><button type="button" class="button secondary compact" data-add-row>Satır ekle</button>';
       form.append(section);
@@ -170,7 +176,7 @@ function renderSupplierForm(panel, context) {
         row.innerHTML='<label class="field"><span>'+ (physical?(name==='items'?'Ürün':'Ürün / kasa / banka'):'Firma hesabı') +'</span><select data-field="accountId" required><option value="">Seçin</option>'+choices.map(a=>'<option value="'+esc(a.id)+'">'+esc((a.name||unitLabel(a.unit))+' · '+unitLabel(a.unit))+'</option>').join('')+'</select></label>'+
           '<label class="field"><span data-quantity-label>Miktar</span><input data-field="quantity" required inputmode="decimal" maxlength="24"></label>'+
           (physical?'<label class="field" data-weight-group hidden><span>Ayar / terazi grubu</span><select data-field="weightAccount"></select></label><label class="field" data-weight-input hidden><span>Gerçek toplam gram</span><input data-field="weight" inputmode="decimal" maxlength="24"></label>':'')+
-          '<details><summary>TL referansı · isteğe bağlı</summary><label class="field"><span>Anlaşılmış TL referansı</span><input data-field="referenceTL" inputmode="decimal" maxlength="24"></label></details><button type="button" class="button text" data-remove-row>Satırı kaldır</button>';
+          '<details><summary>Anlaşılan TL Referansı (Kasadan Çıkmaz) · isteğe bağlı</summary><label class="field"><span>Anlaşılmış TL referansı</span><input data-field="referenceTL" inputmode="decimal" maxlength="24"></label></details><button type="button" class="button text" data-remove-row>Satırı kaldır</button>';
         const accountSelect=row.querySelector('[data-field="accountId"]');
         function configure(){
           const a=choices.find(a=>a.id===accountSelect.value);row.querySelector('[data-quantity-label]').textContent='Miktar'+(a?' · '+unitLabel(a.unit):'');
@@ -197,7 +203,18 @@ function renderSupplierForm(panel, context) {
     if(kind==='payment'){const extra=doc.createElement('details');extra.dataset.extraPayment='';extra.innerHTML='<summary>Ek olarak ters yönde para / ürün veriyoruz veya alıyoruz</summary>';form.append(extra);}
     if(kind==='payment')form.insertAdjacentHTML('beforeend',select('advanceScope','Ödeme / avansın kapsamı',[['general','Genel firma hesabı'],['reserved','Belirli anlaşmaya ayrılmış']])+'<details data-agreement-details><summary>Anlaşma / sipariş · isteğe bağlı</summary>'+field('agreementId','Anlaşma / sipariş kimliği')+'</details>');
     else form.insertAdjacentHTML('beforeend','<details class="supplier-optional-metadata"><summary>Anlaşma / sipariş · isteğe bağlı</summary>'+field('agreementId','Anlaşma / sipariş kimliği · isteğe bağlı')+'</details>');
-    form.insertAdjacentHTML('beforeend','<details class="supplier-optional-metadata"><summary>Açıklama · isteğe bağlı</summary>'+field('note','Açıklama')+'</details>'+ '<details><summary>İşlem TL referansı · isteğe bağlı</summary>'+field('referenceTL','Anlaşılmış toplam TL referansı')+'</details>'+ '<div data-supplier-preview class="info neutral" aria-live="polite"></div>');
+    form.insertAdjacentHTML('beforeend','<details class="supplier-optional-metadata"><summary>Açıklama · isteğe bağlı</summary>'+field('note','Açıklama')+'</details>'+ '<details><summary>Anlaşılan Toplam TL Referansı (Kasadan Çıkmaz) · isteğe bağlı</summary>'+field('referenceTL','Anlaşılmış toplam TL referansı')+'</details>'+ '<div data-supplier-preview class="info neutral" aria-live="polite"></div>');
+    if(kind==='purchase'){
+      const applyStep=step=>{
+        form.querySelectorAll('[data-supplier-step]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.supplierStep===step)));
+        const itemsEl=groups.get('items')?.section, chargesEl=groups.get('charges')?.section;
+        if(itemsEl)itemsEl.hidden=step!=='all'&&step!=='1';
+        if(chargesEl)chargesEl.hidden=step!=='all'&&step!=='2';
+        for(const el of form.querySelectorAll('.supplier-payment-details, .supplier-optional-metadata, [data-supplier-sources="purchase"]'))el.hidden=step!=='all'&&step!=='3';
+      };
+      form.querySelectorAll('[data-supplier-step]').forEach(btn=>btn.addEventListener('click',()=>applyStep(btn.dataset.supplierStep)));
+      form.addEventListener('submit',()=>applyStep('all'),true);
+    }
   }
   if(saved?.amend)form.insertAdjacentHTML('beforeend','<p>'+esc(saved.recordLabel)+' · Düzeltme</p>'+field('amendNote','Düzeltme gerekçesi',true));
   const review=doc.createElement('button');review.type='button';review.className='button secondary';review.dataset.reviewCurrent='';review.textContent='Güncel bilgilerle kontrol ettim';review.hidden=!stale();form.append(review);

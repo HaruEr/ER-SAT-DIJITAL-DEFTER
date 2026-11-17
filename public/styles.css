@@ -1071,3 +1071,30 @@ main:has(#summary-result) .summary-filters { gap:16px; }
 .defter-skeleton--table .defter-skeleton-line { height: 34px; }
 @keyframes defter-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
 @media (prefers-reduced-motion: reduce) { .defter-skeleton-line { animation: none; } }
+
+/* Paket 5A: Workbench Split View, Tabs & Selection */
+.workbench-split { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
+@media (min-width: 1024px) {
+  .workbench-split.has-detail { grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1.35fr); }
+  .workbench-split.has-detail > #account-detail,
+  .workbench-split.has-detail > .journal-detail-pane { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto; }
+}
+.workbench-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 12px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+.workbench-tab { padding: 6px 12px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--surface-soft); color: var(--ink); font-size: 13px; font-weight: 600; cursor: pointer; }
+.workbench-tab[aria-selected="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+.account-card.is-selected, .journal-item.is-selected { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent); background: var(--surface-soft); }
+.workbench-pagination { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+
+/* Paket 5C: Closing Sticky Bar, Sticky thead & Journal Advanced Filters */
+.closing-screen table thead th { position: sticky; top: 0; z-index: 2; background: var(--surface-soft); }
+.sticky-action-bar { position: sticky; bottom: 0; z-index: 15; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; margin-top: 14px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow); }
+.sticky-action-bar .form-actions { margin: 0; }
+.journal-advanced-filters { margin-top: 8px; }
+.journal-advanced-filters > summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--accent); padding: 4px 0; }
+
+/* Paket 5D: Dashboard Overview 4-Block Grid & Decision SVG Bars */
+.overview-blocks { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-bottom: 16px; }
+.overview-block { padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); }
+.overview-block h3 { margin: 0 0 8px; font-size: 15px; }
+.overview-status-strip { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 14px; margin-bottom: 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-soft); font-size: 13px; }
+.overview-svg-chart { width: 100%; height: auto; display: block; margin-top: 8px; }
