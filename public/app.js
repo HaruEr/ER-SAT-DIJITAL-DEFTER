@@ -323,8 +323,28 @@ function formatted(value, unit = 'TL') { return codec ? codec.formatAmount(value
 function raw(value, unit) { return codec ? codec.canonicalFromScaled(value || 0, unit) : ((value || 0) / units[unit].scale).toFixed(units[unit].digits); }
 function day(value) { return dateFmt ? dateFmt.formatTurkishDate(value) : (value ? new Date(`${value}T12:00:00`).toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' }) : 'Başlangıç devri bekleniyor'); }
 function today() { if (dateFmt) return dateFmt.todayIstanbul(); const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Istanbul', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date()).map(p => [p.type, p.value])); return `${parts.year}-${parts.month}-${parts.day}`; }
-function account(id) { return state.accounts.find(a => a.id === id); }
-function activeAccounts() { return state.accounts.filter(a => !a.retired).sort((a,b)=>(a.displayOrder??90)-(b.displayOrder??90)); }
+let cachedAccountsSrc = null, cachedAccountMap = null, cachedActiveList = null;
+const accountSearchCache = new WeakMap();
+function accountSearchText(a) {
+  let text = accountSearchCache.get(a);
+  if (text === undefined) {
+    text = normalize([a.name, a.phone, a.taxId].join(' '));
+    accountSearchCache.set(a, text);
+  }
+  return text;
+}
+function ensureAccountCache() {
+  const src = state?.accounts;
+  if (!src) return null;
+  if (cachedAccountsSrc !== src) {
+    cachedAccountsSrc = src;
+    cachedAccountMap = new Map(src.map(a => [a.id, a]));
+    cachedActiveList = src.filter(a => !a.retired).sort((a,b)=>(a.displayOrder??90)-(b.displayOrder??90));
+  }
+  return cachedAccountMap;
+}
+function account(id) { return ensureAccountCache()?.get(id); }
+function activeAccounts() { ensureAccountCache(); return cachedActiveList || []; }
 function summaryAccountLabel(id) { const a = account(id); return esc(a?.name || id) + (a?.retired ? '<br><small>Eski hesap · yeni işleme kapalı</small>' : ''); }
 function inform(message, error = false, { persistent = false } = {}) {
   const notice = $('#notice');
@@ -1014,7 +1034,7 @@ function renderAccounts(stock=false){
     const hasActiveFilters = Boolean(search.value.trim() || unit.value || (sign && sign.value !== 'all'));
     clearBtn.disabled = !hasActiveFilters;
     const q=normalize(search.value.trim());remember({q:search.value,unit:unit.value,sign:sign?.value||'all'});
-    const matches=a=>(!q||normalize([a.name,a.phone,a.taxId].join(' ')).includes(q))&&(!unit.value||unit.value===a.unit)&&(!sign||sign.value==='all'||(sign.value==='claim'?state.balances[a.id]>0:sign.value==='debt'?state.balances[a.id]<0:!state.balances[a.id]));
+    const matches=a=>(!q||accountSearchText(a).includes(q))&&(!unit.value||unit.value===a.unit)&&(!sign||sign.value==='all'||(sign.value==='claim'?state.balances[a.id]>0:sign.value==='debt'?state.balances[a.id]<0:!state.balances[a.id]));
     const selected=rows.filter(matches);
     if (selectedDetailId) {
       const selectedIndex = selected.findIndex(a => a.id === selectedDetailId);
