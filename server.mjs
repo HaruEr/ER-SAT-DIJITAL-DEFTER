@@ -26,6 +26,7 @@ const staticFiles = new Map([
   ['/ui-kit.js', ['ui-kit.js', 'text/javascript; charset=utf-8']],
   ['/search-norm.js', ['search-norm.js', 'text/javascript; charset=utf-8']],
   ['/combobox.js', ['combobox.js', 'text/javascript; charset=utf-8']],
+  ['/command-palette.js', ['command-palette.js', 'text/javascript; charset=utf-8']],
   ['/users', ['users.html', 'text/html; charset=utf-8']],
   ['/users.js', ['users.js', 'text/javascript; charset=utf-8']],
   ['/access.css', ['access.css', 'text/css; charset=utf-8']],

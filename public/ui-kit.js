@@ -102,7 +102,10 @@
     if (layerStack.length > 0) {
       const top = topLayer();
       const hadPushed = Boolean(top?.historyPushed);
-      if (hadPushed) event?.stopImmediatePropagation?.();
+      const hasUnderlyingLayer = layerStack.length > 1;
+      if (hadPushed || (top?.external && hasUnderlyingLayer)) {
+        event?.stopImmediatePropagation?.();
+      }
       top?.close('popstate');
       unwindClosedTail();
     }
@@ -351,6 +354,7 @@
       if (closed) return;
       closed = true;
       entry.closed = true;
+      const wasTop = layerStack[layerStack.length - 1] === entry;
       const idx = layerStack.indexOf(entry);
       if (idx !== -1) layerStack.splice(idx, 1);
       dialog.removeEventListener('keydown', handleKeydown);
@@ -362,8 +366,9 @@
       dialog.removeAttribute('open');
       dialog.remove();
 
-      if (prevTop && prevTop.dialog.isConnected) {
-        prevTop.dialog.removeAttribute('aria-hidden');
+      const currentTop = topLayer();
+      if (currentTop && currentTop.dialog && currentTop.dialog.isConnected) {
+        currentTop.dialog.removeAttribute('aria-hidden');
       }
       if (layerStack.length === 0) setBackgroundInert(false);
 
@@ -380,7 +385,7 @@
         historyLayerStack.splice(hIdx, 1);
       }
 
-      if (returnTarget && typeof returnTarget.focus === 'function' && returnTarget.isConnected) {
+      if ((wasTop || layerStack.length === 0) && returnTarget && typeof returnTarget.focus === 'function' && returnTarget.isConnected) {
         returnTarget.focus({ preventScroll: true });
       }
       onClose?.(reason);
@@ -500,6 +505,7 @@
         trigger,
         onClose: () => done({ confirmed: false })
       });
+      layer?.dialog?.setAttribute('data-critical-modal', 'true');
 
       cancelBtn.addEventListener('click', () => layer?.close('cancel'));
       wrap.addEventListener('submit', event => {
@@ -619,6 +625,45 @@
     return wrap;
   }
 
+  function registerOverlay({ dialog = null, close = null } = {}) {
+    if (typeof document === 'undefined' || !document.body) {
+      return { prevTop: null, release: () => {} };
+    }
+    closePopover(false);
+    const prevTop = topLayer();
+    if (prevTop && prevTop.dialog) prevTop.dialog.setAttribute('aria-hidden', 'true');
+    setBackgroundInert(true);
+    const entry = {
+      dialog,
+      close: reason => close?.(reason),
+      external: true,
+      historyPushed: false,
+      deferredHistoryPush: false,
+      closed: false
+    };
+    layerStack.push(entry);
+    if (dialog && dialog.style) {
+      dialog.style.zIndex = String(Math.max(140, 100 + layerStack.length * 2));
+    }
+    let released = false;
+    function release() {
+      if (released) return;
+      released = true;
+      entry.closed = true;
+      const idx = layerStack.indexOf(entry);
+      if (idx !== -1) layerStack.splice(idx, 1);
+      if (prevTop && prevTop.dialog && prevTop.dialog.isConnected && (prevTop === topLayer() || !layerStack.includes(prevTop))) {
+        prevTop.dialog.removeAttribute('aria-hidden');
+      }
+      const nextTop = topLayer();
+      if (nextTop && nextTop.dialog && nextTop.dialog.isConnected) {
+        nextTop.dialog.removeAttribute('aria-hidden');
+      }
+      if (layerStack.length === 0) setBackgroundInert(false);
+    }
+    return { prevTop, release };
+  }
+
   const exportsObj = {
     toast,
     clearToasts,
@@ -632,6 +677,7 @@
     openPopover,
     closePopover,
     renderSkeleton,
+    registerOverlay,
     getLayerCount: () => layerStack.length,
     topLayer: () => topLayer(),
     closeTopLayer: (reason = 'programmatic') => {

@@ -13,6 +13,9 @@
   <script defer src="/ui-kit.js"></script>
   <script defer src="/access-client.js"></script>
   <script defer src="/draft-store.js"></script>
+  <script defer src="/search-norm.js"></script>
+  <script defer src="/combobox.js"></script>
+  <script defer src="/command-palette.js"></script>
   <script type="module" src="/app.js"></script>
 </head>
 <body>
@@ -50,7 +53,7 @@
     <div class="workspace">
       <header class="topbar">
         <div><span class="eyebrow">AÇIK İŞ GÜNÜ</span><strong id="business-date">Yükleniyor…</strong></div>
-        <div class="topbar-actions"><label class="workspace-label" for="workspace">Çalışma alanı<select id="workspace"><option value="demo">Örnek defter</option><option value="dukkan">Dükkân defteri</option></select></label><button id="theme-toggle" class="button secondary compact theme-toggle" type="button" aria-pressed="false" aria-label="Gece modunu aç">Gece modu</button><button id="refresh" class="button secondary compact" type="button">Yenile</button></div>
+        <div class="topbar-actions"><label class="workspace-label" for="workspace">Çalışma alanı<select id="workspace"><option value="demo">Örnek defter</option><option value="dukkan">Dükkân defteri</option></select></label><button id="command-palette-trigger" class="button secondary compact defter-command-palette-trigger" type="button" data-command-palette-trigger aria-haspopup="dialog" aria-expanded="false" aria-keyshortcuts="Control+K Meta+K">Komutlar <kbd class="defter-kbd">Ctrl+K</kbd></button><button id="theme-toggle" class="button secondary compact theme-toggle" type="button" aria-pressed="false" aria-label="Gece modunu aç">Gece modu</button><button id="refresh" class="button secondary compact" type="button">Yenile</button></div>
       </header>
       <div id="workspace-banner" class="workspace-banner"></div>
       <div id="workday-warning" class="info neutral workday-warning" role="status" hidden></div>
