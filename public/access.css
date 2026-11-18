@@ -110,3 +110,10 @@
 .defter-drawer #customer-form button { min-height: 46px; border-radius: var(--radius-sm, 8px); }
 .defter-drawer #customer-form [hidden] { display: none; }
 .defter-drawer #customer-drawer-notice { margin: 0; }
+.access-card > a {
+  display: inline-flex;
+  align-items: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 8px 0;
+}

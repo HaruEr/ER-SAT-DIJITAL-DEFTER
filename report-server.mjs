@@ -7,7 +7,7 @@ import { ReportRepository, ReportError } from './report-repository.mjs';
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const staticFiles = new Map([['/',['reports.html','text/html; charset=utf-8']],['/amount-codec.js',['amount-codec.js','text/javascript; charset=utf-8']],['/date-format.js',['date-format.js','text/javascript; charset=utf-8']],['/reports.js',['reports.js','text/javascript; charset=utf-8']],['/reports.css',['reports.css','text/css; charset=utf-8']]]);
 const routes = new Set(['/api/reports/overview','/api/reports/summary','/api/reports/journal']);
-const responseHeaders = { 'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff', 'Referrer-Policy':'no-referrer', 'Cross-Origin-Resource-Policy':'same-origin', 'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" };
+const responseHeaders = { 'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff', 'Referrer-Policy':'no-referrer', 'Cross-Origin-Resource-Policy':'same-origin', 'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" };
 
 export function validateReportConfig({ enabled = false, origin, allowedLogins, dataDirectory = path.join(directory,'data') } = {}) {
   if (enabled !== true) throw new ReportError('Rapor portalı varsayılan olarak kapalı.',503);
@@ -36,6 +36,7 @@ export function createReportApp(options = {}) {
       authorizeReportRequest(req,config);
       if(req.method!=='GET')return json(405,{error:'Bu portal yalnız rapor okumak içindir.'},{Allow:'GET'});
       const url=new URL(req.url,config.origin);
+      if(url.pathname==='/favicon.ico'){res.writeHead(204,responseHeaders);return res.end();}
       if(staticFiles.has(url.pathname)){const[file,type]=staticFiles.get(url.pathname);const content=readFileSync(path.join(directory,'public',file));res.writeHead(200,{...responseHeaders,'Content-Type':type});return res.end(content);}
       if(!routes.has(url.pathname))return json(404,{error:'Rapor bulunamadı.'});
       const permitted=url.pathname.endsWith('/journal')?['workspace','date','type','q','limit','cursor']:url.pathname.endsWith('/summary')?['workspace','date']:['workspace'];
