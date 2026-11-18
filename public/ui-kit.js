@@ -1,7 +1,7 @@
 (root => {
   const activeToasts = new Set();
   const layerStack = [];
-  const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  const FOCUSABLE = 'a[href]:not([tabindex^="-"]), button:not([disabled]):not([tabindex^="-"]), input:not([disabled]):not([type="hidden"]):not([tabindex^="-"]), select:not([disabled]):not([tabindex^="-"]), textarea:not([disabled]):not([tabindex^="-"]), [tabindex]:not([tabindex^="-"])';
   let layerSeq = 0;
   const pushedLayerIds = new Set();
   const historyLayerStack = [];
@@ -243,7 +243,13 @@
 
   function focusableIn(container) {
     if (!container) return [];
-    return [...container.querySelectorAll(FOCUSABLE)].filter(el => !el.hidden && !el.closest('[hidden]'));
+    return [...container.querySelectorAll(FOCUSABLE)].filter(el => {
+      if (el.hidden || el.closest('[hidden]') || el.classList?.contains('defter-combobox-native')) return false;
+      const tabAttr = el.getAttribute('tabindex');
+      if (tabAttr !== null && Number(tabAttr) < 0) return false;
+      if (typeof el.tabIndex === 'number' && el.tabIndex < 0) return false;
+      return true;
+    });
   }
 
   function setBackgroundInert(active) {

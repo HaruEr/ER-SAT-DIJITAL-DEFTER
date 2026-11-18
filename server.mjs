@@ -24,6 +24,8 @@ const staticFiles = new Map([
   ['/amount-codec.js', ['amount-codec.js', 'text/javascript; charset=utf-8']],
   ['/date-format.js', ['date-format.js', 'text/javascript; charset=utf-8']],
   ['/ui-kit.js', ['ui-kit.js', 'text/javascript; charset=utf-8']],
+  ['/search-norm.js', ['search-norm.js', 'text/javascript; charset=utf-8']],
+  ['/combobox.js', ['combobox.js', 'text/javascript; charset=utf-8']],
   ['/users', ['users.html', 'text/html; charset=utf-8']],
   ['/users.js', ['users.js', 'text/javascript; charset=utf-8']],
   ['/access.css', ['access.css', 'text/css; charset=utf-8']],
@@ -157,7 +159,12 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
       if (req.method === 'GET' && url.pathname === '/api/checkout') return json(200, checkoutState(repository.state({ compact: true })));
       if (req.method === 'GET' && url.pathname === '/api/customers') {
         const state = repository.state({ compact:true });
-        return json(200, url.searchParams.has('id') ? customerDetail(state, url.searchParams.get('id')) : customerChoices(state, url.searchParams.get('q') || ''));
+        if (url.searchParams.has('id')) return json(200, customerDetail(state, url.searchParams.get('id')));
+        const limitParam = url.searchParams.get('limit');
+        if (limitParam !== null && (!/^\d+$/.test(limitParam) || Number(limitParam) < 1)) fail('Geçerli sayfa boyutu seçin.');
+        const limit = limitParam === null ? 20 : Math.min(50, Number(limitParam));
+        const meta = url.searchParams.get('meta') === '1';
+        return json(200, customerChoices(state, url.searchParams.get('q') || '', { limit, meta }));
       }
       const compact = url.searchParams.get('view') === 'compact';
       if (req.method === 'GET' && url.pathname === '/api/state') return json(200, repository.state({ compact }));
