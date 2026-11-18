@@ -507,7 +507,7 @@ function renderSupplierRead(panel, context) {
     }).join('')||'<p>Seçilen dönemde hareket yok.</p>';
   }
   function totalsMarkup(page){
-    return '<h3>Birim bazlı dönem ekstresi</h3><div class="table-wrap"><table><thead><tr>'+['Birim','Dönem başı','Borç artışı','Borç azalışı','Alacak artışı','Alacak azalışı','Dönem sonu'].map(x=>'<th>'+x+'</th>').join('')+'</tr></thead><tbody>'+page.statements.map(row=>'<tr><th>'+esc(unitLabel(row.unit))+'</th>'+['opening','debtIncrease','debtDecrease','creditIncrease','creditDecrease','closing'].map(k=>'<td>'+esc(signed(row[k],row.unit))+'</td>').join('')+'</tr>').join('')+'</tbody></table></div><p>Her birim bağımsızdır. Dönem bakiyesi güncel bakiye yerine geçmez.</p>';
+    return '<h3>Birim bazlı dönem ekstresi</h3><div class="table-wrap"><table><thead><tr>'+['Birim','Dönem başı','Borç artışı','Borç azalışı','Alacak artışı','Alacak azalışı','Dönem sonu'].map(x=>'<th scope="col">'+x+'</th>').join('')+'</tr></thead><tbody>'+page.statements.map(row=>'<tr><th scope="row">'+esc(unitLabel(row.unit))+'</th>'+['opening','debtIncrease','debtDecrease','creditIncrease','creditDecrease','closing'].map(k=>'<td>'+esc(signed(row[k],row.unit))+'</td>').join('')+'</tr>').join('')+'</tbody></table></div><p>Her birim bağımsızdır. Dönem bakiyesi güncel bakiye yerine geçmez.</p>';
   }
   function reconciliation(){
     const form=panel.querySelector('[data-reconcile-form]');if(!form)return '';

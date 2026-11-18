@@ -35,10 +35,11 @@
           : `${spec.label} için en fazla ${spec.digits} ondalık basamak kullanın.`
       };
     }
-    if (wholeStr.length > 13) {
+    const normWhole = wholeStr.replace(/^0+(?=\d)/, '');
+    if (normWhole.length > 13) {
       return { status: 'invalid', reason: 'Miktar izin verilen üst sınırı (1e12) aşıyor.' };
     }
-    const whole = Number(wholeStr);
+    const whole = Number(normWhole);
     const frac = spec.digits === 0 ? 0 : Number(fracStr.padEnd(spec.digits, '0'));
     const scaled = whole * spec.scale + frac;
     if (!Number.isSafeInteger(scaled) || scaled > 1e12) {
@@ -49,23 +50,21 @@
     }
     const canonical = spec.digits === 0
       ? String(whole)
-      : fracStr.length ? `${wholeStr}.${fracStr}` : wholeStr;
+      : fracStr.length ? `${normWhole}.${fracStr}` : normWhole;
     return { status: 'valid', canonical, scaled };
   }
 
-  function parseUserAmount(rawValue, unit = 'TL', { positive = false, allowZero = true, resolution = null } = {}) {
+  function parseUnsignedAmount(text, unit = 'TL', { positive = false, allowZero = true, resolution = null } = {}) {
     const spec = units[unit];
-    const text = String(rawValue ?? '').trim();
-    if (!text) return { status: 'empty', scaled: null };
-    if (text.startsWith('-') || !/^[\d.,]+$/.test(text)) {
-      return { status: 'invalid', reason: 'Yalnızca pozitif rakam, nokta ve virgül kullanın.' };
+    if (!/^[\d.,]+$/.test(text)) {
+      return { status: 'invalid', reason: `Geçersiz miktar biçimi (${unit}). Örnek: 10.000,50 veya 10500.` };
     }
 
     let wholeStr = '';
     let fracStr = '';
 
     // 1. Single dot with exactly 3 trailing digits: 10.500 (thousands vs 3-decimal ambiguity)
-    if (/^\d{1,3}\.\d{3}$/.test(text)) {
+    if (/^[1-9]\d{0,2}\.\d{3}$/.test(text)) {
       const [left, right] = text.split('.');
       if (spec.digits === 3) {
         const asThousands = buildScaled(left + right, '', spec, positive, allowZero);
@@ -94,7 +93,7 @@
       // For TL / FX (digits: 2) or ADET (digits: 0), 10.500 is unambiguously Turkish thousands (10500).
       wholeStr = left + right;
       fracStr = '';
-    } else if (/^\d{1,3}(?:\.\d{3})+(?:,\d+)?$/.test(text)) {
+    } else if (/^[1-9]\d{0,2}(?:\.\d{3})+(?:,\d+)?$/.test(text)) {
       // 2. Turkish grouped thousands + optional comma decimal: 10.000,50 or 1.250.000
       const [intPart, decPart = ''] = text.split(',');
       wholeStr = intPart.replace(/\./g, '');
@@ -102,8 +101,8 @@
     } else if (/^\d+,\d+$/.test(text)) {
       // 3. Plain comma decimal: 10,500 or 10,5
       [wholeStr, fracStr] = text.split(',');
-    } else if (/^\d+\.\d{1,2}$/.test(text)) {
-      // 4. Single dot with 1 or 2 digits: 10.5 or 10.25 -> decimal
+    } else if (/^\d+\.\d{1,3}$/.test(text)) {
+      // 4. Single dot with 1 to 3 digits: 0.500, 1000.500, 10.5 or 10.25 -> decimal
       [wholeStr, fracStr] = text.split('.');
     } else if (/^\d+$/.test(text)) {
       // 5. Plain integer: 10500
@@ -116,6 +115,50 @@
     const built = buildScaled(wholeStr, fracStr, spec, positive, allowZero);
     if (built.status !== 'valid') return built;
     return { ...built, formatted: formatAmount(built.scaled, unit) };
+  }
+
+  function parseUserAmount(rawValue, unit = 'TL', { positive = false, allowZero = true, signed = false, resolution = null } = {}) {
+    const text = String(rawValue ?? '').trim();
+    if (!text) return { status: 'empty', scaled: null };
+    if (text.startsWith('-')) {
+      if (!signed) {
+        return { status: 'invalid', reason: 'Yalnızca pozitif rakam, nokta ve virgül kullanın.' };
+      }
+      if (positive) {
+        return { status: 'invalid', reason: 'Miktar sıfırdan büyük olmalıdır.' };
+      }
+      const unsigned = text.slice(1);
+      if (!unsigned || /^\s/.test(unsigned)) {
+        return { status: 'invalid', reason: 'Geçerli bir miktar girin.' };
+      }
+      const res = parseUnsignedAmount(unsigned, unit, { positive: false, allowZero, resolution });
+      if (res.status === 'valid') {
+        const scaled = res.scaled === 0 ? 0 : -res.scaled;
+        const canonical = res.scaled === 0 ? res.canonical : `-${res.canonical}`;
+        return { status: 'valid', canonical, scaled, formatted: formatAmount(scaled, unit) };
+      }
+      if (res.status === 'ambiguous') {
+        const options = res.options.map(opt => {
+          const negScaled = opt.scaled === 0 ? 0 : -opt.scaled;
+          return {
+            choice: opt.choice,
+            canonical: opt.scaled === 0 ? opt.canonical : `-${opt.canonical}`,
+            scaled: negScaled,
+            formatted: formatAmount(negScaled, unit)
+          };
+        });
+        return {
+          status: 'ambiguous',
+          reason: `${text} girişi belirsiz: ${options[0].formatted} mü, ${options[1].formatted} mı?`,
+          options
+        };
+      }
+      return res;
+    }
+    if (!/^[\d.,]+$/.test(text)) {
+      return { status: 'invalid', reason: 'Yalnızca pozitif rakam, nokta ve virgül kullanın.' };
+    }
+    return parseUnsignedAmount(text, unit, { positive, allowZero, resolution });
   }
 
   function clearDisambiguation(input) {
@@ -172,10 +215,34 @@
     }
   }
 
-  function parseInputElement(input, unit = 'TL', positive = false) {
+  function normalizeInputOptions(positive = false, options = {}) {
+    if (positive && typeof positive === 'object') {
+      const pos = Boolean(positive.positive);
+      return {
+        positive: pos,
+        allowZero: positive.allowZero !== undefined ? Boolean(positive.allowZero) : !pos,
+        signed: Boolean(positive.signed)
+      };
+    }
+    const opts = options && typeof options === 'object' ? options : {};
+    const pos = Boolean(positive);
+    return {
+      positive: pos,
+      allowZero: opts.allowZero !== undefined ? Boolean(opts.allowZero) : !pos,
+      signed: Boolean(opts.signed)
+    };
+  }
+
+  function parseInputElement(input, unit = 'TL', positive = false, options = {}) {
     if (!input) return null;
+    const normOpts = normalizeInputOptions(positive, options);
     const resolution = input.dataset?.amountResolution || null;
-    const result = parseUserAmount(input.value, unit, { positive, allowZero: !positive, resolution });
+    const result = parseUserAmount(input.value, unit, {
+      positive: normOpts.positive,
+      allowZero: normOpts.allowZero,
+      signed: normOpts.signed,
+      resolution
+    });
     if (result.status === 'empty') {
       input.setCustomValidity('');
       delete input.dataset.canonicalAmount;
@@ -214,9 +281,9 @@
     clearDisambiguation(input);
   }
 
-  function canonicalInputValue(input, unit = 'TL', positive = false) {
+  function canonicalInputValue(input, unit = 'TL', positive = false, options = {}) {
     if (!input) return '';
-    const scaled = parseInputElement(input, unit, positive);
+    const scaled = parseInputElement(input, unit, positive, options);
     if (scaled !== null && input.dataset?.canonicalAmount) return input.dataset.canonicalAmount;
     return String(input.value ?? '').trim();
   }
@@ -225,8 +292,10 @@
     document.addEventListener('input', event => {
       if (!event.isTrusted) return;
       const target = event.target;
-      if (target instanceof HTMLInputElement && target.dataset?.amountResolution) {
-        delete target.dataset.amountResolution;
+      if (target instanceof HTMLInputElement && target.dataset) {
+        if (target.dataset.amountResolution) delete target.dataset.amountResolution;
+        if (target.dataset.canonicalAmount) delete target.dataset.canonicalAmount;
+        if (target.dataset.formattedPreview) delete target.dataset.formattedPreview;
       }
     }, true);
   }

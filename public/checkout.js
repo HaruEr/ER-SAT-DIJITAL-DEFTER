@@ -156,29 +156,20 @@ function parseSignedTL(input, optional=false, allowZero=false) {
     return null;
   }
   if (codec) {
-    const negative = text.startsWith('-');
-    const unsigned = negative ? text.slice(1).trim() : text;
-    if (!unsigned) {
+    if (!text) {
       input.setCustomValidity('Geçerli TL tutarı girin.');
       delete input.dataset.canonicalAmount;
       return null;
     }
-    const res = codec.parseUserAmount(unsigned, 'TL', { positive: false, allowZero: true });
+    const res = codec.parseUserAmount(text, 'TL', { positive: false, allowZero, signed: true });
     if (res.status !== 'valid') {
       input.setCustomValidity(res.reason || 'Geçerli TL tutarı girin.');
       delete input.dataset.canonicalAmount;
       return null;
     }
-    if (!allowZero && res.scaled === 0) {
-      input.setCustomValidity('Tutar sıfırdan büyük olmalıdır.');
-      delete input.dataset.canonicalAmount;
-      return null;
-    }
-    const scaled = negative ? -res.scaled : res.scaled;
-    const canonicalText = negative && res.scaled > 0 ? '-' + res.canonical : res.canonical;
     input.setCustomValidity('');
-    input.dataset.canonicalAmount = canonicalText;
-    return scaled;
+    input.dataset.canonicalAmount = res.canonical;
+    return res.scaled;
   }
   input.setCustomValidity('');
   const value=decimal(text);
@@ -186,7 +177,8 @@ function parseSignedTL(input, optional=false, allowZero=false) {
   const pattern=/^-?\d+(?:\.\d{1,2})?$/;
   if (!pattern.test(value)) {input.setCustomValidity('Geçerli TL miktarı girin.');return null;}
   const [whole,fraction='']=value.replace('-','').split('.');
-  const amount=(Number(whole)*100+Number(fraction.padEnd(2,'0')))*(value.startsWith('-')?-1:1);
+  const mag=Number(whole)*100+Number(fraction.padEnd(2,'0'));
+  const amount=mag===0?0:(value.startsWith('-')?-mag:mag);
   if (!Number.isSafeInteger(amount) || Math.abs(amount)>1e12 || (!allowZero && amount===0)) {input.setCustomValidity('Geçerli, sınırlar içinde miktar girin.');return null;}
   return amount;
 }
@@ -217,11 +209,13 @@ function clearAmountInputState(input) {
   }
   input.setCustomValidity?.('');
 }
-function parseReadOnlyAmount(rawValue, unit='TL') {
-  const text = String(rawValue ?? '').trim();
+function parseReadOnlyAmount(inputOrValue, unit='TL') {
+  const isEl = inputOrValue && typeof inputOrValue === 'object' && 'value' in inputOrValue;
+  const text = String(isEl ? inputOrValue.value : inputOrValue ?? '').trim();
   if (!text) return null;
   if (codec) {
-    const res = codec.parseUserAmount(text, unit, { positive: true, allowZero: false });
+    const resolution = isEl ? (inputOrValue.dataset?.amountResolution || null) : null;
+    const res = codec.parseUserAmount(text, unit, { positive: true, allowZero: false, resolution });
     return res.status === 'valid' ? res.scaled : null;
   }
   const normalized = decimal(text);
@@ -553,11 +547,11 @@ function addAllocation(kind,data={}) {
   const row=document.createElement('div');row.className='checkout-line';row.dataset.allocation=kind;
   row.dataset.category=allocationCategory(kind,data);
   const label={money:'Para hesabı',product:'Ürün',scrap:'Hurda hesabı',customer:'Seçilen müşterinin cari hesabı'}[row.dataset.category];
-  row.innerHTML='<label>'+label+'<select data-account required></select></label><div class="access-columns">'+numeric('data-quantity','<span data-quantity-label>Miktar</span>')+'<div data-reference>'+numeric('data-value','Anlaşılmış TL karşılığı')+'</div></div><div data-weight-fields class="access-columns" hidden><label>Ayar hesabı<select data-pool></select></label>'+numeric('data-weight','Gerçek gram',false)+'</div><button type="button" data-remove class="button text">Karşılığı kaldır</button>';
+  row.innerHTML='<label><span>'+label+'</span><select data-account required></select></label><div class="access-columns">'+numeric('data-quantity','<span data-quantity-label>Miktar</span>')+'<div data-reference>'+numeric('data-value','Anlaşılmış TL karşılığı')+'</div></div><div data-weight-fields class="access-columns" hidden><label>Ayar hesabı<select data-pool></select></label>'+numeric('data-weight','Gerçek gram',false)+'</div><button type="button" data-remove class="button text">Karşılığı kaldır</button>';
   $(kind).append(row);
   const accountSelect=row.querySelector('[data-account]');
   if(comboboxLib?.enhanceSelect){
-    row._accountCombobox=comboboxLib.enhanceSelect(accountSelect,{smallListThreshold:50,maxNativeOptions:2,allowEmpty:true,emptyLabel:'Hesap seçin',placeholder:'Hesap veya ürün ara…',invalidTextBehavior:'revert',formatSelectedText:item=>item.unit?`${item.label} · ${item.unit}`:item.label});
+    row._accountCombobox=comboboxLib.enhanceSelect(accountSelect,{label,smallListThreshold:50,maxNativeOptions:2,allowEmpty:true,emptyLabel:'Hesap seçin',placeholder:'Hesap veya ürün ara…',invalidTextBehavior:'revert',formatSelectedText:item=>item.unit?`${item.label} · ${item.unit}`:item.label});
   }
   allocationOptions(row,data.accountId);
   for(const key of ['quantity','weight'])row.querySelector('[data-'+key+']').value=data[key] || '';
@@ -615,7 +609,7 @@ function renderLiveSummary() {
         for (const kind of ['credits', 'debts']) {
           for (const row of $(kind).children) {
             if (row.querySelector('[data-account]').value !== acc.id) continue;
-            const qty = parseReadOnlyAmount(row.querySelector('[data-quantity]').value, acc.unit);
+            const qty = parseReadOnlyAmount(row.querySelector('[data-quantity]'), acc.unit);
             if (qty === null) valid = false;
             else net += qty * (kind === 'credits' ? 1 : -1);
           }
@@ -632,16 +626,16 @@ function renderLiveSummary() {
     const items = [];
     for (const row of $('items').children) {
       const { product } = itemProduct(row);
-      const qty = parseReadOnlyAmount(row.querySelector('[data-quantity]').value, product?.unit || 'ADET');
-      const val = parseReadOnlyAmount(row.querySelector('[data-value]').value, 'TL');
+      const qty = parseReadOnlyAmount(row.querySelector('[data-quantity]'), product?.unit || 'ADET');
+      const val = parseReadOnlyAmount(row.querySelector('[data-value]'), 'TL');
       items.push(`<li><span>${esc(product?.name || 'Ürün')} · ${esc(qty === null ? 'Eksik' : format(qty, product?.unit || 'ADET'))}</span><strong>${esc(val === null ? 'Eksik' : format(val, 'TL'))}</strong></li>`);
     }
     const shortLabels = { received: 'Alınan', given: 'Verilen', credits: 'Cari alacak', debts: 'Cari borç' };
     for (const kind of groups) {
       for (const row of $(kind).children) {
         const acc = allocationAccount(row);
-        const qty = acc ? parseReadOnlyAmount(row.querySelector('[data-quantity]').value, acc.unit) : null;
-        const val = parseReadOnlyAmount(row.querySelector('[data-value]').value, 'TL');
+        const qty = acc ? parseReadOnlyAmount(row.querySelector('[data-quantity]'), acc.unit) : null;
+        const val = parseReadOnlyAmount(row.querySelector('[data-value]'), 'TL');
         items.push(`<li><span>${esc(shortLabels[kind])} · ${esc(acc?.name || 'Hesap seçin')} · ${esc(qty === null || !acc ? 'Eksik' : format(qty, acc.unit))}</span><strong>${esc(val === null ? 'Eksik' : format(val, 'TL'))}</strong></li>`);
       }
     }
@@ -782,7 +776,7 @@ function renderReview(c) {
   const lines=[...c.items.map(row=>({label:operation==='sale'?'Satılan':'Alınan ürün',row,reference:row.value})),...groups.flatMap(kind=>c[kind].map(row=>({label:groupNames[kind],row,reference:row.valueTL})))];
   const fmtReview = (val, u) => {
     if (!codec) return `${val} ${u}`;
-    const res = codec.parseUserAmount(val, u, { positive: true, allowZero: true });
+    const res = codec.parseUserAmount(val, u, { positive: true, allowZero: true, resolution: 'decimal' });
     return res.status === 'valid' ? res.formatted : `${val} ${u}`;
   };
   $('review-content').innerHTML='<p>'+esc((operation==='sale'?'Satış':'Alış')+' · '+day(snapshot.date)+' · '+(selectedCustomer?.name || 'Müşteri seçilmedi'))+'</p><div class="table-wrap"><table><thead><tr><th scope="col">İşlem</th><th scope="col">Hesap / ürün</th><th scope="col">Miktar</th><th scope="col">TL bedeli</th></tr></thead><tbody>'+lines.map(({label,row,reference})=>{const u=names.get(row.accountId)?.unit||'TL';return '<tr><td data-review-label="İşlem">'+esc(label)+'</td><td data-review-label="Ürün / hesap">'+esc(names.get(row.accountId)?.name || row.accountId)+(row.inventoryCode?' · '+esc(row.inventoryCode):'')+'</td><td data-review-label="Miktar">'+esc(fmtReview(row.quantity,u))+(row.weight?' · '+esc(fmtReview(row.weight,'GRAM')):'')+'</td><td data-review-label="TL bedeli">'+esc(fmtReview(reference,'TL'))+'</td></tr>';}).join('')+'</tbody></table></div>';
@@ -1004,6 +998,17 @@ $('trade').addEventListener('invalid', event => {
 }, true);
 $('trade').addEventListener('submit',event=>{
   event.preventDefault();if(writing||pending||customerLoading||!snapshot||isStale())return;
+  if(customerCombobox&&!customerCombobox.validate({report:true})){
+    status('Müşteri aramasında listeden geçerli bir seçim yapın veya alanı temizleyin.');
+    customerCombobox.focus({preventScroll:true,open:false});
+    return;
+  }
+  if($('search')&&(!$('search').checkValidity()||$('search').getAttribute('aria-invalid')==='true')){
+    status('Müşteri aramasında listeden geçerli bir seçim yapın veya alanı temizleyin.');
+    $('search').reportValidity?.();
+    $('search').focus();
+    return;
+  }
   const totalsResult=totals(),c=command();
   if(flowMode==='guided'&&(!validateCheckoutStep(1)||!validateCheckoutStep(2))){status('Ürün ve karşılık satırlarını tamamlayın.');return;}
   if(!$('trade').reportValidity() || !c.items.length){status('Ürün ve karşılık satırlarını tamamlayın.');return;}
@@ -1015,7 +1020,7 @@ $('edit').addEventListener('click',()=>{review=null;$('review').hidden=true;cont
 $('trade').addEventListener('input',changed);
 $('trade').addEventListener('change',changed);
 $('add-item').addEventListener('click',()=>{const row=addItem();changed({preferredStep:1});row?.querySelector('input').focus();});
-for(const button of document.querySelectorAll('[data-add]'))button.addEventListener('click',()=>{const row=addAllocation(button.dataset.add,{category:button.dataset.category});changed({preferredStep:2});row?.querySelector('select').focus();});
+for(const button of document.querySelectorAll('[data-add]'))button.addEventListener('click',()=>{const kind=button.dataset.add;const row=addAllocation(kind,{category:button.dataset.category});changed({preferredStep:2});if(!row)return;const select=row.querySelector('select');const preboundCari=['credits','debts'].includes(kind)&&Boolean(select?.value);if(preboundCari){row.querySelector('[data-quantity]')?.focus({preventScroll:true});}else if(row._accountCombobox){row._accountCombobox.focus({preventScroll:true,open:false});}else{select?.focus({preventScroll:true});}});
 function syncCustomerDrawerTrigger() {
   const openBtn = $('open-customer-drawer');
   const details = $('new-customer');

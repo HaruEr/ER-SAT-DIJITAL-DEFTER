@@ -426,6 +426,7 @@
     let requestSeq = 0;
     let currentPortalDialog = null;
     let dialogScrollBody = null;
+    let suppressOpenOnNextFocus = false;
 
     function syncClearVisibility() {
       const showClear = Boolean(clearable && !inputEl.disabled && (inputEl.value.length > 0 || committedValue !== ''));
@@ -679,7 +680,7 @@
           if (item.disabled || inputEl.disabled) return;
           commitSelection(item, { source: 'pointer' });
           close({ restoreText: false });
-          inputEl.focus({ preventScroll: true });
+          focusWithoutOpen({ preventScroll: true });
         });
 
         frag.append(btn);
@@ -1182,7 +1183,20 @@
       }
     }
 
+    function focusWithoutOpen(opts = { preventScroll: true }) {
+      suppressOpenOnNextFocus = true;
+      try {
+        inputEl.focus(opts);
+      } finally {
+        suppressOpenOnNextFocus = false;
+      }
+    }
+
     function onFocus() {
+      if (suppressOpenOnNextFocus) {
+        suppressOpenOnNextFocus = false;
+        return;
+      }
       if (inputEl.disabled) return;
       if (openOnFocus && !isOpen) {
         open();
@@ -1342,7 +1356,23 @@
       },
       open: () => open({ immediate: true }),
       close: opts => close(opts),
-      focus: () => inputEl.focus({ preventScroll: true }),
+      focus: (opts = {}) => {
+        const normalized = opts && typeof opts === 'object' ? opts : {};
+        const { open: shouldOpen, ...focusOpts } = normalized;
+        const finalOpts = { preventScroll: true, ...focusOpts };
+        if (shouldOpen === false) {
+          focusWithoutOpen(finalOpts);
+          return;
+        }
+        inputEl.focus(finalOpts);
+        if (shouldOpen === true && !isOpen && !inputEl.disabled) {
+          open({ immediate: true });
+        }
+      },
+      validate: opts => {
+        if (isOpen) close({ restoreText: false });
+        return validateUncommittedText(opts);
+      },
       clear: opts => clear(opts),
       refresh: () => {
         if (isOpen) {
@@ -1487,7 +1517,18 @@
       const parentLabel = typeof selectEl.closest === 'function' ? selectEl.closest('label') : null;
       if (parentLabel) {
         const labelSpan = parentLabel.querySelector('span, .field-label');
-        if (labelSpan) resolvedLabel = labelSpan.textContent.trim();
+        if (labelSpan) {
+          resolvedLabel = labelSpan.textContent.trim();
+        } else {
+          const parts = [];
+          for (const node of parentLabel.childNodes) {
+            if (node.nodeType === 3) {
+              const t = node.textContent.trim();
+              if (t) parts.push(t);
+            }
+          }
+          if (parts.length) resolvedLabel = parts.join(' ');
+        }
       }
     }
 
@@ -1664,7 +1705,11 @@
     const origFocus = selectEl.focus;
     if (forwardSelectFocus) {
       selectEl.focus = function forwardedFocus(opts) {
-        combobox.input.focus(opts);
+        if (opts && typeof opts === 'object' && Object.hasOwn(opts, 'open')) {
+          combobox.focus(opts);
+        } else {
+          combobox.input.focus(opts);
+        }
       };
       selectEl.addEventListener('focus', onSelectFocus);
     }

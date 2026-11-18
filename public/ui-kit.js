@@ -9,6 +9,7 @@
   let unwindMicrotaskScheduled = false;
   let unwindInFlight = false;
   let unwindSafetyTimer = null;
+  const consumedPopstateEvents = new WeakSet();
 
   function scheduleHistoryUnwind() {
     if (unwindMicrotaskScheduled || pendingUnwindSteps <= 0) return;
@@ -100,6 +101,7 @@
       return;
     }
     if (layerStack.length > 0) {
+      if (event && typeof event === 'object') consumedPopstateEvents.add(event);
       const top = topLayer();
       const hadPushed = Boolean(top?.historyPushed);
       const hasUnderlyingLayer = layerStack.length > 1;
@@ -678,6 +680,7 @@
     closePopover,
     renderSkeleton,
     registerOverlay,
+    wasPopstateConsumed: event => Boolean(event && consumedPopstateEvents.has(event)),
     getLayerCount: () => layerStack.length,
     topLayer: () => topLayer(),
     closeTopLayer: (reason = 'programmatic') => {
