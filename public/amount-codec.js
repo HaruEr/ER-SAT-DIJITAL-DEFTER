@@ -123,10 +123,22 @@
     container?.querySelector(':scope > .amount-disambiguation')?.remove();
   }
 
-  function renderDisambiguation(input, result) {
+  function renderDisambiguation(input, result, unit = 'TL') {
     const container = input.closest('label, .field, td, div') || input.parentElement;
     if (!container) return;
+    const sig = JSON.stringify([
+      unit,
+      String(input.value ?? '').trim(),
+      result.options.map(o => [o.choice, o.formatted])
+    ]);
     let box = container.querySelector(':scope > .amount-disambiguation');
+    if (
+      box &&
+      box.dataset.disambigKey === sig &&
+      box.querySelectorAll('[data-amount-choice]').length === result.options.length
+    ) {
+      return;
+    }
     if (!box) {
       box = document.createElement('div');
       box.className = 'amount-disambiguation';
@@ -134,6 +146,7 @@
       box.setAttribute('aria-label', 'Miktar netleştirme');
       input.after(box);
     }
+    box.dataset.disambigKey = sig;
     box.innerHTML = '';
     const prompt = document.createElement('small');
     prompt.textContent = 'Bu miktarı nasıl yorumlayalım?';
@@ -144,6 +157,9 @@
       btn.className = 'button secondary compact';
       btn.dataset.amountChoice = option.choice;
       btn.textContent = option.formatted;
+      btn.addEventListener('mousedown', event => {
+        event.preventDefault();
+      });
       btn.addEventListener('click', () => {
         input.dataset.amountResolution = option.choice;
         input.dataset.canonicalAmount = option.canonical;
@@ -171,7 +187,7 @@
       input.setCustomValidity(result.reason);
       delete input.dataset.canonicalAmount;
       delete input.dataset.formattedPreview;
-      renderDisambiguation(input, result);
+      renderDisambiguation(input, result, unit);
       return null;
     }
     clearDisambiguation(input);

@@ -105,7 +105,8 @@ function savePending(value) {
   }
   $('#retry-bar').hidden = !pending;
 }
-let state, view = 'overview', transactionTab = 'sale', busy = false, editingTransaction = null, partyReturnContext = null;
+let state, view = 'overview', transactionTab = 'sale', detailId = null, busy = false, editingTransaction = null, partyReturnContext = null;
+const DETAIL_HASH_VIEWS = new Set(['accounts', 'stocks', 'suppliers']);
 let busyControls = new Map();
 let recoveryGeneration = 0;
 let workspace = localStorage.getItem('defter-workspace') === 'dukkan' ? 'dukkan' : 'demo';
@@ -192,6 +193,37 @@ function clearWorkspaceDrafts(selected = workspace) {
   }
 }
 
+function selectHasValue(control, value) {
+  if (!control || control.tagName !== 'SELECT') return false;
+  const val = value === null || value === undefined ? '' : String(value);
+  const cb = globalThis.DefterCombobox?.getInstance?.(control);
+  if (cb && typeof cb.hasValue === 'function') {
+    if (val === '') return [...control.options].some(o => o.value === '') || cb.hasValue('');
+    return cb.hasValue(val);
+  }
+  return [...control.options].some(option => option.value === val);
+}
+function setSelectControlValue(control, value, { emit = true } = {}) {
+  if (!control) return false;
+  const val = value === null || value === undefined ? '' : String(value);
+  if (control.tagName !== 'SELECT') {
+    control.value = val;
+    if (emit) control.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  }
+  const cb = globalThis.DefterCombobox?.getInstance?.(control);
+  if (cb) {
+    if (!selectHasValue(control, val)) return false;
+    cb.setValue(val, { emitChange: false });
+    if (emit) control.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  }
+  if (![...control.options].some(option => option.value === val)) return false;
+  control.value = val;
+  if (emit) control.dispatchEvent(new Event('change', { bubbles: true }));
+  return true;
+}
+
 function prepareDraftForms() {
   const store = getDraftStore();
   for (const form of document.querySelectorAll('#main form')) {
@@ -218,8 +250,14 @@ function prepareDraftForms() {
           for (const control of draftFields(form)) {
             if (Object.hasOwn(fields, control.name || control.id)) {
               const value = fields[control.name || control.id];
-              if (control.tagName !== 'SELECT' || [...control.options].some(option => option.value === value)) control.value = value;
-              control.dispatchEvent(new Event(control.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true }));
+              if (control.tagName !== 'SELECT') {
+                control.value = value;
+                control.dispatchEvent(new Event('input', { bubbles: true }));
+              } else if (selectHasValue(control, value)) {
+                setSelectControlValue(control, value, { emit: true });
+              } else {
+                control.dispatchEvent(new Event('change', { bubbles: true }));
+              }
             }
           }
         }
@@ -323,8 +361,35 @@ function formatted(value, unit = 'TL') { return codec ? codec.formatAmount(value
 function raw(value, unit) { return codec ? codec.canonicalFromScaled(value || 0, unit) : ((value || 0) / units[unit].scale).toFixed(units[unit].digits); }
 function day(value) { return dateFmt ? dateFmt.formatTurkishDate(value) : (value ? new Date(`${value}T12:00:00`).toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' }) : 'Başlangıç devri bekleniyor'); }
 function today() { if (dateFmt) return dateFmt.todayIstanbul(); const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Istanbul', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date()).map(p => [p.type, p.value])); return `${parts.year}-${parts.month}-${parts.day}`; }
+const searchNorm = globalThis.DefterSearchNorm || null;
+const normalize = value => searchNorm
+  ? searchNorm.normalizeSearch(value)
+  : String(value ?? '').toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ı/g, 'i').replace(/\s+/g, ' ').trim();
+const matchesSearchText = (haystack, query) => searchNorm
+  ? searchNorm.matchesSearch(haystack, query)
+  : (!normalize(query) || normalize(Array.isArray(haystack) ? haystack.filter(Boolean).join(' ') : haystack).includes(normalize(query)));
+
 let cachedAccountsSrc = null, cachedAccountMap = null, cachedActiveList = null;
 const accountSearchCache = new WeakMap();
+const partyUnitComboCache = new WeakMap();
+const partyFirmComboCache = new WeakMap();
+function partyComboboxItem(a, { firmOnly = false } = {}) {
+  const cache = firmOnly ? partyFirmComboCache : partyUnitComboCache;
+  let item = cache.get(a);
+  if (!item) {
+    item = {
+      id: a.id,
+      label: a.name,
+      unit: firmOnly ? '' : a.unit,
+      subtitle: firmOnly ? 'Toptancı Firma' : (units[a.unit]?.label || a.unit),
+      phone: a.phone || '',
+      taxId: a.taxId || '',
+      keywords: [a.id, units[a.unit]?.label].filter(Boolean).join(' ')
+    };
+    cache.set(a, item);
+  }
+  return item;
+}
 function accountSearchText(a) {
   let text = accountSearchCache.get(a);
   if (text === undefined) {
@@ -379,13 +444,15 @@ function setBusy(value) {
   busy = value;
   document.body.setAttribute('aria-busy', String(value));
 }
-async function request(path, body, selectedWorkspace = workspace, { raw = false, query = {} } = {}) {
+async function request(path, body, selectedWorkspace = workspace, { raw = false, query = {}, signal } = {}) {
   const compact = ['state','command','restore'].includes(path) ? { view: 'compact' } : {};
   const parameters = new URLSearchParams({ ...compact, ...query, workspace: selectedWorkspace });
   const session = window.DefterSession?.current();
   const headers = session ? { Authorization: 'Bearer ' + session.token } : {};
   if (body) headers['Content-Type'] = raw ? 'application/x-ndjson' : 'application/json';
-  const response = await fetch(`/api/${path}?${parameters}`, body ? { method: 'POST', headers, body: raw ? body : JSON.stringify(body) } : { headers });
+  const init = body ? { method: 'POST', headers, body: raw ? body : JSON.stringify(body) } : { headers };
+  if (signal) init.signal = signal;
+  const response = await fetch(`/api/${path}?${parameters}`, init);
   if (response.status === 401 && window.DefterSession) window.DefterSession.lock();
   const result = await response.json();
   if (!response.ok) { const error = new Error(result.error || 'İstek tamamlanamadı.'); error.status = response.status; throw error; }
@@ -574,9 +641,8 @@ async function submit(command, message = 'İşlem kaydedildi.', envelope, effect
     render(); $('#main').focus({ preventScroll: true });
     if (createdPartyId) {
       const partySelect = $('#f-counterpartyId');
-      if (partySelect && partySelect.value !== createdPartyId && [...partySelect.options].some(o => o.value === createdPartyId)) {
-        partySelect.value = createdPartyId;
-        partySelect.dispatchEvent(new Event('change', { bubbles: true }));
+      if (partySelect && partySelect.value !== createdPartyId && selectHasValue(partySelect, createdPartyId)) {
+        setSelectControlValue(partySelect, createdPartyId);
       }
       const selected = partySelect || [...document.querySelectorAll('[data-allocation-kind="debt"] select')].find(control=>control.value===createdPartyId);
       (selected || $('#sale-form'))?.scrollIntoView?.({block:'center',behavior:'instant'});selected?.focus({preventScroll:true});
@@ -591,14 +657,13 @@ async function submit(command, message = 'İşlem kaydedildi.', envelope, effect
         }
         const targetRow = itemRows[Math.max(0, Math.min(createdStockInfo.rowIndex || 0, itemRows.length - 1))];
         const productSelect = targetRow?.querySelector('[data-item-field="accountId"]');
-        if (productSelect && [...productSelect.options].some(o => o.value === createdStockInfo.id)) {
+        if (productSelect && selectHasValue(productSelect, createdStockInfo.id)) {
           if (productSelect.value !== createdStockInfo.id) {
-            productSelect.value = createdStockInfo.id;
-            productSelect.dispatchEvent(new Event('change', { bubbles: true }));
+            setSelectControlValue(productSelect, createdStockInfo.id);
           }
           const groupSelect = targetRow.querySelector('[data-item-field="weightAccount"]');
-          if (createdStockInfo.pairedGroup && groupSelect && [...groupSelect.options].some(o => o.value === createdStockInfo.pairedGroup)) {
-            groupSelect.value = createdStockInfo.pairedGroup;
+          if (createdStockInfo.pairedGroup && groupSelect && selectHasValue(groupSelect, createdStockInfo.pairedGroup)) {
+            setSelectControlValue(groupSelect, createdStockInfo.pairedGroup, { emit: false });
           }
           const qtyInput = targetRow.querySelector('[data-item-field="quantity"]');
           targetRow.scrollIntoView?.({ block: 'center', behavior: 'instant' });
@@ -671,6 +736,21 @@ function enhanceTables(container) {
 function action(label, note = 'Tüm bağlı hareketler tek kayıt olarak işlenir.') { return `<div class="form-actions"><span class="muted">${note}</span><button class="button" type="submit">${label}</button></div>`; }
 const formValues = form => Object.fromEntries(new FormData(form).entries());
 const VALID_VIEWS = new Set(['overview', 'transaction', 'closing', 'accounts', 'suppliers', 'stocks', 'banks', 'journal', 'summary', 'backup', 'edit']);
+function getSelectedDetailId(targetView) {
+  if (targetView === 'suppliers') return supplierMemory.get('supplier:view:' + workspace)?.partyId || null;
+  if (targetView === 'accounts' || targetView === 'stocks') return workbenchMemory.get(`${workspace}:${targetView}`)?.detailId || null;
+  return null;
+}
+function setSelectedDetailId(targetView, nextId) {
+  const cleanId = nextId || null;
+  if (targetView === 'accounts' || targetView === 'stocks') {
+    workbenchMemory.set(`${workspace}:${targetView}`, { ...workbenchMemory.get(`${workspace}:${targetView}`), detailId: cleanId });
+  } else if (targetView === 'suppliers') {
+    const prev = supplierMemory.get('supplier:view:' + workspace);
+    supplierMemory.set('supplier:view:' + workspace, { partyId: cleanId, kind: cleanId && prev?.partyId === cleanId ? (prev.kind || null) : null });
+  }
+  if (targetView === view) detailId = cleanId;
+}
 function parseViewHash(hashStr = (typeof window !== 'undefined' ? window.location?.hash : '') || '') {
   const raw = String(hashStr || '').replace(/^#/, '').trim();
   if (!raw) return null;
@@ -678,27 +758,35 @@ function parseViewHash(hashStr = (typeof window !== 'undefined' ? window.locatio
   const v = params.get('v');
   if (!v || !VALID_VIEWS.has(v)) return null;
   const tab = params.get('tab');
+  const rawId = params.get('id');
   if (v === 'edit' && (!editingTransaction || editingTransaction.workspace !== workspace)) {
-    return { view: 'journal', tab: null, normalized: true };
+    return { view: 'journal', tab: null, id: null, normalized: true };
   }
   return {
     view: v,
     tab: v === 'transaction' && (tab === 'sale' || tab === 'movement') ? tab : null,
+    id: rawId && DETAIL_HASH_VIEWS.has(v) ? rawId : null,
     normalized: false
   };
 }
-function formatViewHash(targetView = view, targetTab = transactionTab) {
+function formatViewHash(targetView = view, targetTab = transactionTab, targetId = detailId) {
   if (targetView === 'transaction' && (targetTab === 'sale' || targetTab === 'movement')) {
     return `#v=transaction&tab=${encodeURIComponent(targetTab)}`;
   }
+  if (DETAIL_HASH_VIEWS.has(targetView) && targetId) {
+    return `#v=${encodeURIComponent(targetView)}&id=${encodeURIComponent(targetId)}`;
+  }
   return `#v=${encodeURIComponent(targetView)}`;
 }
+let inSetViewRender = false;
 function syncUrlHash(mode = 'push') {
+  if (inSetViewRender) return;
   if (typeof window === 'undefined' || !window.location || !window.history) return;
-  const targetHash = formatViewHash(view, transactionTab);
+  const activeDetailId = DETAIL_HASH_VIEWS.has(view) ? detailId : null;
+  const targetHash = formatViewHash(view, transactionTab, activeDetailId);
   const currentHash = window.location.hash || '';
   if (currentHash === targetHash) return;
-  const stateObj = { ...(window.history.state && typeof window.history.state === 'object' ? window.history.state : {}), view, tab: transactionTab, defterLayerId: null };
+  const stateObj = { ...(window.history.state && typeof window.history.state === 'object' ? window.history.state : {}), view, tab: transactionTab, id: activeDetailId, defterLayerId: null };
   try {
     if (mode === 'replace' && typeof window.history.replaceState === 'function') {
       window.history.replaceState(stateObj, '', targetHash);
@@ -715,7 +803,7 @@ function hasDirtyDraftInMain() {
   return [...main.querySelectorAll('form[data-draft-dirty="true"]')].some(form => !form.closest('[hidden]'));
 }
 function setView(next, options = {}) {
-  const { fromHistory = false, replaceHistory = false } = options;
+  const { fromHistory = false, replaceHistory = false, id = undefined } = options;
   setNavigationOpen(false);
   const hadDirty = hasDirtyDraftInMain();
   captureDrafts();
@@ -724,7 +812,19 @@ function setView(next, options = {}) {
   const prevView = view;
   view = VALID_VIEWS.has(next) ? next : 'overview';
   if (view === 'edit' && (!editingTransaction || editingTransaction.workspace !== workspace)) view = 'journal';
-  $('#notice').hidden = true; render();
+  if (DETAIL_HASH_VIEWS.has(view)) {
+    if (id !== undefined) {
+      detailId = id || null;
+      setSelectedDetailId(view, detailId);
+    } else if (prevView !== view) {
+      detailId = getSelectedDetailId(view);
+    }
+  } else {
+    detailId = null;
+  }
+  $('#notice').hidden = true;
+  inSetViewRender = true;
+  try { render(); } finally { inSetViewRender = false; }
   if (fromHistory && hadDirty && prevView !== view) {
     inform('Açık formdaki taslak geçici olarak saklandı; geri döndüğünüzde devam edebilirsiniz.', false);
   }
@@ -800,6 +900,7 @@ async function renderSupplierPage() {
   if (supplierWorkspace) {
     supplierWorkspace.update(state,{completedDraftKey:supplierCompletedDraftKey});
     supplierCompletedDraftKey=undefined;
+    supplierWorkspace.selectParty?.(detailId);
     return;
   }
   const generation=supplierRenderGeneration, selectedWorkspace=workspace;
@@ -811,6 +912,11 @@ async function renderSupplierPage() {
     supplierWorkspaceScope=workspace;
     supplierWorkspace=renderSupplierWorkspace($('#main .supplier-workspace'),{
       state,workspace,memory:supplierMemory,request,refresh,escape:esc,format:formatted,day,parseAmount,canonicalValue,
+      initialPartyId:detailId,
+      onSelectFirm(nextId,{replace=false}={}) {
+        detailId=nextId||null;
+        if (view==='suppliers') syncUrlHash(replace?'replace':'push');
+      },
       onInteraction() {
         const notice=$('#notice');
         if(!pending&&notice.getAttribute('role')==='status') { notice.hidden=true;notice.textContent=''; }
@@ -1010,7 +1116,15 @@ function renderAccounts(stock=false){
     }));
   }
   const editor=$('#card-editor'), splitRoot=$('.workbench-split');
-  let selectedDetailId = null, visibleLimit = 50;
+  let selectedDetailId = memory.detailId || null, visibleLimit = 50;
+  if (selectedDetailId && !rows.some(a => a.id === selectedDetailId)) {
+    selectedDetailId = null;
+    remember({ detailId: null });
+    if (view === expectedView) {
+      detailId = null;
+      syncUrlHash('replace');
+    }
+  }
   const openOperation=kind=>{
     captureDrafts();
     if(partyReturnContext?.ownerView===view)partyReturnContext=null;
@@ -1033,8 +1147,8 @@ function renderAccounts(stock=false){
     if (resetLimit) visibleLimit = 50;
     const hasActiveFilters = Boolean(search.value.trim() || unit.value || (sign && sign.value !== 'all'));
     clearBtn.disabled = !hasActiveFilters;
-    const q=normalize(search.value.trim());remember({q:search.value,unit:unit.value,sign:sign?.value||'all'});
-    const matches=a=>(!q||accountSearchText(a).includes(q))&&(!unit.value||unit.value===a.unit)&&(!sign||sign.value==='all'||(sign.value==='claim'?state.balances[a.id]>0:sign.value==='debt'?state.balances[a.id]<0:!state.balances[a.id]));
+    const q=search.value.trim();remember({q:search.value,unit:unit.value,sign:sign?.value||'all'});
+    const matches=a=>(!q||matchesSearchText(accountSearchText(a),q))&&(!unit.value||unit.value===a.unit)&&(!sign||sign.value==='all'||(sign.value==='claim'?state.balances[a.id]>0:sign.value==='debt'?state.balances[a.id]<0:!state.balances[a.id]));
     const selected=rows.filter(matches);
     if (selectedDetailId) {
       const selectedIndex = selected.findIndex(a => a.id === selectedDetailId);
@@ -1058,9 +1172,19 @@ function renderAccounts(stock=false){
     list.querySelectorAll('[data-account-detail]').forEach(button=>button.addEventListener('click',()=>detail(button.dataset.accountDetail)));
   };
   let sequence=0;
-  const detail=id=>{
+  const detail=(id,{restore=false}={})=>{
     const a=account(id),panel=$('#account-detail');
+    if(!a||!rows.some(item=>item.id===id)){
+      selectedDetailId=null;remember({detailId:null});
+      if(view===expectedView){detailId=null;syncUrlHash('replace');}
+      return;
+    }
     selectedDetailId=id;
+    remember({detailId:id});
+    if(view===expectedView){
+      detailId=id;
+      syncUrlHash(restore?'replace':'push');
+    }
     splitRoot?.classList.add('has-detail');
     list.querySelectorAll('.account-card').forEach(card=>{
       const btn=card.querySelector('[data-account-detail]');
@@ -1077,7 +1201,9 @@ function renderAccounts(stock=false){
       panel.querySelectorAll('[data-detail-pane]').forEach(el => { el.hidden = active !== 'all' && el.dataset.detailPane !== active; });
     }));
     $('#statement-back').addEventListener('click',()=>{
-      ++sequence;selectedDetailId=null;splitRoot?.classList.remove('has-detail');panel.hidden=true;panel.innerHTML='';
+      ++sequence;selectedDetailId=null;remember({detailId:null});
+      if(view===expectedView){detailId=null;syncUrlHash('push');}
+      splitRoot?.classList.remove('has-detail');panel.hidden=true;panel.innerHTML='';
       list.querySelectorAll('.account-card').forEach(c=>{c.classList.remove('is-selected');c.querySelector('[data-account-detail]')?.removeAttribute('aria-current');});
       const selected=[...list.querySelectorAll('[data-account-detail]')].find(button=>button.dataset.accountDetail===id);
       const target=selected||search;target.focus({preventScroll:true});target.scrollIntoView?.({block:'center',behavior:'instant'});
@@ -1109,7 +1235,7 @@ function renderAccounts(stock=false){
           if(pending||busy)return;
           transactionTab='collection';setView('transaction');
           for(const [selector,value] of [['#collection-search',''],['#collection-filter','all']]){const filter=$(selector);if(filter){filter.value=value;filter.dispatchEvent(new Event(filter.tagName==='SELECT'?'change':'input',{bubbles:true}));}}
-          const select=$('#f-customerAccount');if(!select)return;select.value=id;select.dispatchEvent(new Event('change',{bubbles:true}));$('#f-quantity').focus();
+          const select=$('#f-customerAccount');if(!select)return;setSelectControlValue(select,id);$('#f-quantity').focus();
         });
         $('#statement-journal').addEventListener('click',()=>{journalFilterMemory.set(workspace,{scope:'all',q:'',type:'all',...filters});setView('journal');});
         const exportBusy=value=>{exporting=value;for(const selector of ['#statement-print','#statement-download']){const button=result.querySelector(selector);if(button)button.disabled=value;}};
@@ -1142,6 +1268,7 @@ function renderAccounts(stock=false){
     };$('#statement-filter').addEventListener('submit',e=>{e.preventDefault();load();});load();
   };
   search.addEventListener('input',()=>draw());unit.addEventListener('change',()=>draw());sign?.addEventListener('change',()=>draw());clearBtn.addEventListener('click',clearFilters);draw();
+  if(selectedDetailId)detail(selectedDetailId,{restore:true});
   if(memory.editor==='new')openEditor();
   else if(memory.editor&&rows.some(a=>a.id===memory.editor))openEditor(account(memory.editor));
   else if(stock&&memory.operation==='stock')openOperation(memory.operation);
@@ -1257,9 +1384,9 @@ function renderCustomerOrders(panel, customer) {
     if (pending || busy) return;
     transactionTab = 'sale'; setView('transaction');
     const party = $('#f-counterpartyId');
-    party.value = customer.id; party.dispatchEvent(new Event('change'));
+    setSelectControlValue(party, customer.id);
     const order = $('#trade-order');
-    order.value = button.dataset.orderSale; order.dispatchEvent(new Event('change'));
+    setSelectControlValue(order, button.dataset.orderSale);
     order.focus();
   });
 }
@@ -1350,9 +1477,19 @@ function renderCollectionForm(container, partyType = 'customer', editingCommand 
   const balanceFor=a=>{let balance=state.balances[a.id]||0;if(editingCommand?.customerAccount===a.id){const input=document.createElement('input');input.value=editingCommand.quantity;const amount=parseAmount(input,a.unit)||0;balance+=editingCommand.direction==='collect'?amount:-amount;}return balance;};
   container.innerHTML=`<h2>${partyType==='supplier'?'Firma':'Cari'} tahsilat / ödeme</h2><p class="subtitle">Kişiyi bulun; borç veya alacak durumuna uygun işlem otomatik seçilir.</p><form id="collection-form"><div class="workbench-filters"><label class="field" for="collection-search"><span>İsim, telefon veya TC/VKN ara</span><input type="search" id="collection-search" name="collectionSearch" maxlength="160" autocomplete="off"></label><label class="field" for="collection-filter"><span>Hesap durumu</span><select id="collection-filter" name="collectionFilter"><option value="all">Borç ve alacak bulunanlar</option><option value="claim">Alacağımız bulunanlar</option><option value="debt">Borcumuz bulunanlar</option></select></label></div><div class="form-grid">${field('customerAccount','Hesap',{options:[]})}${field('direction','Yapılacak işlem',{options:[]})}${field('target','Ödemenin yapılacağı kasa / banka',{options:[]})}${field('quantity','Miktar')}${field('note','Açıklama · isteğe bağlı',{full:true,required:false})}</div><p class="context-note" id="collection-balance" role="status"></p>${action('İşlemi kaydet','Tutar, seçilen hesabın borç veya alacağını aşamaz.')}</form>`;
   const form=container.querySelector('#collection-form'), customer=form.querySelector('#f-customerAccount'), direction=form.querySelector('#f-direction'), target=form.querySelector('#f-target');
+  const customerCb = globalThis.DefterCombobox?.enhanceSelect?.(customer, {
+    items: [],
+    value: '',
+    allowEmpty: true,
+    clearable: false,
+    emptyLabel: 'Hesap seçin',
+    placeholder: 'Cari hesap ara…',
+    invalidTextBehavior: 'revert',
+    formatSelectedText: item => `${item.label} · ${units[item.unit]?.label || item.unit}`
+  }) || null;
   if(view!=='edit'){
     form.insertAdjacentHTML('beforebegin','<p class="context-note">Altın veya birden çok karşılıkla mahsup için ayrı karma cari formunu kullanın; satış geliri oluşmaz.</p><button type="button" class="button secondary" data-open-exchange>Altın / karma cari tahsilat ve ödeme</button>');
-    container.querySelector('[data-open-exchange]').addEventListener('click',()=>{const selected=account(customer.value)?.parentAccountId||customer.value;captureDrafts();if(view==='transaction')transactionTab='customer-exchange';else if(view==='suppliers')workbenchMemory.set(`${workspace}:suppliers`,{...workbenchMemory.get(`${workspace}:suppliers`),operation:'supplier-exchange'});renderSale(container,[],partyType+'-exchange');const party=container.querySelector('#f-counterpartyId');if(!party.value&&[...party.options].some(o=>o.value===selected)){party.value=selected;party.dispatchEvent(new Event('change'));}container.querySelector('select')?.focus();});
+    container.querySelector('[data-open-exchange]').addEventListener('click',()=>{const selected=account(customer.value)?.parentAccountId||customer.value;captureDrafts();if(view==='transaction')transactionTab='customer-exchange';else if(view==='suppliers')workbenchMemory.set(`${workspace}:suppliers`,{...workbenchMemory.get(`${workspace}:suppliers`),operation:'supplier-exchange'});renderSale(container,[],partyType+'-exchange');const party=container.querySelector('#f-counterpartyId');if(!party.value&&selectHasValue(party,selected)){setSelectControlValue(party,selected);}container.querySelector('select')?.focus();});
   }
   const updateCollection=()=>{
     const a=account(customer.value), balance=a?balanceFor(a):0;
@@ -1367,10 +1504,17 @@ function renderCollectionForm(container, partyType = 'customer', editingCommand 
     form.querySelector('button[type="submit"]').disabled=!balance||!choices.length;
   };
   const filter=()=>{
-    const old=customer.value,q=normalize(form.querySelector('#collection-search').value.trim()),sign=form.querySelector('#collection-filter').value;
-    const rows=allCaris.filter(a=>{const b=balanceFor(a);return b!==0&&(!q||normalize([a.name,a.phone,a.taxId].join(' ')).includes(q))&&(sign==='all'||(sign==='claim'?b>0:b<0));});
-    customer.innerHTML=rows.map(a=>`<option value="${esc(a.id)}">${esc(a.name)} · ${esc(units[a.unit].label)}</option>`).join('');
-    if(rows.some(a=>a.id===old))customer.value=old;
+    const old=customer.value,qRaw=form.querySelector('#collection-search').value.trim(),q=normalize(qRaw),sign=form.querySelector('#collection-filter').value;
+    const rows=allCaris.filter(a=>{const b=balanceFor(a);return b!==0&&(!q||matchesSearchText([a.name,a.phone,a.taxId],qRaw))&&(sign==='all'||(sign==='claim'?b>0:b<0));});
+    if(customerCb){
+      const items=rows.map(a=>partyComboboxItem(a,{firmOnly:false}));
+      customerCb.setItems(items);
+      const nextVal=items.some(it=>it.id===old)?old:(items[0]?.id||'');
+      customerCb.setValue(nextVal,{emitChange:false});
+    }else{
+      customer.innerHTML=rows.map(a=>`<option value="${esc(a.id)}">${esc(a.name)} · ${esc(units[a.unit].label)}</option>`).join('');
+      if(rows.some(a=>a.id===old))customer.value=old;
+    }
     updateCollection();
   };
   form.querySelector('#collection-search').addEventListener('input',filter);form.querySelector('#collection-filter').addEventListener('change',filter);customer.addEventListener('change',updateCollection);filter();
@@ -1427,7 +1571,6 @@ function canonicalValue(input, unit = 'TL', positive = false) {
 }
 function financialAccounts() { return activeAccounts().filter(a => a.kind === 'asset' && (['TL','HAS','SILVER'].includes(a.unit) || /^[A-Z]{3}$/.test(a.unit))); }
 
-const normalize=value=>String(value||'').toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i');
 // Search selects a stock account on this row. Quantity and price still belong to the sale form.
 function unallocatedStock(id) {
   return Math.max(0, (state.balances[id] || 0) - (state.inventoryReserved?.[id] || 0));
@@ -1626,7 +1769,28 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
     return `<button type="button" class="button secondary compact payment-chip" data-add-allocation="${kind}" data-payment-type="${type}"${available?'':' disabled'}>+ ${label}${available?'':' · hesap yok'}</button>`;
   }).join('');
   const primaryTitle=supplier&&isExchange?'Mağazaya girenler':isPurchase?'Verilen karşılıklar':'Alınan karşılıklar',oppositeTitle=supplier&&isExchange?'Mağazadan çıkanlar':isPurchase?'Alınan karşılıklar':'Verilen karşılıklar';
-  const partyField=field('counterpartyId',supplier?'İşlem yapılan firma':'İşlem yapılan müşteri',{required:supplier||isExchange,options:[['',supplier?'Firma seçin':'Peşin / Kayıtsız müşteri'],...ownCaris.filter(a=>!supplier||!a.parentAccountId||legacyMultiCari).map(a=>[a.id,supplier&&!legacyMultiCari?a.name:`${a.name} · ${units[a.unit].label}`])]});
+  const hasCombobox=Boolean(globalThis.DefterCombobox?.enhanceSelect);
+  const partyChoices=ownCaris.filter(a=>!supplier||!a.parentAccountId||legacyMultiCari);
+  const partyEmptyLabel=supplier?'Firma seçin':'Peşin / Kayıtsız müşteri';
+  const partyField=field('counterpartyId',supplier?'İşlem yapılan firma':'İşlem yapılan müşteri',{required:supplier||isExchange,options:hasCombobox?[['',partyEmptyLabel]]:[['',partyEmptyLabel],...partyChoices.map(a=>[a.id,supplier&&!legacyMultiCari?a.name:`${a.name} · ${units[a.unit].label}`])]});
+  const stockComboboxItems=stock.map(a=>{
+    const avail=retailSearch?unallocatedStock(a.id):(state.balances[a.id]||0);
+    const hasPool=!a.pairedGroups?.length||a.pairedGroups.some(gid=>unallocatedStock(gid)>0);
+    const isDisabled=(!isPurchase&&!isStock&&!editingCommand)&&(unallocatedStock(a.id)<=0||!hasPool);
+    const groupNames=(a.pairedGroups||[]).map(gid=>account(gid)?.name).filter(Boolean);
+    return {
+      id:a.id,
+      label:a.name,
+      unit:a.unit,
+      code:a.id,
+      meta:isPurchase?units[a.unit].label:formatted(avail,a.unit),
+      subtitle:groupNames.join(', '),
+      keywords:[a.id,a.name,...groupNames].filter(Boolean).join(' '),
+      disabled:isDisabled,
+      disabledReason:isDisabled?'Stok Yok':''
+    };
+  });
+  const defaultStockId=(stockComboboxItems.find(it=>!it.disabled)||stockComboboxItems[0])?.id||'';
   const nativeGuide=supplier?`<aside class="supplier-native-guide"><details><summary>Cari birim yardımı</summary><strong>${isExchange?'Ürün / altınla mahsup · satış veya alış değildir':'Borç / alacağı anlaşılmış birimde kaydedin'}</strong><p>${isExchange?'1. Firma → 2. Giren / çıkan ürün veya ödeme → 3. Anlaşılan cari birim ve miktar → 4. TL referansları.':'Ürün bedelini TL referansı olarak, ödenmeyen karşılığı cari satırında anlaşılmış birim ve miktarla girin.'}</p><p>HAS miktarı elle anlaşılır; gramdan veya TL’den otomatik çevrilmez. HAS / döviz satırındaki TL karşılığı denklik referansıdır. HAS / döviz cari satırı, seçilen borç veya alacağı etkiler; ayrıca TL borcu veya fiziki kasa hareketi oluşturmaz.</p><p>İstenen birim yoksa firma kartındaki “+ Bakiye hesabı ekle” ile HAS / döviz hesabını açın.</p></details><div id="supplier-native-balances" aria-live="polite"></div></aside>`:'';
   const flowBar=supportsQuickFlow?`<div class="trade-flow-bar"><div class="trade-flow-info"><span class="badge trade-flow-badge" data-flow-badge>Hızlı Mod</span><small class="trade-flow-reason" data-flow-reason hidden></small></div><button type="button" class="button secondary compact" data-flow-toggle aria-pressed="false">Rehberli Adımlara Geç</button></div>`:'';
   const stepperBar = isStock ? '' : `<nav class="stepper-bar" aria-label="İşlem adımları"${flowMode==='quick'?' hidden':''}><button type="button" class="stepper-tab is-active" data-step-target="1" aria-current="step"><span>1</span> ${isExchange ? 'Müşteri / Firma' : 'Ürün ve Müşteri'}</button><button type="button" class="stepper-tab" data-step-target="2"><span>2</span> Ödeme ve Karşılık</button><button type="button" class="stepper-tab" data-step-target="3"><span>3</span> Önizleme ve Onay</button></nav>`;
@@ -1636,6 +1800,20 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
 
   const form=container.querySelector('#sale-form'),rows=()=>[...form.querySelectorAll('.sale-item')],allocationRows=kind=>[...form.querySelectorAll(`[data-allocation-kind="${kind}"]`)];
   form.dataset.operation=mode;
+  const partySelectEl=form.querySelector('#f-counterpartyId');
+  if(hasCombobox&&partySelectEl){
+    const partyItems=partyChoices.map(a=>partyComboboxItem(a,{firmOnly:supplier&&!legacyMultiCari}));
+    globalThis.DefterCombobox.enhanceSelect(partySelectEl,{
+      items:partyItems,
+      value:'',
+      allowEmpty:true,
+      clearable:true,
+      emptyLabel:partyEmptyLabel,
+      placeholder:supplier?'Firma ara ve seç…':'Müşteri ara (ad, telefon, TC/VKN)…',
+      invalidTextBehavior:(supplier||isExchange)?'error':'revert',
+      formatSelectedText:item=>supplier&&!legacyMultiCari?item.label:`${item.label} · ${units[item.unit]?.label||item.unit}`
+    });
+  }
   const openAncestorDetails = el => {
     for (let d = el?.closest?.('details'); d; d = d.parentElement?.closest('details')) d.open = true;
   };
@@ -1798,7 +1976,24 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
     for(const kind of ['counterpayment','counterdebt'])form.querySelectorAll(`[data-add-allocation="${kind}"]`).forEach(button=>{button.disabled=true;button.title='Eski çok carili kayıtta karşı yön eklenmez.';});
   }
   const familyCaris=()=>supplier&&!legacyMultiCari?ownCaris.filter(a=>form.querySelector('#f-counterpartyId').value?(a.id===form.querySelector('#f-counterpartyId').value||a.parentAccountId===form.querySelector('#f-counterpartyId').value):!a.parentAccountId):ownCaris;
-  form.querySelector('#f-counterpartyId')?.addEventListener('change',()=>{if(supplier&&!legacyMultiCari)for(const kind of ['debt','counterdebt'])for(const row of allocationRows(kind)){const select=row.querySelector('select'),selected=select.value;select.innerHTML='<option value="">Bakiye hesabı seçin</option>'+familyCaris().map(a=>`<option value="${esc(a.id)}">${esc(a.name)} · ${esc(units[a.unit].label)}</option>`).join('');select.value=familyCaris().some(a=>a.id===selected)?selected:'';}updateTotals();});
+  form.querySelector('#f-counterpartyId')?.addEventListener('change',()=>{
+    if(supplier&&!legacyMultiCari){
+      const nextCaris=familyCaris();
+      for(const kind of ['debt','counterdebt'])for(const row of allocationRows(kind)){
+        const select=row.querySelector('select'),selected=select.value;
+        const cb=globalThis.DefterCombobox?.getInstance?.(select);
+        if(cb){
+          cb.setItems(nextCaris.map(a=>partyComboboxItem(a,{firmOnly:false})));
+          if(nextCaris.some(a=>a.id===selected))cb.setValue(selected,{emitChange:false});
+          else cb.clear({emitChange:false});
+        }else{
+          select.innerHTML='<option value="">Bakiye hesabı seçin</option>'+nextCaris.map(a=>`<option value="${esc(a.id)}">${esc(a.name)} · ${esc(units[a.unit].label)}</option>`).join('');
+          select.value=nextCaris.some(a=>a.id===selected)?selected:'';
+        }
+      }
+    }
+    updateTotals();
+  });
   const items=(canonicalize=true)=>rows().map(row=>{
     const a=account(row.querySelector('[data-item-field="accountId"]').value);
     const read=(key,unit)=>canonicalize?canonicalValue(row.querySelector(`[data-item-field="${key}"]`),unit,true):row.querySelector(`[data-item-field="${key}"]`).value;
@@ -1864,7 +2059,7 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
     const previewAmount=(input,unit)=>{const value=parseAmount(input,unit,true);return value===null?'Eksik':formatted(value,unit);};
     const previewWeight=input=>input.disabled?'':input.value.trim()?' · '+previewAmount(input,'GRAM'):' · Ağırlık: Eksik';
     const draftRow=(name,label,quantity,weight,value)=>`<li class="receipt-flow-row draft-flow-row"><div class="receipt-flow-product"><strong>${esc(name)}</strong><small>${esc(label)}</small><span>${esc(quantity+weight)}</span></div><div class="receipt-flow-value"><small>Anlaşılmış TL karşılığı</small><strong>${esc(value)}</strong></div></li>`;
-    for(const row of rows()){const a=account(row.querySelector('[data-item-field="accountId"]').value),weight=row.querySelector('[data-item-field="weight"]');(isPurchase?draftIncoming:draftOutgoing).push(draftRow(a.name,isPurchase?'Alınan ürün':'Verilen ürün',previewAmount(row.querySelector('[data-item-field="quantity"]'),a.unit),previewWeight(weight),previewAmount(row.querySelector('[data-item-field="value"]'),'TL')));}
+    for(const row of rows()){const a=account(row.querySelector('[data-item-field="accountId"]').value);if(!a)continue;const weight=row.querySelector('[data-item-field="weight"]');(isPurchase?draftIncoming:draftOutgoing).push(draftRow(a.name,isPurchase?'Alınan ürün':'Verilen ürün',previewAmount(row.querySelector('[data-item-field="quantity"]'),a.unit),previewWeight(weight),previewAmount(row.querySelector('[data-item-field="value"]'),'TL')));}
     for(const kind of ['payment','counterpayment','debt','counterdebt','scrap'])for(const row of allocationRows(kind)){const a=account(row.querySelector('select').value);if(a){
       const label=row.querySelector('.allocation-direction').textContent,quantity=previewAmount(row.querySelector('[data-allocation-field="quantity"]'),a.unit),value=previewAmount(row.querySelector('[data-allocation-field="valueTL"]'),'TL'),weight=previewWeight(row.querySelector('[data-allocation-field="weight"]'));
       if(['debt','counterdebt'].includes(kind))draftCari.push(`${label} · ${a.name} · ${quantity} · ${value}${weight}`);
@@ -1905,25 +2100,57 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
     const id=allocationIndex++,row=document.createElement('div');row.className='allocation-row';row.dataset.allocationKind=kind;row.dataset.paymentType=paymentType;
     const creditDirection=kind==='debt'?!isPurchase:isPurchase;
     const label=cari?creditDirection?(isExchange?'Borcumuzu azalt / alacağımızı artır':'Cari alacağımız'):(isExchange?'Alacağımızı azalt / borcumuzu artır':'Cari borcumuz'):outgoing?'Verilen karşılık':'Alınan karşılık';
-    row.innerHTML=`<strong class="allocation-direction">${label}</strong><div class="form-grid three"><label class="field" for="allocation-account-${id}"><span>${kind==='scrap'?'Hurdanın ayarı':cari?(supplier?'Borç / alacak birimi':'Cari hesap'):'Hesap / ürün'}</span><select id="allocation-account-${id}" data-allocation-field="accountId" required>${choices.map(a=>`<option value="${esc(a.id)}">${esc(a.name)} · ${esc(units[a.unit].label)}</option>`).join('')}</select></label><label class="field" for="allocation-quantity-${id}"><span>Miktar</span><input id="allocation-quantity-${id}" data-allocation-field="quantity" inputmode="decimal" required maxlength="24" value=""></label><label class="field" for="allocation-value-${id}"><span>${supplier?'Anlaşılmış TL referansı':'Anlaşılmış bedel · TL'}</span><input id="allocation-value-${id}" data-allocation-field="valueTL" inputmode="decimal" required maxlength="24" value=""></label><label class="field" for="allocation-group-${id}"><span>Ayar / terazi grubu</span><select id="allocation-group-${id}" data-allocation-field="weightAccount"></select></label><label class="field" for="allocation-weight-${id}"><span>Satırın toplam ağırlığı · gr</span><input id="allocation-weight-${id}" data-allocation-field="weight" inputmode="decimal" maxlength="24"><small>Adet başına değil, gerçek toplam gram.</small></label></div><div class="allocation-footer"><small class="context-note" data-allocation-note></small><button type="button" class="button text" data-remove-allocation>Satırı kaldır</button></div>`;
+    const enhanceAlloc=hasCombobox&&(cari||choices.length>50);
+    const selectMarkup=enhanceAlloc?'':choices.map(a=>`<option value="${esc(a.id)}">${esc(a.name)} · ${esc(units[a.unit].label)}</option>`).join('');
+    row.innerHTML=`<strong class="allocation-direction">${label}</strong><div class="form-grid three"><label class="field" for="allocation-account-${id}"><span>${kind==='scrap'?'Hurdanın ayarı':cari?(supplier?'Borç / alacak birimi':'Cari hesap'):'Hesap / ürün'}</span><select id="allocation-account-${id}" data-allocation-field="accountId" required>${selectMarkup}</select></label><label class="field" for="allocation-quantity-${id}"><span>Miktar</span><input id="allocation-quantity-${id}" data-allocation-field="quantity" inputmode="decimal" required maxlength="24" value=""></label><label class="field" for="allocation-value-${id}"><span>${supplier?'Anlaşılmış TL referansı':'Anlaşılmış bedel · TL'}</span><input id="allocation-value-${id}" data-allocation-field="valueTL" inputmode="decimal" required maxlength="24" value=""></label><label class="field" for="allocation-group-${id}"><span>Ayar / terazi grubu</span><select id="allocation-group-${id}" data-allocation-field="weightAccount"></select></label><label class="field" for="allocation-weight-${id}"><span>Satırın toplam ağırlığı · gr</span><input id="allocation-weight-${id}" data-allocation-field="weight" inputmode="decimal" maxlength="24"><small>Adet başına değil, gerçek toplam gram.</small></label></div><div class="allocation-footer"><small class="context-note" data-allocation-note></small><button type="button" class="button text" data-remove-allocation>Satırı kaldır</button></div>`;
     form.querySelector(`#${kind}-lines`).append(row);
     const select=row.querySelector('select'),q=row.querySelector('[data-allocation-field="quantity"]'),v=row.querySelector('[data-allocation-field="valueTL"]'),group=row.querySelector('[data-allocation-field="weightAccount"]'),weight=row.querySelector('[data-allocation-field="weight"]');
-    const selected=savedAccount||(cari?form.querySelector('#f-counterpartyId')?.value:'');if(choices.some(a=>a.id===selected))select.value=selected;
-    if(cari&&!form.querySelector('#f-counterpartyId').value)form.querySelector('#f-counterpartyId').value=select.value;
+    const selected=savedAccount||(cari?form.querySelector('#f-counterpartyId')?.value:'');
+    const initialAccId=choices.some(a=>a.id===selected)?selected:(choices[0]?.id||'');
+    if(enhanceAlloc){
+      globalThis.DefterCombobox.enhanceSelect(select,{
+        items:choices.map(a=>partyComboboxItem(a,{firmOnly:false})),
+        value:initialAccId,
+        allowEmpty:false,
+        clearable:false,
+        invalidTextBehavior:'revert',
+        placeholder:cari?'Cari hesap ara…':'Hesap veya ürün ara…',
+        formatSelectedText:item=>`${item.label} · ${units[item.unit]?.label||item.unit}`
+      });
+    }else if(choices.some(a=>a.id===selected)){select.value=selected;}
+    if(cari&&!form.querySelector('#f-counterpartyId').value&&select.value)setSelectControlValue(form.querySelector('#f-counterpartyId'),select.value,{emit:false});
     const change=()=>{const a=account(select.value);if(!a)return;q.previousElementSibling.textContent=(cari&&supplier?'Anlaşılan miktar · ':'Miktar · ')+units[a.unit].label;v.readOnly=a.unit==='TL';v.closest('label').hidden=a.unit==='TL';v.value=a.unit==='TL'?q.value:'';v.setCustomValidity('');const groups=cari?[]:a.pairedGroups||[];group.innerHTML=groups.map(id=>`<option value="${esc(id)}">${esc(account(id).name)}</option>`).join('');group.required=groups.length>0;group.disabled=!groups.length;group.closest('label').hidden=!groups.length;weight.required=groups.length>0;weight.disabled=!groups.length;weight.closest('label').hidden=!groups.length;weight.value='';weight.setCustomValidity('');row.querySelector('[data-allocation-note]').textContent=cari?(creditDirection?'Alacağımızı artırır / borcumuzu azaltır.':'Borcumuzu artırır / alacağımızı azaltır.') : '';row.querySelector('[data-allocation-note]').hidden=!cari;updateTotals();if(!restoringDraft&&kind==='payment'&&isNonTlPaymentRow(row))syncFlowMode({preferredStep:2,notify:true});};
-    select.addEventListener('change',change);row.querySelectorAll('input').forEach(input=>input.addEventListener('input',updateTotals));row.querySelector('[data-remove-allocation]').addEventListener('click',()=>{const next=row.nextElementSibling||row.previousElementSibling;row.remove();updateTotals();syncFlowMode({preferredStep:activeStep,notify:false});(next?.querySelector('select')||form.querySelector(`[data-add-allocation="${kind}"]`))?.focus({preventScroll:true});});change();connectFieldHints(row);return row;
+    select.addEventListener('change',change);row.querySelectorAll('input').forEach(input=>input.addEventListener('input',updateTotals));row.querySelector('[data-remove-allocation]').addEventListener('click',()=>{const next=row.nextElementSibling||row.previousElementSibling;globalThis.DefterCombobox?.getInstance?.(select)?.destroy?.();row.remove();updateTotals();syncFlowMode({preferredStep:activeStep,notify:false});(next?.querySelector('select')||form.querySelector(`[data-add-allocation="${kind}"]`))?.focus({preventScroll:true});});change();connectFieldHints(row);return row;
   };
 
   const addRow=()=>{
     if(rows().length>=30||!stock.length)return;
     const id=nextRow++,row=document.createElement('section');row.className='sale-item';
-    row.innerHTML=`<div class="sale-line-header"><h3 class="sale-line-title"></h3><button class="button text" type="button" data-remove-item aria-label="Bu ürün satırını kaldır">Satırı kaldır</button></div><div class="form-grid three"><label class="field" for="item-account-${id}"><span>Ürün</span><select id="item-account-${id}" data-item-field="accountId" required>${stock.map(a=>`<option value="${esc(a.id)}">${esc(a.name)}${isPurchase?'':' · '+esc(formatted(retailSearch?unallocatedStock(a.id):state.balances[a.id],a.unit))}</option>`).join('')}</select></label><label class="field" for="item-quantity-${id}"><span>Ürün miktarı</span><input id="item-quantity-${id}" data-item-field="quantity" value="1" inputmode="numeric" required maxlength="24"></label>${isStock?'':`<label class="field" for="item-value-${id}"><span>${isPurchase?'Toplam alış bedeli':'Toplam satış tutarı'} · TL</span><input id="item-value-${id}" data-item-field="value" inputmode="decimal" required maxlength="24"></label>`}<label class="field" for="item-group-${id}"><span>Ayar / terazi grubu</span><select id="item-group-${id}" data-item-field="weightAccount"></select></label><label class="field" for="item-weight-${id}"><span>Satırın toplam ağırlığı · gr</span><input id="item-weight-${id}" data-item-field="weight" inputmode="decimal" maxlength="24"><small>Adet başına değil, toplam gram.</small></label><p class="item-stock-note context-note" data-stock-note></p></div>`;
+    const itemSelectMarkup=hasCombobox?'':stock.map(a=>`<option value="${esc(a.id)}">${esc(a.name)}${isPurchase?'':' · '+esc(formatted(retailSearch?unallocatedStock(a.id):state.balances[a.id],a.unit))}</option>`).join('');
+    row.innerHTML=`<div class="sale-line-header"><h3 class="sale-line-title"></h3><button class="button text" type="button" data-remove-item aria-label="Bu ürün satırını kaldır">Satırı kaldır</button></div><div class="form-grid three"><label class="field" for="item-account-${id}"><span>Ürün</span><select id="item-account-${id}" data-item-field="accountId" required>${itemSelectMarkup}</select></label><label class="field" for="item-quantity-${id}"><span>Ürün miktarı</span><input id="item-quantity-${id}" data-item-field="quantity" value="1" inputmode="numeric" required maxlength="24"></label>${isStock?'':`<label class="field" for="item-value-${id}"><span>${isPurchase?'Toplam alış bedeli':'Toplam satış tutarı'} · TL</span><input id="item-value-${id}" data-item-field="value" inputmode="decimal" required maxlength="24"></label>`}<label class="field" for="item-group-${id}"><span>Ayar / terazi grubu</span><select id="item-group-${id}" data-item-field="weightAccount"></select></label><label class="field" for="item-weight-${id}"><span>Satırın toplam ağırlığı · gr</span><input id="item-weight-${id}" data-item-field="weight" inputmode="decimal" maxlength="24"><small>Adet başına değil, toplam gram.</small></label><p class="item-stock-note context-note" data-stock-note></p></div>`;
     form.querySelector('#sale-items').append(row);
     const product=row.querySelector('[data-item-field="accountId"]'),group=row.querySelector('[data-item-field="weightAccount"]'),weight=row.querySelector('[data-item-field="weight"]');
+    if(hasCombobox){
+      globalThis.DefterCombobox.enhanceSelect(product,{
+        items:stockComboboxItems,
+        value:defaultStockId,
+        allowEmpty:false,
+        clearable:false,
+        invalidTextBehavior:'revert',
+        placeholder:'Ürün ara (ad veya kod)…',
+        onSelect:(item,meta)=>{
+          if((meta?.source==='keyboard'||meta?.source==='pointer')&&!restoringDraft&&row.isConnected&&!row.dataset.inventoryCode){
+            const advance=()=>{if(row.isConnected&&!row.dataset.inventoryCode)row.querySelector('[data-item-field="quantity"]')?.focus({preventScroll:true});};
+            if(meta.source==='keyboard')advance();
+            else queueMicrotask(advance);
+          }
+        }
+      });
+    }
     if (mode === 'sale') attachSaleLinePricing(row);
     if (retailSearch) attachSaleProductSearch(row, retailSearch, product, id);
-    const change=()=>{const a=account(product.value),groups=a.pairedGroups||[],q=row.querySelector('[data-item-field="quantity"]');q.previousElementSibling.textContent=a.unit==='GRAM'?'Toplam miktar · gr':'Ürün adedi';q.inputMode=a.unit==='ADET'?'numeric':'decimal';group.innerHTML=groups.map(id=>`<option value="${esc(id)}">${esc(account(id).name)}</option>`).join('');group.required=groups.length>0;group.disabled=!groups.length;group.closest('label').hidden=!groups.length;weight.required=groups.length>0;weight.disabled=!groups.length;weight.closest('label').hidden=!groups.length;weight.value='';weight.setCustomValidity('');row.querySelector('[data-stock-note]').textContent=groups.length?'Adet ve toplam gram birlikte kaydedilir.':a.id==='gramToplam'?'Paket adedi yerine toplam gramı girin.':'';row.querySelector('[data-stock-note]').hidden=!row.querySelector('[data-stock-note]').textContent;updateTotals();};
-    product.addEventListener('change',()=>{if(!restoringDraft)row.dataset.productTouched='true';change();connectFieldHints(row);});row.querySelector('[data-remove-item]').addEventListener('click',()=>{if(rows().length<2){if(!row.dataset.inventoryCode)return;row.remove();addRow()?.querySelector('select').focus();updateTotals();syncFlowMode({preferredStep:activeStep,notify:false});return;}const next=row.nextElementSibling||row.previousElementSibling;row.remove();updateTotals();syncFlowMode({preferredStep:activeStep,notify:false});next?.querySelector('select').focus({preventScroll:true});});row.querySelectorAll('input').forEach(input=>input.addEventListener('input',updateTotals));change();connectFieldHints(row);return row;
+    const change=()=>{const a=account(product.value);if(!a)return;const groups=a.pairedGroups||[],q=row.querySelector('[data-item-field="quantity"]');q.previousElementSibling.textContent=a.unit==='GRAM'?'Toplam miktar · gr':'Ürün adedi';q.inputMode=a.unit==='ADET'?'numeric':'decimal';group.innerHTML=groups.map(id=>`<option value="${esc(id)}">${esc(account(id).name)}</option>`).join('');group.required=groups.length>0;group.disabled=!groups.length;group.closest('label').hidden=!groups.length;weight.required=groups.length>0;weight.disabled=!groups.length;weight.closest('label').hidden=!groups.length;weight.value='';weight.setCustomValidity('');row.querySelector('[data-stock-note]').textContent=groups.length?'Adet ve toplam gram birlikte kaydedilir.':a.id==='gramToplam'?'Paket adedi yerine toplam gramı girin.':'';row.querySelector('[data-stock-note]').hidden=!row.querySelector('[data-stock-note]').textContent;updateTotals();};
+    product.addEventListener('change',()=>{if(!restoringDraft)row.dataset.productTouched='true';change();connectFieldHints(row);});row.querySelector('[data-remove-item]').addEventListener('click',()=>{if(rows().length<2){if(!row.dataset.inventoryCode)return;globalThis.DefterCombobox?.getInstance?.(product)?.destroy?.();row.remove();addRow()?.querySelector('select').focus();updateTotals();syncFlowMode({preferredStep:activeStep,notify:false});return;}const next=row.nextElementSibling||row.previousElementSibling;globalThis.DefterCombobox?.getInstance?.(product)?.destroy?.();row.remove();updateTotals();syncFlowMode({preferredStep:activeStep,notify:false});next?.querySelector('select').focus({preventScroll:true});});row.querySelectorAll('input').forEach(input=>input.addEventListener('input',updateTotals));change();connectFieldHints(row);return row;
   };
   form.addEventListener('click',event=>{if(!restoringDraft&&event.target.closest('[data-add-allocation],[data-remove-allocation],[data-remove-item],#add-sale-item'))form.dataset.draftDirty='true';});
   form.querySelector('#add-sale-item').addEventListener('click',()=>{const row=addRow();if(!row)return;syncFlowMode({preferredStep:1,notify:true});row.querySelector('select').focus({preventScroll:true});});
@@ -1970,9 +2197,8 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
     restore:saved=>{
       if (saved.orderId) {
         const select = orderPanel?.querySelector('select');
-        if (select && [...select.options].some(o=>o.value===saved.orderId)) {
-          select.value = saved.orderId;
-          select.dispatchEvent(new Event('change'));
+        if (select && selectHasValue(select, saved.orderId)) {
+          setSelectControlValue(select, saved.orderId);
           const amounts = new Map(saved.advanceAmounts);
           for (const input of orderPanel.querySelectorAll('[data-advance-id]')) {
             input.value = amounts.get(input.dataset.advanceId) || '';
@@ -1980,11 +2206,11 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
           }
         } else form.dataset.missingOrder = saved.orderId;
       }
-      for(const row of rows())row.remove();
-      for(const [index,savedRow] of (saved.items||[]).slice(0,30).entries()){const row=addRow();if(!row)continue;for(const key of ['accountId','quantity','weightAccount','weight','value']){const control=row.querySelector(`[data-item-field="${key}"]`);if(!control||savedRow[key]===undefined)continue;if(control.tagName!=='SELECT'||[...control.options].some(option=>option.value===savedRow[key]))control.value=savedRow[key];control.dispatchEvent(new Event(control.tagName==='SELECT'?'change':'input',{bubbles:true}));}if(savedRow.inventoryCode)lockInventoryRow(row,(state.inventoryItems||[]).find(item=>item.code===savedRow.inventoryCode),savedRow.inventoryCode);if(Array.isArray(saved.touchedRows)&&saved.touchedRows[index])row.dataset.productTouched='true';}
+      for(const row of rows()){globalThis.DefterCombobox?.getInstance?.(row.querySelector('[data-item-field="accountId"]'))?.destroy?.();row.remove();}
+      for(const [index,savedRow] of (saved.items||[]).slice(0,30).entries()){const row=addRow();if(!row)continue;for(const key of ['accountId','quantity','weightAccount','weight','value']){const control=row.querySelector(`[data-item-field="${key}"]`);if(!control||savedRow[key]===undefined)continue;if(control.tagName!=='SELECT'||selectHasValue(control,savedRow[key]))setSelectControlValue(control,savedRow[key]);else control.dispatchEvent(new Event('change',{bubbles:true}));}if(savedRow.inventoryCode)lockInventoryRow(row,(state.inventoryItems||[]).find(item=>item.code===savedRow.inventoryCode),savedRow.inventoryCode);if(Array.isArray(saved.touchedRows)&&saved.touchedRows[index])row.dataset.productTouched='true';}
       rows().forEach((row,i) => row.priceEditor?.restore(saved.salePricing?.lines[i]));
       if(!rows().length&&!isExchange)addRow();
-      for(const kind of ['payment','counterpayment','debt','counterdebt','scrap']){for(const row of allocationRows(kind))row.remove();for(const savedRow of (saved[kind]||[]).slice(0,30)){const row=addAllocation(kind,savedRow.paymentType||'',savedRow.accountId);if(!row)continue;for(const key of ['accountId','quantity','valueTL','weightAccount','weight']){const control=row.querySelector(`[data-allocation-field="${key}"]`);if(control.tagName!=='SELECT'||[...control.options].some(option=>option.value===savedRow[key]))control.value=savedRow[key];control.dispatchEvent(new Event(control.tagName==='SELECT'?'change':'input',{bubbles:true}));}}}
+      for(const kind of ['payment','counterpayment','debt','counterdebt','scrap']){for(const row of allocationRows(kind)){globalThis.DefterCombobox?.getInstance?.(row.querySelector('[data-allocation-field="accountId"]'))?.destroy?.();row.remove();}for(const savedRow of (saved[kind]||[]).slice(0,30)){const row=addAllocation(kind,savedRow.paymentType||'',savedRow.accountId);if(!row)continue;for(const key of ['accountId','quantity','valueTL','weightAccount','weight']){const control=row.querySelector(`[data-allocation-field="${key}"]`);if(!control||savedRow[key]===undefined)continue;if(control.tagName!=='SELECT'||selectHasValue(control,savedRow[key]))setSelectControlValue(control,savedRow[key]);else control.dispatchEvent(new Event('change',{bubbles:true}));}}}
       updateTotals();
       if(!isStock)setFlowMode(saved.flowMode==='guided'?'guided':'quick',{step:Number(saved.activeStep)||1,notify:false});
     }
@@ -2193,7 +2419,7 @@ function renderTransactionEditor(container, original) {
   const command=original.editableCommand;
   if(!command){container.innerHTML='<p class="info">Bu kaydın düzenlenebilir işlem bilgisi bulunamadı.</p>';return false;}
   const amount=(value,unit='TL')=>{const input=document.createElement('input');input.value=value??'0';return parseAmount(input,unit)||0;};
-  const set=(name,value)=>{const control=container.querySelector(`[name="${name}"]`);if(!control||value===undefined)return;if(control.tagName==='SELECT'&&![...control.options].some(option=>option.value===String(value)))return;control.value=value;control.dispatchEvent(new Event(control.tagName==='SELECT'?'change':'input',{bubbles:true}));};
+  const set=(name,value)=>{const control=container.querySelector(`[name="${name}"]`);if(!control||value===undefined)return;if(control.tagName==='SELECT'&&!selectHasValue(control,String(value)))return;setSelectControlValue(control,String(value));};
   if(['sale','purchase','stock'].includes(command.type)||command.type==='collection'&&Array.isArray(command.received)){
     const exchange=command.type==='collection',purchase=command.type==='purchase',mode=exchange?(command.counterpartyType||'customer')+'-exchange':purchase?(command.source==='supplier'?'supplier-purchase':'purchase'):command.type==='stock'?'stock':command.counterpartyType==='supplier'?'supplier-sale':'sale';
     const items=command.items||original.meta?.lines?.map(row=>({accountId:row.accountId,quantity:raw(row.quantity,account(row.accountId).unit),weightAccount:row.weightAccount||'',weight:row.weightAccount?raw(row.weight,'GRAM'):'',value:raw(row.value,'TL')}))||[];
@@ -2214,7 +2440,7 @@ function renderTransactionEditor(container, original) {
     renderFinanceForm(container,command.type);
     if(command.type==='movement'&&!['Sermaye','İşletmeden çekiş','Gider'].includes(command.category)){
       const category=container.querySelector('#f-category'),option=document.createElement('option');option.value=command.category;option.textContent=command.category;category.append(option);
-      const select=container.querySelector('#f-accountId'),a=account(command.accountId);if(a&&![...select.options].some(option=>option.value===a.id)){const option=document.createElement('option');option.value=a.id;option.textContent=a.name;select.append(option);}
+      const select=container.querySelector('#f-accountId'),a=account(command.accountId);if(a&&!selectHasValue(select,a.id)){const option=document.createElement('option');option.value=a.id;option.textContent=a.name;select.append(option);globalThis.DefterCombobox?.getInstance?.(select)?.syncFromSelect?.();}
       // Opening corrections retain their original direction; changing it is explicit in the editor.
       select.closest('.form-grid').insertAdjacentHTML('beforeend',field('direction','Düzeltme yönü',{value:command.direction,options:[['in','Giriş (+)'],['out','Çıkış (−)']]}));
     }
@@ -2376,8 +2602,8 @@ function renderSummary() {
   $('#main').innerHTML=heading('Günlük İşletme Özeti','İş gününü seçin, görmek istediğiniz hesaplara odaklanın.')+`<section class="section"><form id="summary-form"><div class="summary-filters">${field('summaryDate','İş günü',{type:'date',value:state.date})}<label class="field"><span>Hesap grubu</span><select id="summary-kind"><option value="all">Bütün hesaplar</option><option value="stock">Stok</option><option value="money">Kasa / Banka / POS</option><option value="customer">Müşteriler</option><option value="supplier">Toptancılar</option></select></label><label class="field"><span>Hesap ara</span><input id="summary-search" type="search" maxlength="160" placeholder="Hesap veya ürün adı"></label><label class="field"><span>Birim</span><select id="summary-unit"><option value="">Bütün birimler</option>${[...new Set(state.accounts.map(a=>a.unit))].map(unit=>`<option value="${esc(unit)}">${esc(units[unit].label)}</option>`).join('')}</select></label><label><input id="summary-active" type="checkbox"> Yalnız hareket olan hesaplar</label></div>${action('Günün özetini göster','Geçmiş günleri de inceleyebilirsiniz.')}</form><p id="summary-status" class="context-note" role="status" aria-live="polite" aria-atomic="true"></p><div id="summary-result" role="region" aria-label="Seçilen günün hesap özeti"></div></section>`;
   const result=$('#summary-result'),status=$('#summary-status'),selectedWorkspace=workspace;let sequence=0,loaded=null;
   const draw=()=>{
-    if(!loaded)return;const group=$('#summary-kind').value,q=$('#summary-search').value.toLocaleLowerCase('tr-TR'),unit=$('#summary-unit').value,active=$('#summary-active').checked;
-    const rows=loaded.accounts.filter(row=>{const a=account(row.accountId);if(a.retired&&['opening','incoming','outgoing','adjustment','closing'].every(key=>row[key]===0))return false;return(!q||a.name.toLocaleLowerCase('tr-TR').includes(q))&&(!unit||row.unit===unit)&&(!active||row.incoming||row.outgoing||row.adjustment)&&(group==='all'||group==='stock'&&isStockAccount(a)||group==='money'&&a.kind==='asset'&&!isStockAccount(a)||group==='customer'&&a.kind==='receivable'&&(a.partyType||'customer')==='customer'||group==='supplier'&&a.kind==='receivable'&&a.partyType==='supplier');});
+    if(!loaded)return;const group=$('#summary-kind').value,qRaw=$('#summary-search').value.trim(),q=normalize(qRaw),unit=$('#summary-unit').value,active=$('#summary-active').checked;
+    const rows=loaded.accounts.filter(row=>{const a=account(row.accountId);if(a.retired&&['opening','incoming','outgoing','adjustment','closing'].every(key=>row[key]===0))return false;return(!q||matchesSearchText(a.name,qRaw))&&(!unit||row.unit===unit)&&(!active||row.incoming||row.outgoing||row.adjustment)&&(group==='all'||group==='stock'&&isStockAccount(a)||group==='money'&&a.kind==='asset'&&!isStockAccount(a)||group==='customer'&&a.kind==='receivable'&&(a.partyType||'customer')==='customer'||group==='supplier'&&a.kind==='receivable'&&a.partyType==='supplier');});
     result.innerHTML=`<div class="summary-day"><div><span class="eyebrow">Görüntülenen iş günü</span><h2>${esc(day(loaded.date))}</h2><p>Gün toplamları hesap filtresinden etkilenmez. Kâr değildir.</p></div><dl><div><dt>Net satış</dt><dd>${esc(formatted(loaded.totals.sales))}</dd></div><div><dt>Net alış</dt><dd>${esc(formatted(loaded.totals.purchases))}</dd></div></dl></div><div class="table-wrap summary-ledger"><table><caption>Hesap hareket cetveli · ${esc(day(loaded.date))}<span>Gelen devir + giriş − çıkış + sayım düzeltmesi = gün sonu bakiye. Her satır kendi biriminde okunur. Farklı birimler toplanmaz.</span></caption><thead><tr><th scope="col">Hesap / birim</th><th scope="col" class="numeric">Gelen devir</th><th scope="col" class="numeric">Giriş</th><th scope="col" class="numeric">Çıkış</th><th scope="col" class="numeric">Sayım düzeltmesi</th><th scope="col" class="numeric">Gün sonu bakiye</th></tr></thead><tbody>${rows.map(row=>`<tr><th scope="row">${summaryAccountLabel(row.accountId)}<small>${esc(units[row.unit].label)}</small></th>${['opening','incoming','outgoing','adjustment','closing'].map(key=>`<td class="numeric">${esc(formatted(row[key],row.unit))}</td>`).join('')}</tr>`).join('')||'<tr><td colspan="6">Bu filtrelerle eşleşen hesap yok.</td></tr>'}</tbody></table></div>`;enhanceTables(result);status.textContent=`${day(loaded.date)} özeti hazır. ${rows.length} / ${loaded.accounts.length} hesap gösteriliyor.`;
   };
   const load=async()=>{const ticket=++sequence,date=$('#f-summaryDate').value;status.textContent='Özet hazırlanıyor…';result.textContent='';loaded=null;try{const summary=await request('summary',undefined,selectedWorkspace,{query:{date}});if(view!=='summary'||workspace!==selectedWorkspace||ticket!==sequence||!result.isConnected)return;loaded=summary;draw();}catch(error){if(result.isConnected&&ticket===sequence){status.textContent='Özet alınamadı. Tarihi kontrol ederek yeniden deneyin.';result.textContent='Özet alınamadı: '+error.message;}}};
@@ -2387,7 +2613,18 @@ function renderSummary() {
 function returnProductFields(form, update) {
   const target = form.querySelector('[data-return-fund]').closest('.form-grid');
   const choices = activeAccounts().filter(a => a.isSaleable && state.balances[a.id] > 0 && !(a.nominal && state.nominalUnconfirmed));
-  target.insertAdjacentHTML('beforebegin', `<fieldset><legend>Ürünle karşılık</legend>${state.inventoryItems?.some(item=>item.status==='available')?'<label class="field"><span>Tekil ürün kodu veya barkodu</span><input type="search" name="refundItemSearch" maxlength="160" autocomplete="off"></label><p class="context-note" data-item-matches aria-live="polite"></p>':''}<label class="field"><span>Verilen ürün</span><select name="refundProduct"><option value="">Ürün verilmiyor</option>${choices.filter(a=>unallocatedStock(a.id)>0 && (!a.pairedGroups.length || a.pairedGroups.some(id=>unallocatedStock(id)>0))).map(a => `<option value="${esc(a.id)}">${esc(a.name)} · ${esc(formatted(unallocatedStock(a.id), a.unit))}</option>`).join('')}</select></label>
+  const eligibleChoices = choices.filter(a=>unallocatedStock(a.id)>0 && (!a.pairedGroups.length || a.pairedGroups.some(id=>unallocatedStock(id)>0)));
+  const hasCombobox = Boolean(globalThis.DefterCombobox?.enhanceSelect);
+  const baseProductItems = eligibleChoices.map(a => ({
+    id: a.id,
+    label: a.name,
+    unit: a.unit,
+    code: a.id,
+    meta: formatted(unallocatedStock(a.id), a.unit),
+    keywords: [a.id, a.name].filter(Boolean).join(' ')
+  }));
+  const productOptionsMarkup = hasCombobox ? '' : eligibleChoices.map(a => `<option value="${esc(a.id)}">${esc(a.name)} · ${esc(formatted(unallocatedStock(a.id), a.unit))}</option>`).join('');
+  target.insertAdjacentHTML('beforebegin', `<fieldset><legend>Ürünle karşılık</legend>${state.inventoryItems?.some(item=>item.status==='available')?'<label class="field"><span>Tekil ürün kodu veya barkodu</span><input type="search" name="refundItemSearch" maxlength="160" autocomplete="off"></label><p class="context-note" data-item-matches aria-live="polite"></p>':''}<label class="field"><span>Verilen ürün</span><select name="refundProduct"><option value="">Ürün verilmiyor</option>${productOptionsMarkup}</select></label>
     <div class="form-grid" data-refund-product-fields><label class="field"><span>Verilen miktar</span><input name="refundProductQuantity" inputmode="decimal" maxlength="24"></label>
     <label class="field"><span>İşlem</span><select name="returnOperation"><option value="refund">İade karşılığı ürün ver</option><option value="exchange">Yeni ürünle değiştir</option></select></label>
     <label class="field"><span>Terazi grubu</span><select name="refundProductGroup"></select></label>
@@ -2396,20 +2633,42 @@ function returnProductFields(form, update) {
   const { refundProduct: product, refundProductQuantity: qty, refundProductGroup: group, refundProductWeight: weight, refundProductValue: value } = form.elements;
   const controls = [qty, group, weight, value];
   const search = form.elements.refundItemSearch;
-  const found = document.createElement('optgroup');
-  found.label = 'Tekil ürünler'; product.append(found);
-  const selectedItem = () => product.selectedOptions[0]?.inventoryItem;
+  const inventoryByOptionId = new Map();
+  const productCb = hasCombobox ? globalThis.DefterCombobox.enhanceSelect(product, {
+    items: baseProductItems,
+    value: '',
+    allowEmpty: true,
+    clearable: true,
+    emptyLabel: 'Ürün verilmiyor',
+    placeholder: 'Verilecek ürün ara…',
+    invalidTextBehavior: 'revert',
+    formatSelectedText: item => item.meta ? `${item.label} · ${item.meta}` : item.label
+  }) : null;
+  const found = !hasCombobox ? document.createElement('optgroup') : null;
+  if (found) { found.label = 'Tekil ürünler'; product.append(found); }
+  const selectedItem = () => inventoryByOptionId.get(product.value) || product.selectedOptions?.[0]?.inventoryItem;
   if (search) {
     const draw = () => {
       const matches = search.value.trim() ? (state.inventoryItems || []).filter(item => item.status === 'available' && inventoryMatches(item,search.value)) : [];
       const selected = selectedItem();
       const exact = matches.find(item=>[item.code,item.barcode].includes(search.value.trim().toUpperCase()));
       const shown = [...new Set([selected, exact,...matches.slice(0,12)].filter(Boolean))];
-      found.replaceChildren();
-      for (const item of shown) {
-        const option = document.createElement('option'); option.textContent = inventoryLabel(item);
-        option.value = 'item:' + item.code; option.inventoryItem = item; found.append(option);
-        if (item === selected) option.selected = true;
+      inventoryByOptionId.clear();
+      if (productCb) {
+        const serialItems = shown.map(item => {
+          const optId = 'item:' + item.code;
+          inventoryByOptionId.set(optId, item);
+          return { id: optId, label: inventoryLabel(item), code: item.code, badge: 'Tekil' };
+        });
+        productCb.setItems([...baseProductItems, ...serialItems]);
+        if (selected) productCb.setValue('item:' + selected.code, { emitChange: false });
+      } else if (found) {
+        found.replaceChildren();
+        for (const item of shown) {
+          const option = document.createElement('option'); option.textContent = inventoryLabel(item);
+          option.value = 'item:' + item.code; option.inventoryItem = item; found.append(option);
+          if (item === selected) option.selected = true;
+        }
       }
       form.querySelector('[data-item-matches]').textContent = search.value ? (matches.length ? matches.length+' tekil ürün. Verilen ürün listesinden seçin.' : 'Stokta eşleşen tekil ürün yok.') : '';
       return exact || (matches.length === 1 ? matches[0] : null);
@@ -2419,7 +2678,7 @@ function returnProductFields(form, update) {
       if (event.key !== 'Enter' || event.isComposing) return;
       event.preventDefault();
       const item = draw();
-      if (item) { product.value='item:'+item.code; product.dispatchEvent(new Event('change',{bubbles:true})); value.focus(); }
+      if (item) { setSelectControlValue(product, 'item:' + item.code); value.focus(); }
       else product.focus();
     });
   }
@@ -2563,96 +2822,107 @@ function bindSaleReturn(article, original, current) {
   if(original.type!=='sale'||!info?.eligible||!Array.isArray(original.meta.lines))return;
   const funds=financialAccounts().filter(a=>a.id!=='pos');
   const lines=info.lines.filter(line=>line.remainingQuantity>0);
-  article.insertAdjacentHTML('beforeend',`<details><summary>Ürün iadesi kaydet</summary><p class="context-note">Geri gelen ürünü ve müşteriye verdiğiniz karşılığı seçin. Önerilen orantılı bedeli anlaşmanıza göre değiştirebilirsiniz. Para veya ürün iadesi tek başına müşteri cari borcunu kapatmaz. Cari tutarı ayrıca seçin.</p><form id="return-form-${esc(original.id)}" class="sale-return-form">${lines.map(remaining=>{
-    const i=remaining.lineIndex,line=original.meta.lines[i],a=account(line.accountId);
-    return `<section class="section"><h3>${esc(a.name)}${line.inventoryCode?' · '+esc(line.inventoryCode):''}</h3><p>Kalan iade edilebilir: ${esc(formatted(remaining.remainingQuantity,a.unit))}${line.weightAccount?` · ${esc(formatted(remaining.remainingWeight,'GRAM'))}`:''}</p><div class="form-grid"><label class="field" for="return-q-${esc(original.id)}-${i}"><span>Geri gelen miktar · ${esc(units[a.unit].label)}</span><input id="return-q-${esc(original.id)}-${i}" name="quantity-${i}" data-return-quantity="${i}" inputmode="decimal" value="0" maxlength="24"></label>${line.weightAccount?`<label class="field" for="return-w-${esc(original.id)}-${i}"><span>Geri gelen toplam gram</span><input id="return-w-${esc(original.id)}-${i}" name="weight-${i}" data-return-weight="${i}" inputmode="decimal" value="0" maxlength="24"></label>`:''}<label class="field" for="return-v-${esc(original.id)}-${i}"><span>Anlaşılmış iade bedeli · TL</span><input id="return-v-${esc(original.id)}-${i}" name="value-${i}" data-return-value="${i}" inputmode="decimal" value="0" maxlength="24"></label></div></section>`;
-  }).join('')}<div class="form-grid"><label class="field" for="return-fund-${esc(original.id)}"><span>Paranın çıktığı kasa / banka</span><select id="return-fund-${esc(original.id)}" name="refundAccount" data-return-fund>${funds.map(a=>`<option value="${esc(a.id)}">${esc(a.name)} · ${esc(units[a.unit].label)}</option>`).join('')}</select></label><label class="field" for="return-amount-${esc(original.id)}"><span>Gerçek çıkan miktar · <span data-refund-unit>TL</span></span><input id="return-amount-${esc(original.id)}" name="refundQuantity" data-return-refund inputmode="decimal" value="0" maxlength="24" required></label><label class="field" for="return-note-${esc(original.id)}"><span>İade gerekçesi / anlaşma</span><input id="return-note-${esc(original.id)}" name="note" data-return-note required maxlength="160"></label></div><p class="context-note" data-return-total></p><p class="context-note">Farklı birimde ödeme yapılırsa gerçek çıkan miktarı siz girin; Para ile karşılanacak TL tutarı, ürün ve cari karşılıklarından sonra kalandır. Otomatik kur dönüşümü yapılmaz.</p>${action('İade etkilerini gözden geçir','Bu aşamada henüz kayıt yapılmaz.')}</form></details>`);
-  const form=article.querySelector('.sale-return-form'),fund=form.querySelector('[data-return-fund]'),refund=form.querySelector('[data-return-refund]');
-  if([...fund.options].some(option=>option.value==='nakit'))fund.value='nakit';
-  const proportional=(total,part,whole)=>Number((2n*BigInt(total)*BigInt(part)+BigInt(whole))/(2n*BigInt(whole)));
-  const total=()=>lines.reduce((sum,r)=>{const q=parseAmount(form.querySelector(`[data-return-quantity="${r.lineIndex}"]`),account(original.meta.lines[r.lineIndex].accountId).unit);const value=parseAmount(form.querySelector(`[data-return-value="${r.lineIndex}"]`));return sum+(q>0&&value!==null?value:0);},0);
-  const productFields = original.meta.counterpartyType === 'supplier' ? { value: () => 0, read: () => null } : returnProductFields(form, () => updateRefund());
-  const readCustomer = returnCustomerFields(form,original,()=>updateRefund());
-  const exchanging = () => Boolean(form.elements.refundProduct?.value && form.elements.returnOperation?.value === 'exchange');
-  const updateRefund=()=>{
-    const a=account(fund.value), value=total(), cari=readCustomer(), difference=value-productFields.value()-cari.total;
-    const incoming=exchanging() && difference<0, remaining=incoming ? -difference : Math.max(difference,0);
-    fund.previousElementSibling.textContent=incoming?'Farkın tahsil edildiği kasa / banka':'Paranın çıktığı kasa / banka';
-    refund.previousElementSibling.firstChild.textContent=incoming?'Tahsil edilen miktar · ':'Gerçek çıkan miktar · ';
-    form.querySelector('[data-refund-unit]').textContent=units[a.unit].label;
-    if(a.unit==='TL')refund.value=raw(remaining,'TL');
-    parseAmount(refund,a.unit);
-    form.querySelector('[data-return-total]').textContent='Anlaşılmış iade bedeli: '+formatted(value)+(cari.rows.length?' · Cari ile karşılanacak: '+formatted(cari.total):'')+(productFields.value()||cari.rows.length?(incoming?' · Tahsil edilecek: ':' · Para ile karşılanacak: ')+formatted(remaining):'');
-  };
-  for(const remaining of lines){
-    const i=remaining.lineIndex,line=original.meta.lines[i],q=form.querySelector(`[data-return-quantity="${i}"]`),value=form.querySelector(`[data-return-value="${i}"]`);
-    q.addEventListener('input',()=>{const quantity=parseAmount(q,account(line.accountId).unit);if(quantity!==null)value.value=raw(proportional(line.value,quantity,line.quantity),'TL');if(line.weightAccount){const weight=form.querySelector(`[data-return-weight="${i}"]`);weight.value='';weight.required=quantity>0;weight.setCustomValidity('');}updateRefund();});
-    if(line.weightAccount){const weight=form.querySelector(`[data-return-weight="${i}"]`);weight.value='';weight.addEventListener('input',()=>parseAmount(weight,'GRAM',true));}
-    value.addEventListener('input',updateRefund);
-  }
-  fund.addEventListener('change',()=>{refund.value='';updateRefund();});
-  refund.addEventListener('input',()=>parseAmount(refund,account(fund.value).unit));
-  form.addEventListener('input',()=>{delete form.dataset.reviewedReturn;form.querySelector('[data-return-review]')?.remove();});
-  form.addEventListener('change',()=>{delete form.dataset.reviewedReturn;form.querySelector('[data-return-review]')?.remove();});
-  form.addEventListener('submit',event=>{
-    event.preventDefault();if(!current()||busy||pending||form.dataset.draftStale==='true')return;
-    const items=[];
+  article.insertAdjacentHTML('beforeend',`<details data-sale-return="${esc(original.id)}"><summary>Ürün iadesi kaydet</summary><div data-sale-return-body></div></details>`);
+  const details=article.querySelector(`details[data-sale-return]`), body=details.querySelector('[data-sale-return-body]');
+  let mounted=false;
+  const mountReturnForm=({isLazy=false}={})=>{
+    if(mounted||!body.isConnected)return;
+    mounted=true;
+    body.innerHTML=`<p class="context-note">Geri gelen ürünü ve müşteriye verdiğiniz karşılığı seçin. Önerilen orantılı bedeli anlaşmanıza göre değiştirebilirsiniz. Para veya ürün iadesi tek başına müşteri cari borcunu kapatmaz. Cari tutarı ayrıca seçin.</p><form id="return-form-${esc(original.id)}" class="sale-return-form">${lines.map(remaining=>{
+      const i=remaining.lineIndex,line=original.meta.lines[i],a=account(line.accountId);
+      return `<section class="section"><h3>${esc(a.name)}${line.inventoryCode?' · '+esc(line.inventoryCode):''}</h3><p>Kalan iade edilebilir: ${esc(formatted(remaining.remainingQuantity,a.unit))}${line.weightAccount?` · ${esc(formatted(remaining.remainingWeight,'GRAM'))}`:''}</p><div class="form-grid"><label class="field" for="return-q-${esc(original.id)}-${i}"><span>Geri gelen miktar · ${esc(units[a.unit].label)}</span><input id="return-q-${esc(original.id)}-${i}" name="quantity-${i}" data-return-quantity="${i}" inputmode="decimal" value="0" maxlength="24"></label>${line.weightAccount?`<label class="field" for="return-w-${esc(original.id)}-${i}"><span>Geri gelen toplam gram</span><input id="return-w-${esc(original.id)}-${i}" name="weight-${i}" data-return-weight="${i}" inputmode="decimal" value="0" maxlength="24"></label>`:''}<label class="field" for="return-v-${esc(original.id)}-${i}"><span>Anlaşılmış iade bedeli · TL</span><input id="return-v-${esc(original.id)}-${i}" name="value-${i}" data-return-value="${i}" inputmode="decimal" value="0" maxlength="24"></label></div></section>`;
+    }).join('')}<div class="form-grid"><label class="field" for="return-fund-${esc(original.id)}"><span>Paranın çıktığı kasa / banka</span><select id="return-fund-${esc(original.id)}" name="refundAccount" data-return-fund>${funds.map(a=>`<option value="${esc(a.id)}">${esc(a.name)} · ${esc(units[a.unit].label)}</option>`).join('')}</select></label><label class="field" for="return-amount-${esc(original.id)}"><span>Gerçek çıkan miktar · <span data-refund-unit>TL</span></span><input id="return-amount-${esc(original.id)}" name="refundQuantity" data-return-refund inputmode="decimal" value="0" maxlength="24" required></label><label class="field" for="return-note-${esc(original.id)}"><span>İade gerekçesi / anlaşma</span><input id="return-note-${esc(original.id)}" name="note" data-return-note required maxlength="160"></label></div><p class="context-note" data-return-total></p><p class="context-note">Farklı birimde ödeme yapılırsa gerçek çıkan miktarı siz girin; Para ile karşılanacak TL tutarı, ürün ve cari karşılıklarından sonra kalandır. Otomatik kur dönüşümü yapılmaz.</p>${action('İade etkilerini gözden geçir','Bu aşamada henüz kayıt yapılmaz.')}</form>`;
+    const form=body.querySelector('.sale-return-form'),fund=form.querySelector('[data-return-fund]'),refund=form.querySelector('[data-return-refund]');
+    if(selectHasValue(fund,'nakit'))setSelectControlValue(fund,'nakit',{emit:false});
+    const proportional=(total,part,whole)=>Number((2n*BigInt(total)*BigInt(part)+BigInt(whole))/(2n*BigInt(whole)));
+    const total=()=>lines.reduce((sum,r)=>{const q=parseAmount(form.querySelector(`[data-return-quantity="${r.lineIndex}"]`),account(original.meta.lines[r.lineIndex].accountId).unit);const value=parseAmount(form.querySelector(`[data-return-value="${r.lineIndex}"]`));return sum+(q>0&&value!==null?value:0);},0);
+    const productFields = original.meta.counterpartyType === 'supplier' ? { value: () => 0, read: () => null } : returnProductFields(form, () => updateRefund());
+    const readCustomer = returnCustomerFields(form,original,()=>updateRefund());
+    const exchanging = () => Boolean(form.elements.refundProduct?.value && form.elements.returnOperation?.value === 'exchange');
+    const updateRefund=()=>{
+      const a=account(fund.value), value=total(), cari=readCustomer(), difference=value-productFields.value()-cari.total;
+      const incoming=exchanging() && difference<0, remaining=incoming ? -difference : Math.max(difference,0);
+      fund.previousElementSibling.textContent=incoming?'Farkın tahsil edildiği kasa / banka':'Paranın çıktığı kasa / banka';
+      refund.previousElementSibling.firstChild.textContent=incoming?'Tahsil edilen miktar · ':'Gerçek çıkan miktar · ';
+      form.querySelector('[data-refund-unit]').textContent=units[a.unit].label;
+      if(a.unit==='TL')refund.value=raw(remaining,'TL');
+      parseAmount(refund,a.unit);
+      form.querySelector('[data-return-total]').textContent='Anlaşılmış iade bedeli: '+formatted(value)+(cari.rows.length?' · Cari ile karşılanacak: '+formatted(cari.total):'')+(productFields.value()||cari.rows.length?(incoming?' · Tahsil edilecek: ':' · Para ile karşılanacak: ')+formatted(remaining):'');
+    };
     for(const remaining of lines){
-      const i=remaining.lineIndex,line=original.meta.lines[i],q=form.querySelector(`[data-return-quantity="${i}"]`),quantity=parseAmount(q,account(line.accountId).unit);
-      if(quantity===null||quantity>remaining.remainingQuantity){q.setCustomValidity('Kalan iade edilebilir miktarı aşmayan geçerli miktar girin.');q.reportValidity();return;}
-      if(!quantity)continue;
-      if(line.weightAccount){
-        const weight=form.querySelector(`[data-return-weight="${i}"]`),measured=parseAmount(weight,'GRAM',true);
-        if(measured===null||measured>remaining.remainingWeight||(quantity===remaining.remainingQuantity&&measured!==remaining.remainingWeight)||(quantity<remaining.remainingQuantity&&measured>=remaining.remainingWeight)){weight.setCustomValidity('Gerçek tartımı girin; kalan adet ve gram birlikte tutarlı olmalıdır.');weight.reportValidity();return;}
-      }
-      const value=form.querySelector(`[data-return-value="${i}"]`);if(parseAmount(value)===null){value.reportValidity();return;}
-      items.push({lineIndex:i,quantity:q.value,value:value.value,...(line.weightAccount?{weight:form.querySelector(`[data-return-weight="${i}"]`).value}:{})});
+      const i=remaining.lineIndex,line=original.meta.lines[i],q=form.querySelector(`[data-return-quantity="${i}"]`),value=form.querySelector(`[data-return-value="${i}"]`);
+      q.addEventListener('input',()=>{const quantity=parseAmount(q,account(line.accountId).unit);if(quantity!==null)value.value=raw(proportional(line.value,quantity,line.quantity),'TL');if(line.weightAccount){const weight=form.querySelector(`[data-return-weight="${i}"]`);weight.value='';weight.required=quantity>0;weight.setCustomValidity('');}updateRefund();});
+      if(line.weightAccount){const weight=form.querySelector(`[data-return-weight="${i}"]`);weight.value='';weight.addEventListener('input',()=>parseAmount(weight,'GRAM',true));}
+      value.addEventListener('input',updateRefund);
     }
-    if(!items.length){inform('En az bir geri gelen ürün miktarı girin.',true);return;}
-    const cari=readCustomer();
-    if(cari.rows.length && cari.total>total()-productFields.value()){inform('Cari karşılık, iade bedelinin üründen sonra kalan kısmını aşıyor.',true);return;}
-    const a=account(fund.value),sum=total(),product=productFields.read(),difference=sum-productFields.value()-cari.total,remaining=exchanging()?Math.abs(difference):difference,amount=parseAmount(refund,a.unit);
-    if(!Number.isSafeInteger(sum)||remaining<0||amount===null||(remaining>0&&amount<=0)||(remaining===0&&amount!==0)||(a.unit==='TL'&&amount!==remaining)){refund.setCustomValidity('Gerçek çıkan miktar ile anlaşılmış iade bedelini kontrol edin.');refund.reportValidity();return;}
-    if(!form.reportValidity())return;
-    const money=remaining?[{accountId:a.id,quantity:refund.value,valueTL:raw(remaining,'TL')}]:[];
-    const note=form.querySelector('[data-return-note]').value;
-    const command=exchanging()?{type:'retailExchange',originalId:original.id,returnItems:items,newItems:[{accountId:product.accountId,quantity:product.quantity,value:product.valueTL,...(product.inventoryCode&&{inventoryCode:product.inventoryCode}),...(product.weightAccount&&{weightAccount:product.weightAccount,weight:product.weight})}],received:difference<0?money:[],refunds:difference>0?money:[],...(cari.rows.length&&{customerConsideration:cari.rows}),note}
-      :{type:'saleReturn',originalId:original.id,items,...(cari.rows.length ? {outgoing:[...(product?[product]:[]),...money],customerConsideration:cari.rows} : product?{outgoing:[product,...money]}:{refunds:money}),note};
-    const fingerprint=JSON.stringify(command);
-    if(form.dataset.reviewedReturn!==fingerprint){
-      form.querySelector('[data-return-review]')?.remove();
-      form.insertAdjacentHTML('beforeend',`<div data-return-review class="info neutral"><p class="journal-record-context">İade yapılan satış: ${esc(original.id)} · ${esc(day(original.date))}</p><strong>İade bedeli: ${esc(formatted(sum))}</strong><p>Para çıkışı: ${esc(a.name)} · ${esc(formatted(amount,a.unit))}. İş günü: ${esc(day(state.date))}.</p><p>Eski satış ve cari bakiye silinmez; seçili ürünler stoğa geri girer.</p><button type="button" data-confirm-return class="button">İadeyi onayla</button></div>`);
-      const returnedCodes=items.map(item=>original.meta.lines[item.lineIndex].inventoryCode).filter(Boolean);
-      if(returnedCodes.length){
-        const summary=document.createElement('p');
-        summary.textContent='Geri alınan tekil ürün: '+returnedCodes.join(', ');
-        form.querySelector('[data-confirm-return]').before(summary);
-      }
-      if(cari.rows.length){
-        const effects=document.createElement('p');
-        const a=account(cari.rows[0].accountId);
-        effects.textContent=cari.rows.map(row=>{const qEl=form.querySelector('[data-cari-native]'),rEl=form.querySelector('[data-cari-tl]'),qVal=parseAmount(qEl,a.unit,true),rVal=rEl?parseAmount(rEl,'TL',true):qVal;return (row.action==='reduceDebt'?'Müşteri borcundan düşülecek':'Müşteriye alacak yazılacak')+
-          ' · '+a.name+' · '+(qVal!==null?formatted(qVal,a.unit):row.quantity+' '+units[a.unit].label)+(a.unit==='TL'?'':' · '+(rVal!==null?formatted(rVal,'TL'):row.valueTL+' TL')+' karşılığı');}).join(' / ')+
-          ' · Kalan '+(cari.balance>0?'müşteri borcu ':cari.balance<0?'müşteri alacağı ':'bakiye ')+formatted(Math.abs(cari.balance),a.unit);
-        if (!amount) form.querySelector('[data-return-review] strong + p').textContent='Para çıkışı yok. İş günü '+day(state.date);
-        form.querySelector('[data-confirm-return]').before(effects);
-      }
-      if(product){
-        const review=form.querySelector('[data-return-review]');
-        if(exchanging()){
-          review.querySelector('strong').textContent='Ürün değişimi · İade bedeli '+formatted(sum);
-          review.querySelector('strong + p').textContent=(difference<0?'Tahsil edilecek: ':difference>0?'Ödenecek: ':'Fark: ')+formatted(amount,a.unit)+(amount?' · '+a.name:'')+' · İş günü '+state.date;
-          review.querySelector('[data-confirm-return]').textContent='Değişimi onayla';
+    fund.addEventListener('change',()=>{refund.value='';updateRefund();});
+    refund.addEventListener('input',()=>parseAmount(refund,account(fund.value).unit));
+    form.addEventListener('input',()=>{delete form.dataset.reviewedReturn;form.querySelector('[data-return-review]')?.remove();});
+    form.addEventListener('change',()=>{delete form.dataset.reviewedReturn;form.querySelector('[data-return-review]')?.remove();});
+    form.addEventListener('submit',event=>{
+      event.preventDefault();if(!current()||busy||pending||form.dataset.draftStale==='true')return;
+      const items=[];
+      for(const remaining of lines){
+        const i=remaining.lineIndex,line=original.meta.lines[i],q=form.querySelector(`[data-return-quantity="${i}"]`),quantity=parseAmount(q,account(line.accountId).unit);
+        if(quantity===null||quantity>remaining.remainingQuantity){q.setCustomValidity('Kalan iade edilebilir miktarı aşmayan geçerli miktar girin.');q.reportValidity();return;}
+        if(!quantity)continue;
+        if(line.weightAccount){
+          const weight=form.querySelector(`[data-return-weight="${i}"]`),measured=parseAmount(weight,'GRAM',true);
+          if(measured===null||measured>remaining.remainingWeight||(quantity===remaining.remainingQuantity&&measured!==remaining.remainingWeight)||(quantity<remaining.remainingQuantity&&measured>=remaining.remainingWeight)){weight.setCustomValidity('Gerçek tartımı girin; kalan adet ve gram birlikte tutarlı olmalıdır.');weight.reportValidity();return;}
         }
-        const supplied=account(product.accountId), detail=document.createElement('p');
-        detail.textContent='Verilen ürün: '+supplied.name+(product.inventoryCode?' · '+product.inventoryCode:'')+' · '+formatted(parseAmount(form.elements.refundProductQuantity,supplied.unit),supplied.unit)+(product.weightAccount?' · '+account(product.weightAccount).name+' · '+formatted(parseAmount(form.elements.refundProductWeight,'GRAM'),'GRAM'):'')+' · '+formatted(productFields.value());
-        form.querySelector('[data-confirm-return]').before(detail);
+        const value=form.querySelector(`[data-return-value="${i}"]`);if(parseAmount(value)===null){value.reportValidity();return;}
+        items.push({lineIndex:i,quantity:q.value,value:value.value,...(line.weightAccount?{weight:form.querySelector(`[data-return-weight="${i}"]`).value}:{})});
       }
-      form.querySelector('[data-confirm-return]').addEventListener('click',()=>{form.dataset.reviewedReturn=fingerprint;form.requestSubmit();});form.querySelector('[data-confirm-return]').focus();return;
-    }
-    submit(command,exchanging()?'Değişim ve fiilî fark birlikte kaydedildi.':'İade ve verilen karşılık kaydedildi.',undefined,{key:form.dataset.draftKey});
-  });
-  updateRefund();
+      if(!items.length){inform('En az bir geri gelen ürün miktarı girin.',true);return;}
+      const cari=readCustomer();
+      if(cari.rows.length && cari.total>total()-productFields.value()){inform('Cari karşılık, iade bedelinin üründen sonra kalan kısmını aşıyor.',true);return;}
+      const a=account(fund.value),sum=total(),product=productFields.read(),difference=sum-productFields.value()-cari.total,remaining=exchanging()?Math.abs(difference):difference,amount=parseAmount(refund,a.unit);
+      if(!Number.isSafeInteger(sum)||remaining<0||amount===null||(remaining>0&&amount<=0)||(remaining===0&&amount!==0)||(a.unit==='TL'&&amount!==remaining)){refund.setCustomValidity('Gerçek çıkan miktar ile anlaşılmış iade bedelini kontrol edin.');refund.reportValidity();return;}
+      if(!form.reportValidity())return;
+      const money=remaining?[{accountId:a.id,quantity:refund.value,valueTL:raw(remaining,'TL')}]:[];
+      const note=form.querySelector('[data-return-note]').value;
+      const command=exchanging()?{type:'retailExchange',originalId:original.id,returnItems:items,newItems:[{accountId:product.accountId,quantity:product.quantity,value:product.valueTL,...(product.inventoryCode&&{inventoryCode:product.inventoryCode}),...(product.weightAccount&&{weightAccount:product.weightAccount,weight:product.weight})}],received:difference<0?money:[],refunds:difference>0?money:[],...(cari.rows.length&&{customerConsideration:cari.rows}),note}
+        :{type:'saleReturn',originalId:original.id,items,...(cari.rows.length ? {outgoing:[...(product?[product]:[]),...money],customerConsideration:cari.rows} : product?{outgoing:[product,...money]}:{refunds:money}),note};
+      const fingerprint=JSON.stringify(command);
+      if(form.dataset.reviewedReturn!==fingerprint){
+        form.querySelector('[data-return-review]')?.remove();
+        form.insertAdjacentHTML('beforeend',`<div data-return-review class="info neutral"><p class="journal-record-context">İade yapılan satış: ${esc(original.id)} · ${esc(day(original.date))}</p><strong>İade bedeli: ${esc(formatted(sum))}</strong><p>Para çıkışı: ${esc(a.name)} · ${esc(formatted(amount,a.unit))}. İş günü: ${esc(day(state.date))}.</p><p>Eski satış ve cari bakiye silinmez; seçili ürünler stoğa geri girer.</p><button type="button" data-confirm-return class="button">İadeyi onayla</button></div>`);
+        const returnedCodes=items.map(item=>original.meta.lines[item.lineIndex].inventoryCode).filter(Boolean);
+        if(returnedCodes.length){
+          const summary=document.createElement('p');
+          summary.textContent='Geri alınan tekil ürün: '+returnedCodes.join(', ');
+          form.querySelector('[data-confirm-return]').before(summary);
+        }
+        if(cari.rows.length){
+          const effects=document.createElement('p');
+          const a=account(cari.rows[0].accountId);
+          effects.textContent=cari.rows.map(row=>{const qEl=form.querySelector('[data-cari-native]'),rEl=form.querySelector('[data-cari-tl]'),qVal=parseAmount(qEl,a.unit,true),rVal=rEl?parseAmount(rEl,'TL',true):qVal;return (row.action==='reduceDebt'?'Müşteri borcundan düşülecek':'Müşteriye alacak yazılacak')+
+            ' · '+a.name+' · '+(qVal!==null?formatted(qVal,a.unit):row.quantity+' '+units[a.unit].label)+(a.unit==='TL'?'':' · '+(rVal!==null?formatted(rVal,'TL'):row.valueTL+' TL')+' karşılığı');}).join(' / ')+
+            ' · Kalan '+(cari.balance>0?'müşteri borcu ':cari.balance<0?'müşteri alacağı ':'bakiye ')+formatted(Math.abs(cari.balance),a.unit);
+          if (!amount) form.querySelector('[data-return-review] strong + p').textContent='Para çıkışı yok. İş günü '+day(state.date);
+          form.querySelector('[data-confirm-return]').before(effects);
+        }
+        if(product){
+          const review=form.querySelector('[data-return-review]');
+          if(exchanging()){
+            review.querySelector('strong').textContent='Ürün değişimi · İade bedeli '+formatted(sum);
+            review.querySelector('strong + p').textContent=(difference<0?'Tahsil edilecek: ':difference>0?'Ödenecek: ':'Fark: ')+formatted(amount,a.unit)+(amount?' · '+a.name:'')+' · İş günü '+state.date;
+            review.querySelector('[data-confirm-return]').textContent='Değişimi onayla';
+          }
+          const supplied=account(product.accountId), detail=document.createElement('p');
+          detail.textContent='Verilen ürün: '+supplied.name+(product.inventoryCode?' · '+product.inventoryCode:'')+' · '+formatted(parseAmount(form.elements.refundProductQuantity,supplied.unit),supplied.unit)+(product.weightAccount?' · '+account(product.weightAccount).name+' · '+formatted(parseAmount(form.elements.refundProductWeight,'GRAM'),'GRAM'):'')+' · '+formatted(productFields.value());
+          form.querySelector('[data-confirm-return]').before(detail);
+        }
+        form.querySelector('[data-confirm-return]').addEventListener('click',()=>{form.dataset.reviewedReturn=fingerprint;form.requestSubmit();});form.querySelector('[data-confirm-return]').focus();return;
+      }
+      submit(command,exchanging()?'Değişim ve fiilî fark birlikte kaydedildi.':'İade ve verilen karşılık kaydedildi.',undefined,{key:form.dataset.draftKey});
+    });
+    updateRefund();
+    if(isLazy){connectFieldHints(details);enhanceTables(details);prepareDraftForms();}
+  };
+  details.addEventListener('toggle',()=>{if(details.open)mountReturnForm({isLazy:true});});
+  const returnDraftKey=getDraftStore().makeKey({actorId:currentActorId(),workspace,scope:'retail',type:'return-form-'+original.id});
+  if(getDraftStore().getDraft(returnDraftKey)){details.open=true;mountReturnForm({isLazy:false});}
 }
 
 function receiptDirections(event, available=[]) {
@@ -2783,8 +3053,32 @@ function renderJournal() {
   $('#main').innerHTML = heading('Günlük İşlemler', 'İşlemleri bulun, ayrıntılarını açın ve gerektiğinde düzenleyin. Ürün iadesi gerçek geri dönüşü; iptal, işlemin tamamını geri almayı kaydeder.') + '<section class="section"><div class="section-header"><div><h2>Kayıtlar</h2><p class="muted">' + totals.total + ' olay · ' + totals.totalEntries + ' bağlı hareket</p></div></div><div class="journal-filters"><label class="field" for="journal-scope"><span>Dönem</span><select id="journal-scope"><option value="today">Açık iş günü</option><option value="all">Bütün geçmiş</option></select></label><label class="field" for="journal-search"><span>Kayıtlarda ara</span><input id="journal-search" type="search" maxlength="160" autocomplete="off" placeholder="Açıklama, hesap adı veya kayıt" aria-describedby="journal-search-hint"><small id="journal-search-hint">Seçili dönemde açıklama, hesap ve kayıt bilgilerini arar.</small></label><label class="field" for="journal-type"><span>İşlem türü</span><select id="journal-type"><option value="all">Bütün işlem türleri</option>' + types.map(([value,label]) => '<option value="'+value+'">'+label+'</option>').join('') + '</select></label><button class="button secondary compact" type="button" id="journal-clear">Filtreleri temizle</button></div><p id="journal-results-count" class="context-note" role="status" aria-live="polite" aria-atomic="true"></p><div id="journal-list"></div><button id="journal-next" type="button" class="button secondary compact" hidden>Sonraki kayıtları göster</button></section>';
   const search = $('#journal-search'), type = $('#journal-type'), scope = $('#journal-scope'), list = $('#journal-list'), notice = $('#journal-results-count'), next = $('#journal-next');
   type.insertAdjacentHTML('beforeend','<option value="saleReturn">Ürün iadesi</option>');
-  $('#journal-clear').insertAdjacentHTML('beforebegin', '<label class="field" for="journal-start"><span>Başlangıç tarihi</span><input id="journal-start" type="date"></label><label class="field" for="journal-end"><span>Bitiş tarihi</span><input id="journal-end" type="date"></label><label class="field" for="journal-account"><span>Hesap</span><select id="journal-account"><option value="">Bütün hesaplar</option>' + state.accounts.map(a=>`<option value="${esc(a.id)}">${esc(a.name)} · ${esc(units[a.unit].label)}${a.retired?' · eski hesap':''}</option>`).join('') + '</select></label>');
+  const hasCombobox = Boolean(globalThis.DefterCombobox?.enhanceSelect);
+  const accountOptionsMarkup = hasCombobox
+    ? '<option value="">Bütün hesaplar</option>'
+    : '<option value="">Bütün hesaplar</option>' + state.accounts.map(a=>`<option value="${esc(a.id)}">${esc(a.name)} · ${esc(units[a.unit].label)}${a.retired?' · eski hesap':''}</option>`).join('');
+  $('#journal-clear').insertAdjacentHTML('beforebegin', '<label class="field" for="journal-start"><span>Başlangıç tarihi</span><input id="journal-start" type="date"></label><label class="field" for="journal-end"><span>Bitiş tarihi</span><input id="journal-end" type="date"></label><label class="field" for="journal-account"><span>Hesap</span><select id="journal-account">' + accountOptionsMarkup + '</select></label>');
   const start = $('#journal-start'), end = $('#journal-end'), selectedAccount = $('#journal-account');
+  const savedFilters = journalFilterMemory.get(workspace);
+  const selectedAccountCb = hasCombobox ? globalThis.DefterCombobox.enhanceSelect(selectedAccount, {
+    items: state.accounts.map(a => ({
+      id: a.id,
+      label: a.name,
+      unit: a.unit,
+      subtitle: units[a.unit]?.label || a.unit,
+      badge: a.retired ? 'Eski hesap' : '',
+      phone: a.phone || '',
+      taxId: a.taxId || '',
+      keywords: [a.id, units[a.unit]?.label, a.retired ? 'eski hesap' : ''].filter(Boolean).join(' ')
+    })),
+    value: savedFilters?.accountId || '',
+    allowEmpty: true,
+    clearable: true,
+    emptyLabel: 'Bütün hesaplar',
+    placeholder: 'Hesap ara veya tümü…',
+    invalidTextBehavior: 'revert',
+    formatSelectedText: item => `${item.label} · ${units[item.unit]?.label || item.unit}`
+  }) : null;
   const filterShell=$('.journal-filters'),primaryFilters=document.createElement('div'),secondaryFilters=document.createElement('div');
   primaryFilters.className='journal-filters-primary';secondaryFilters.className='journal-filters-secondary';
   for(const control of [scope,search])primaryFilters.append(control.closest('label'));
@@ -2796,8 +3090,7 @@ function renderJournal() {
   filterShell.append(primaryFilters,advFilters);
   filterShell.insertAdjacentHTML('afterend','<p id="journal-active-filters" class="context-note" role="status" aria-live="polite"></p>');
   const readFilters = () => ({scope:scope.value,q:search.value.trim(),type:type.value,startDate:start.value,endDate:end.value,accountId:selectedAccount.value});
-  const savedFilters = journalFilterMemory.get(workspace);
-  if (savedFilters) { scope.value=savedFilters.scope;search.value=savedFilters.q;type.value=savedFilters.type;start.value=savedFilters.startDate||'';end.value=savedFilters.endDate||'';selectedAccount.value=savedFilters.accountId||''; }
+  if (savedFilters) { scope.value=savedFilters.scope;search.value=savedFilters.q;type.value=savedFilters.type;start.value=savedFilters.startDate||'';end.value=savedFilters.endDate||'';setSelectControlValue(selectedAccount, savedFilters.accountId || '', { emit: false }); }
   if (type.value !== 'all' || start.value || end.value || selectedAccount.value) advFilters.open = true;
   const journalSplit = document.createElement('div');
   journalSplit.className = 'workbench-split journal-split';
@@ -2807,15 +3100,21 @@ function renderJournal() {
   detailPane.hidden = true;
   list.before(journalSplit);
   journalSplit.append(list, detailPane);
-  const normalizeSearch = value => value.toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i');
-  const searchable = event => normalizeSearch([event.label,event.date,event.id,event.meta.note,event.meta.productCategory,account(event.meta.counterpartyId)?.name,...event.entries.map(row => account(row.accountId).name)].filter(Boolean).join(' '));
+  const searchable = event => normalize([event.label,event.date,event.id,event.meta.note,event.meta.productCategory,account(event.meta.counterpartyId)?.name,...event.entries.map(row => account(row.accountId).name)].filter(Boolean).join(' '));
   const current = () => list.isConnected && view === 'journal' && workspace === selectedWorkspace && state.revision === expectedRevision;
+  let searchDebounceTimer = null, activeJournalController = null;
+  const cancelSearchDebounce = () => {
+    if (searchDebounceTimer) {
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = null;
+    }
+  };
   const updateClear = () => {
     $('#journal-clear').disabled = !search.value.trim() && type.value === 'all' && !start.value && !end.value && !selectedAccount.value;
-    const labels=[scope.selectedOptions[0].textContent];if(search.value.trim())labels.push('Arama: '+search.value.trim());if(type.value!=='all')labels.push(type.selectedOptions[0].textContent);if(start.value)labels.push('Başlangıç: '+day(start.value));if(end.value)labels.push('Bitiş: '+day(end.value));if(selectedAccount.value)labels.push(selectedAccount.selectedOptions[0].textContent);
+    const labels=[scope.selectedOptions[0].textContent];if(search.value.trim())labels.push('Arama: '+search.value.trim());if(type.value!=='all')labels.push(type.selectedOptions[0].textContent);if(start.value)labels.push('Başlangıç: '+day(start.value));if(end.value)labels.push('Bitiş: '+day(end.value));if(selectedAccount.value)labels.push(selectedAccount.selectedOptions[0]?.textContent || selectedAccountCb?.getSelectedItem()?.label || selectedAccount.value);
     $('#journal-active-filters').textContent='Görüntülenen kapsam: '+labels.join(' · ');
   };
-  const clear = () => { search.value='';type.value='all';start.value='';end.value='';selectedAccount.value='';update();search.focus({preventScroll:true}); };
+  const clear = () => { cancelSearchDebounce();search.value='';type.value='all';start.value='';end.value='';setSelectControlValue(selectedAccount,'',{emit:false});update();search.focus({preventScroll:true}); };
   const display = (items,reversed,context=[]) => {
     const filtered = search.value.trim() || type.value !== 'all' || start.value || end.value || selectedAccount.value;
     list.innerHTML = items.length ? items.map(event=>journalItemMarkup(event,reversed,[...context,...items])).join('') : filtered ? '<div class="empty"><strong class="empty-state-title">Eşleşen kayıt bulunamadı</strong><p>Aramayı değiştirin veya işlem türü filtresini temizleyin.</p><button type="button" id="journal-empty-clear" class="button secondary compact">Filtreleri temizle</button></div>' : '<div class="empty"><strong class="empty-state-title">Bu dönemde kayıt yok</strong><p>Önceki gün kayıtları için “Bütün geçmiş” seçin.</p></div>';
@@ -2838,7 +3137,7 @@ function renderJournal() {
       const event=items[index];
       if(event.meta.supplierId){
         const button=document.createElement('button');button.type='button';button.className='button secondary compact';button.textContent='Firma hareketlerini aç';button.dataset.supplierHistory=event.meta.supplierId;
-        button.addEventListener('click',()=>{supplierMemory.set('supplier:view:'+workspace,{partyId:event.meta.supplierId,kind:'history'});setView('suppliers');});article.append(button);
+        button.addEventListener('click',()=>{supplierMemory.set('supplier:view:'+workspace,{partyId:event.meta.supplierId,kind:'history'});setView('suppliers',{id:event.meta.supplierId});});article.append(button);
       }
       const inspectBtn=document.createElement('button');inspectBtn.type='button';inspectBtn.className='button text compact';inspectBtn.textContent='Yan panelde incele';inspectBtn.dataset.journalInspect=event.id;
       inspectBtn.addEventListener('click',()=>{
@@ -2851,11 +3150,11 @@ function renderJournal() {
       });
       article.append(inspectBtn);
       article.querySelector('.journal-head').insertAdjacentHTML('afterend',`<p class="journal-record-context">Kayıt: ${esc(event.id)}${event.meta.originalId?` · İlgili kayıt: ${esc(event.meta.originalId)}`:''}</p>`);
-      const edit=article.querySelector('.journal-actions'),returns=article.querySelector('.sale-return-form')?.closest('details');
+      const edit=article.querySelector('.journal-actions'),returns=article.querySelector('details[data-sale-return]');
       const reverse=article.querySelector('.reverse-form')?.closest('details');
       if(reverse && event.meta.exchangeId) reverse.querySelector('summary').textContent='Değişimin iki kaydını geri al';
       if(edit){edit.insertAdjacentHTML('beforeend','<p>Eski etkiler geri alınır; yeni bilgiler tek düzeltme işleminde uygulanır.</p>');}
-      if(returns){returns.classList.add('journal-action-return');returns.querySelector('summary').insertAdjacentHTML('beforeend','<small>Geri gelen ürünleri ve müşteriye verilen karşılığı gösterir.</small>');article.append(returns);}
+      if(returns){returns.classList.add('journal-action-return');const sumEl=returns.querySelector('summary');if(sumEl&&!sumEl.querySelector('small'))sumEl.insertAdjacentHTML('beforeend','<small>Geri gelen ürünleri ve müşteriye verilen karşılığı gösterir.</small>');article.append(returns);}
       if(reverse){reverse.classList.add('journal-action-reverse');reverse.querySelector('summary').insertAdjacentHTML('beforeend',`<small>${event.type==='saleReturn'?'Yalnız bu iadenin stok ve ödeme etkileri geri alınır; asıl satış korunur.':'Bu kaydın stok, ödeme ve cari etkilerinin tamamı ters uygulanır.'}</small>`);if(event.type==='sale')reverse.querySelector('summary').insertAdjacentHTML('afterend','<p class="context-note">Aktif ürün iadesi bulunan satışın tam iptali yapılamaz. Önce bağlı iadeleri kontrol edin.</p>');article.append(reverse);}
     });
     enhanceTables(list); connectFieldHints(list); prepareDraftForms();
@@ -2883,7 +3182,7 @@ function renderJournal() {
     });
   };
   const drawLocal = () => {
-    const query=normalizeSearch(search.value.trim()),period=state.journal.filter(event=>(scope.value==='all'||event.date===state.date)&&(!start.value||event.date>=start.value)&&(!end.value||event.date<=end.value)&&(!selectedAccount.value||event.meta.counterpartyId===selectedAccount.value||event.entries.some(row=>row.accountId===selectedAccount.value)));
+    const query=normalize(search.value.trim()),period=state.journal.filter(event=>(scope.value==='all'||event.date===state.date)&&(!start.value||event.date>=start.value)&&(!end.value||event.date<=end.value)&&(!selectedAccount.value||event.meta.counterpartyId===selectedAccount.value||event.entries.some(row=>row.accountId===selectedAccount.value)));
     const items=period.filter(event=>(type.value==='all'||event.type===type.value||({money:['movement','transfer','settlement'],inventory:['stock','stocktake','registerItem','releaseItem','itemCostSource'],setup:['opening','nominalOpening','account','accountUpdate','fundAccount','stockAccount','stockUpdate','close']}[type.value]||[]).includes(event.type))&&(!query||searchable(event).includes(query))).slice().reverse();
     display(items,new Set(state.journal.filter(event=>event.type==='reverse').map(event=>event.meta.originalId)));
     notice.textContent=items.length+' kayıt gösteriliyor · seçili dönemde '+period.length+' kayıt';updateClear();
@@ -2893,11 +3192,14 @@ function renderJournal() {
     const ticket=++sequence;
     const filters=append?pageFilters:{...readFilters(),limit:'25'};
     const cursor=append?nextCursor:null;if(append&&!cursor)return;
+    if(activeJournalController){try{activeJournalController.abort();}catch{}}
+    activeJournalController=typeof AbortController==='function'?new AbortController():null;
+    const controller=activeJournalController;
     if(!append){items=[];reversed=new Set();receiptContext=new Map();nextCursor=null;pageFilters=filters;next.hidden=true;list.innerHTML='<div class="loading" role="status">Kayıtlar yükleniyor…</div>';}
     list.setAttribute('aria-busy','true');notice.setAttribute('role','status');notice.textContent='Hareket defteri hazırlanıyor…';next.disabled=true;updateClear();
     try {
       if(filters.startDate && filters.endDate && filters.startDate>filters.endDate)throw new Error('Başlangıç tarihi bitiş tarihinden sonra olamaz.');
-      const page=await request('journal',undefined,selectedWorkspace,{query:{...filters,...(cursor?{cursor}:{})}});
+      const page=await request('journal',undefined,selectedWorkspace,{query:{...filters,...(cursor?{cursor}:{})},signal:controller?.signal});
       if(ticket!==sequence||!current())return;
       if(page.revision!==expectedRevision)throw Object.assign(new Error('Kayıtlar değişti. Defteri yenileyerek listeyi yeniden açın.'),{status:409});
       if(!Array.isArray(page.items)||!Array.isArray(page.reversedIds)||!Number.isSafeInteger(page.total)||page.total<0||!Number.isSafeInteger(page.totalEntries)||page.totalEntries<0||(page.nextCursor!==null&&typeof page.nextCursor!=='string'))throw new Error('Defter sayfası doğrulanamadı.');
@@ -2907,16 +3209,42 @@ function renderJournal() {
       nextCursor=page.nextCursor;display(items,reversed,[...receiptContext.values()]);next.hidden=!nextCursor;
       notice.textContent=items.length+' kayıt gösteriliyor · '+page.total+' eşleşen kayıt · '+page.totalEntries+' bağlı hareket';
     } catch(error) {
+      if(error?.name==='AbortError'||controller?.signal?.aborted)return;
       if(ticket!==sequence||!current())return;
       items=[];reversed.clear();nextCursor=null;next.hidden=true;
       notice.setAttribute('role','alert');notice.textContent=error.status===409?'Kayıtlar değişti. Defteri yenileyerek listeyi yeniden açın.':'Hareket defteri alınamadı: '+error.message;
       list.innerHTML='<div class="empty"><strong class="empty-state-title">Liste yeniden yüklenmeli</strong><p>'+esc(error.message)+'</p><button id="journal-retry" type="button" class="button secondary compact">'+(error.status===409?'Defteri yenile':'Listeyi yeniden dene')+'</button></div>';
       list.querySelector('#journal-retry').addEventListener('click',()=>error.status===409?refresh():loadPage());
-    } finally { if(ticket===sequence&&current()){list.setAttribute('aria-busy','false');next.disabled=false;} }
+    } finally {
+      if(activeJournalController===controller)activeJournalController=null;
+      if(ticket===sequence&&current()){list.setAttribute('aria-busy','false');next.disabled=false;}
+    }
   };
   const update = () => { captureDrafts();journalFilterMemory.set(workspace,readFilters()); return compact ? loadPage() : drawLocal(); };
-  start.addEventListener('change',update);end.addEventListener('change',update);selectedAccount.addEventListener('change',update);
-  scope.addEventListener('change',update);search.addEventListener('input',update);type.addEventListener('change',update);$('#journal-clear').addEventListener('click',clear);next.addEventListener('click',()=>loadPage(true));update();
+  const flushUpdate = () => { cancelSearchDebounce(); update(); };
+  start.addEventListener('change',flushUpdate);end.addEventListener('change',flushUpdate);selectedAccount.addEventListener('change',flushUpdate);
+  scope.addEventListener('change',flushUpdate);type.addEventListener('change',flushUpdate);
+  search.addEventListener('input',()=>{
+    if(!compact){update();return;}
+    cancelSearchDebounce();
+    list.setAttribute('aria-busy','true');
+    notice.setAttribute('role','status');
+    notice.textContent='Aranıyor…';
+    searchDebounceTimer=setTimeout(()=>{
+      searchDebounceTimer=null;
+      if(current())update();
+    },180);
+  });
+  search.addEventListener('keydown',event=>{
+    if(event.key==='Enter'&&compact){
+      event.preventDefault();
+      flushUpdate();
+    }
+  });
+  search.addEventListener('search',()=>{
+    if(compact&&!search.value)flushUpdate();
+  });
+  $('#journal-clear').addEventListener('click',clear);next.addEventListener('click',()=>{cancelSearchDebounce();loadPage(true);});update();
 }
 function restoreFormMarkup() {
   const target = workspace === 'demo' ? 'Örnek defter' : 'Dükkân defteri';
@@ -2994,7 +3322,7 @@ $('#navigation').addEventListener('click', e => { const b = e.target.closest('[d
 $('#refresh').addEventListener('click', () => refresh());
 $('#retry').textContent='Kaydı sorgula / yeniden dene';
 $('#retry').addEventListener('click', () => { if (pending) submit(pending.command, 'Bekleyen işlem doğrulandı.', pending); });
-$('#workspace').addEventListener('change', async e => { captureDrafts(); partyReturnContext=null; ++recoveryGeneration; workspace = e.target.value; localStorage.setItem('defter-workspace', workspace); pending = readPending(); state = null; $('#main').innerHTML = '<div class="loading">Çalışma alanı açılıyor…</div>'; await refresh(); });
+$('#workspace').addEventListener('change', async e => { captureDrafts(); partyReturnContext=null; ++recoveryGeneration; workspace = e.target.value; localStorage.setItem('defter-workspace', workspace); detailId = getSelectedDetailId(view); pending = readPending(); state = null; $('#main').innerHTML = '<div class="loading">Çalışma alanı açılıyor…</div>'; await refresh(); syncUrlHash('replace'); });
 document.addEventListener('invalid', event => {
   const control = event.target;
   if (!control.matches('input, select, textarea')) return;
@@ -3049,12 +3377,14 @@ function handleBrowserNavigation() {
       return;
     }
     if (parsed.normalized) {
-      setView(parsed.view, { fromHistory: true });
+      setView(parsed.view, { fromHistory: true, id: null });
       return;
     }
-    if (parsed.view !== view || (parsed.view === 'transaction' && parsed.tab && parsed.tab !== transactionTab)) {
+    const parsedId = DETAIL_HASH_VIEWS.has(parsed.view) ? (parsed.id || null) : null;
+    const currentId = DETAIL_HASH_VIEWS.has(view) ? (detailId || null) : null;
+    if (parsed.view !== view || (parsed.view === 'transaction' && parsed.tab && parsed.tab !== transactionTab) || parsedId !== currentId) {
       if (parsed.view === 'transaction' && parsed.tab) transactionTab = parsed.tab;
-      setView(parsed.view, { fromHistory: true });
+      setView(parsed.view, { fromHistory: true, id: parsedId });
     }
   } finally {
     handlingHistoryNav = false;
@@ -3062,6 +3392,223 @@ function handleBrowserNavigation() {
 }
 window.addEventListener('popstate', handleBrowserNavigation);
 window.addEventListener('hashchange', handleBrowserNavigation);
+let commandPaletteInitialized = false;
+function initOwnerCommandPalette() {
+  const cp = globalThis.DefterCommandPalette;
+  if (!cp || commandPaletteInitialized) return;
+  commandPaletteInitialized = true;
+  cp.configure({
+    title: 'Komut Paleti',
+    placeholder: 'Ekran, müşteri, stok, toptancı veya işlem ara…',
+    maxResults: 24,
+    maxPerGroup: 8,
+    groupOrder: ['actions', 'navigation', 'records', 'commands'],
+    debounceMs: 0,
+    isBlocked: () => {
+      if (busy || !state) return { blocked: true, reason: 'Defter hazır değil.' };
+      if (!state.initialized) return { blocked: true, reason: 'Önce başlangıç devrini onaylayın.' };
+      if (pending) return { blocked: true, reason: 'Önce sonucu belirsiz son isteği doğrulayın.' };
+      return { blocked: false };
+    },
+    onBlocked: reason => inform(reason, true)
+  });
+
+  const guardAction = fn => () => {
+    if (busy || !state) {
+      inform('Defter hazır değil.', true);
+      return;
+    }
+    if (pending) {
+      inform('Önce sonucu belirsiz son isteği doğrulayın.', true);
+      return;
+    }
+    fn();
+  };
+
+  cp.registerProvider({
+    id: 'owner-actions',
+    group: 'actions',
+    groupLabel: 'Hızlı İşlemler',
+    priority: 10,
+    when: () => Boolean(state?.initialized),
+    getItems: () => [
+      {
+        id: 'act-sale',
+        title: 'Satış Yap',
+        subtitle: 'Yeni müşteri satışı başlat',
+        keywords: 'satis yeni satis perakende',
+        when: () => Boolean(state?.initialized && !state?.nominalUnconfirmed),
+        action: guardAction(() => { transactionTab = 'sale'; setView('transaction'); })
+      },
+      {
+        id: 'act-purchase',
+        title: 'Müşteriden Alış Yap',
+        subtitle: 'Müşteriden ürün veya hurda alışı başlat',
+        keywords: 'alis musteriden alis hurda',
+        when: () => Boolean(state?.initialized && !state?.nominalUnconfirmed),
+        action: guardAction(() => { transactionTab = 'purchase'; setView('transaction'); })
+      },
+      {
+        id: 'act-collection',
+        title: 'Cari Tahsilat / Ödeme',
+        subtitle: 'Açık cari borç veya alacak kapat',
+        keywords: 'cari tahsilat odeme alacak borc',
+        action: guardAction(() => { transactionTab = 'collection'; setView('transaction'); })
+      },
+      {
+        id: 'act-movement',
+        title: 'Gider / Sermaye',
+        subtitle: 'İşletme gideri veya sermaye hareketi başlat',
+        keywords: 'gider sermaye cekis para hareket',
+        action: guardAction(() => { transactionTab = 'movement'; setView('transaction'); })
+      },
+      {
+        id: 'act-quick-customer',
+        title: 'Hızlı Müşteri Kartı Oluştur',
+        subtitle: 'Yeni müşteri kartı çekmecesini aç',
+        keywords: 'hizli musteri yeni kart ekle',
+        action: guardAction(() => {
+          if (view !== 'transaction' || transactionTab !== 'sale') {
+            transactionTab = 'sale';
+            setView('transaction');
+          }
+          document.querySelector('[data-create-party]')?.click();
+        })
+      },
+      {
+        id: 'act-quick-stock',
+        title: 'Yeni Stok Kartı',
+        subtitle: 'Stok kartı çekmecesini aç',
+        keywords: 'yeni stok kart urun ekle',
+        when: () => Boolean(state?.initialized && !state?.nominalUnconfirmed),
+        action: guardAction(() => {
+          if (view !== 'transaction' || transactionTab !== 'sale') {
+            transactionTab = 'sale';
+            setView('transaction');
+          }
+          document.querySelector('[data-create-stock]')?.click();
+        })
+      },
+      {
+        id: 'act-nominal-confirm',
+        title: 'Nominal Gram Altın Açılışını Onayla',
+        subtitle: 'Gerçek toplam gram altın açılış alanına git',
+        keywords: 'nominal gram altin acilis onay',
+        when: () => Boolean(state?.initialized && state?.nominalUnconfirmed),
+        action: guardAction(() => {
+          if (view !== 'overview') setView('overview');
+          document.querySelector('#nominal-quantity')?.focus();
+        })
+      }
+    ]
+  });
+
+  cp.registerProvider({
+    id: 'owner-navigation',
+    group: 'navigation',
+    groupLabel: 'Ekranlar',
+    priority: 20,
+    getItems: () => [
+      { id: 'nav-overview', title: 'Günün Görünümü', keywords: 'ozet anasayfa gunun gorunumu', when: () => Boolean(state?.initialized), action: guardAction(() => setView('overview')) },
+      { id: 'nav-accounts', title: 'Müşteri Ekranı', keywords: 'musteriler musteri cari hesaplar', when: () => Boolean(state?.initialized), action: guardAction(() => setView('accounts', { id: null })) },
+      { id: 'nav-suppliers', title: 'Toptancılar', keywords: 'toptanci firma tedarikci', when: () => Boolean(state?.initialized), action: guardAction(() => setView('suppliers', { id: null })) },
+      { id: 'nav-stocks', title: 'Stok Ekranı', keywords: 'stoklar urun envanter', when: () => Boolean(state?.initialized), action: guardAction(() => setView('stocks', { id: null })) },
+      { id: 'nav-banks', title: 'Banka/Pos/Kasa', keywords: 'banka pos kasa likit', when: () => Boolean(state?.initialized), action: guardAction(() => setView('banks')) },
+      { id: 'nav-journal', title: 'Günlük İşlemler', keywords: 'yevmiye fis gecmis kayitlar', when: () => Boolean(state?.initialized), action: guardAction(() => setView('journal')) },
+      { id: 'nav-closing', title: 'Sayım ve Kapanış', keywords: 'sayim kapanis tartim devir', when: () => Boolean(state?.initialized && !state?.nominalUnconfirmed), action: guardAction(() => setView('closing')) },
+      { id: 'nav-summary', title: 'Günlük İşletme Özeti', keywords: 'rapor isletme ozeti cetvel', when: () => Boolean(state?.initialized), action: guardAction(() => setView('summary')) },
+      { id: 'nav-backup', title: 'Yedek ve Çalışma Alanı', keywords: 'yedek arsiv geri yukle calisma alani', when: () => Boolean(state), action: guardAction(() => setView('backup')) },
+      {
+        id: 'nav-users',
+        title: 'Çalışan Hesapları',
+        subtitle: 'Kullanıcı yönetimi sayfasına geç',
+        keywords: 'calisan kullanici yetki hesap',
+        when: () => Boolean(state?.initialized),
+        action: guardAction(() => {
+          captureDrafts();
+          window.location.assign('/users');
+        })
+      }
+    ]
+  });
+
+  let cachedRecAccSrc = null, cachedRecSupSrc = null, cachedRecNominal = null, cachedRecItems = [];
+  const getOwnerRecordItems = () => {
+    const accSrc = state?.accounts || null;
+    const supSrc = state?.supplierParties || null;
+    const nomUnconfirmed = Boolean(state?.nominalUnconfirmed);
+    if (!Array.isArray(accSrc)) return [];
+    if (accSrc !== cachedRecAccSrc || supSrc !== cachedRecSupSrc || nomUnconfirmed !== cachedRecNominal) {
+      cachedRecAccSrc = accSrc;
+      cachedRecSupSrc = supSrc;
+      cachedRecNominal = nomUnconfirmed;
+      const next = [];
+      for (const a of accSrc) {
+        if (a.kind === 'receivable' && (a.partyType || 'customer') === 'customer') {
+          next.push({
+            id: `account:${a.id}`,
+            title: a.name,
+            subtitle: ['Müşteri', units[a.unit]?.label || a.unit, a.phone, a.taxId ? `TC/VKN ${a.taxId}` : ''].filter(Boolean).join(' · '),
+            badge: a.unit,
+            keywords: [a.id, a.phone, a.taxId, units[a.unit]?.label].filter(Boolean),
+            disabled: Boolean(a.retired),
+            retired: Boolean(a.retired),
+            disabledReason: a.retired ? 'Pasif' : '',
+            action: a.retired ? undefined : guardAction(() => setView('accounts', { id: a.id }))
+          });
+        } else if (isStockAccount(a) && !(a.id === 'gramToplam' && nomUnconfirmed)) {
+          next.push({
+            id: `stock:${a.id}`,
+            title: a.name,
+            subtitle: ['Stok', units[a.unit]?.label || a.unit].join(' · '),
+            badge: a.unit,
+            keywords: [a.id, units[a.unit]?.label].filter(Boolean),
+            disabled: Boolean(a.retired),
+            retired: Boolean(a.retired),
+            disabledReason: a.retired ? 'Pasif' : '',
+            action: a.retired ? undefined : guardAction(() => setView('stocks', { id: a.id }))
+          });
+        }
+      }
+      for (const p of (Array.isArray(supSrc) ? supSrc : [])) {
+        next.push({
+          id: `supplier:${p.id}`,
+          title: p.name,
+          subtitle: ['Toptancı', p.phone, p.taxId ? `TC/VKN ${p.taxId}` : '', p.accounts?.length ? `${p.accounts.length} birim` : 'Hesap birimi yok'].filter(Boolean).join(' · '),
+          badge: 'Toptancı',
+          keywords: [p.id, p.phone, p.taxId, ...(p.accounts || []).map(x => x.unit)].filter(Boolean),
+          action: guardAction(() => {
+            supplierMemory.set('supplier:view:' + workspace, { partyId: p.id, kind: null });
+            setView('suppliers', { id: p.id });
+          })
+        });
+      }
+      cachedRecItems = next;
+    }
+    return cachedRecItems;
+  };
+
+  cp.registerProvider({
+    id: 'owner-records',
+    group: 'records',
+    groupLabel: 'Kayıtlar ve Kartlar',
+    priority: 30,
+    maxItems: 8,
+    when: () => Boolean(state?.initialized),
+    getItems: getOwnerRecordItems
+  });
+
+  cp.registerProvider({
+    id: 'owner-commands',
+    group: 'commands',
+    groupLabel: 'Yardımcı Komutlar',
+    priority: 40,
+    getItems: () => [
+      { id: 'cmd-refresh', title: 'Defteri Yenile', keywords: 'yenile tazele guncelle', action: guardAction(() => void refresh()) },
+      { id: 'cmd-theme', title: 'Gece / Gündüz Modunu Değiştir', keywords: 'tema gece gunduz karanlik aydinlik', action: () => { $('#theme-toggle')?.click(); } }
+    ]
+  });
+}
 async function start() {
   applyTheme(localStorage.getItem('defter-theme')||'light');
   $('#theme-toggle')?.addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));
@@ -3081,16 +3628,20 @@ async function start() {
   if (initialHash) {
     view = initialHash.view;
     if (initialHash.view === 'transaction' && initialHash.tab) transactionTab = initialHash.tab;
+    if (DETAIL_HASH_VIEWS.has(initialHash.view)) {
+      detailId = initialHash.id || null;
+      setSelectedDetailId(initialHash.view, detailId);
+    }
   }
   $('#workspace').value = workspace;
+  initOwnerCommandPalette();
   await refresh(false);
   syncUrlHash('replace');
 }
 start();
 
 function inventoryMatches(item, query) {
-  const normalize = value => String(value || '').toLocaleLowerCase('tr').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ı/g, 'i');
-  return normalize([item.code, item.barcode, item.description, account(item.accountId)?.name].join(' ')).includes(normalize(query.trim()));
+  return matchesSearchText([item.code, item.barcode, item.description, account(item.accountId)?.name], query);
 }
 
 function inventoryLabel(item) {
@@ -3233,8 +3784,11 @@ function lockInventoryRow(row, item, code) {
     genericSearch.closest('.sale-product-search').hidden = true;
   }
   for (const key of ['accountId','quantity','weightAccount','weight']) row.querySelector(`[data-item-field="${key}"]`).disabled = true;
-  const selected = row.querySelector('[data-item-field="accountId"]').selectedOptions[0];
+  const productSelect = row.querySelector('[data-item-field="accountId"]');
+  const selected = productSelect.selectedOptions?.[0];
   if (selected && item) selected.textContent = account(item.accountId).name + ' · 1 tekil ürün';
+  const productCb = globalThis.DefterCombobox?.getInstance?.(productSelect);
+  if (productCb && item) productCb.input.value = account(item.accountId).name + ' · 1 tekil ürün';
   const note = row.querySelector('[data-stock-note]');
   note.hidden = false;
   note.textContent = item ? 'Tekil ürün · ' + inventoryLabel(item) : 'Tekil ürün bulunamadı · ' + code;
@@ -3259,8 +3813,7 @@ function bindSaleInventory(form, rows, addRow, updateTotals) {
     if (!row) row = addRow();
     if (!row) return;
     const control = key => row.querySelector(`[data-item-field="${key}"]`);
-    control('accountId').value = item.accountId;
-    control('accountId').dispatchEvent(new Event('change', { bubbles:true }));
+    setSelectControlValue(control('accountId'), item.accountId, { emit: true });
     control('quantity').value = '1';
     if (item.weightAccount) { control('weightAccount').value = item.weightAccount; control('weight').value = raw(item.actualWeight,'GRAM'); }
     lockInventoryRow(row, item, item.code);

@@ -4,7 +4,10 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
 const codec = globalThis.DefterAmountCodec;
 const dateFmt = globalThis.DefterDateFormat;
 const uiKit = (typeof window !== 'undefined' && window.DefterUI) || globalThis.DefterUI || null;
-const normalize = value => String(value || '').toLocaleLowerCase('tr').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i');
+const comboboxLib = (typeof window !== 'undefined' && window.DefterCombobox) || globalThis.DefterCombobox || null;
+const paletteLib = (typeof window !== 'undefined' && window.DefterCommandPalette) || globalThis.DefterCommandPalette || null;
+const searchNorm = (typeof window !== 'undefined' && window.DefterSearchNorm) || globalThis.DefterSearchNorm || null;
+const normalize = value => searchNorm ? searchNorm.normalizeSearch(value) : String(value || '').toLocaleLowerCase('tr').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i');
 const scale = unit => codec ? codec.units[unit].scale : (unit === 'ADET' ? 1 : ['GRAM','HAS','SILVER'].includes(unit) ? 1000 : 100);
 const format = (value, unit='TL') => codec ? codec.formatAmount(value, unit) : ((value/scale(unit)).toLocaleString('tr-TR',{minimumFractionDigits:unit==='ADET'?0:unit==='GRAM'?3:2,maximumFractionDigits:scale(unit)===1000?3:2})+' '+({ADET:'adet',GRAM:'gr',HAS:'has gr',SILVER:'saf gümüş gr'}[unit] || unit));
 const decimal = value => String(value || '').trim().replace(',','.');
@@ -17,7 +20,7 @@ const groupNames = {received:'İşletmeye alınan',given:'İşletmeden verilen',
 let snapshot, pending, review, selectedCustomer = null, writing = false, rendering = false, customerLoading = false;
 let workspace = $('workspace').value, operation = $('operation').value;
 let loadSequence = 0, customerSequence = 0, draftRevision, draftDate, draftDirty = false, externalRevision = 0, stockPage = 0;
-let activeCustomerDrawer = null, flowMode = 'quick', manualFlowMode = null, activeStep = 1;
+let activeCustomerDrawer = null, flowMode = 'quick', manualFlowMode = null, activeStep = 1, customerCombobox = null, quickFillCashBtn = null;
 const defaultDraftStore = {
   PREFIX: 'defter-draft:v1:',
   PENDING_PREFIX: 'defter-draft:v1:pending:',
@@ -79,6 +82,24 @@ function getDraftStore() {
 }
 const actorId = () => current()?.actor?.id || 'owner';
 const route = (path, selected=workspace) => '/api/'+path+'?workspace='+encodeURIComponent(selected);
+async function apiWithSignal(path, signal) {
+  const session = current?.();
+  if (session?.token && typeof fetch === 'function') {
+    const res = await fetch(path, {
+      headers: { Authorization: 'Bearer ' + session.token },
+      signal
+    });
+    const data = await res.json();
+    if (res.status === 401 && session && location.pathname !== '/') window.DefterSession?.lock?.();
+    if (!res.ok) {
+      const err = new Error(data?.error || 'İstek tamamlanamadı.');
+      err.status = res.status;
+      throw err;
+    }
+    return data;
+  }
+  return api(path);
+}
 const draftStoreKey = (selected=workspace, kind=operation) => getDraftStore().makeKey({ actorId: actorId(), workspace: selected, scope: 'checkout', type: kind });
 const pendingStoreKey = (selected=workspace) => {
   const store = getDraftStore();
@@ -218,6 +239,10 @@ function controls() {
   $('trade-controls').disabled=blocked;
   for (const el of $('customer-form').elements) el.disabled=blocked;
   for (const id of ['search','customer','operation','clear-draft','add-item']) $(id).disabled=blocked;
+  customerCombobox?.setDisabled?.(blocked);
+  if ($('items')) for (const row of $('items').children) row._productCombobox?.setDisabled?.(blocked);
+  for (const kind of groups) if ($(kind)) for (const row of $(kind).children) row._accountCombobox?.setDisabled?.(blocked);
+  if (quickFillCashBtn) quickFillCashBtn.disabled = blocked;
   if ($('open-customer-drawer')) $('open-customer-drawer').disabled=blocked;
   const quickBtn = document.querySelector('[data-flow-mode="quick"]');
   const guidedBtn = document.querySelector('[data-flow-mode="guided"]');
@@ -289,6 +314,57 @@ function configureItem(row,clear=false) {
     row.querySelector('[data-weight]').value=serial.actualWeight?(serial.actualWeight/1000).toFixed(3):'';
   }
 }
+function productChoices() {
+  const items = [], sale = operation === 'sale';
+  for (const product of snapshot?.products || []) {
+    if (!(sale ? product.canSell : product.canBuy)) continue;
+    const avail = product.freeQuantity ?? product.quantity ?? 0;
+    const hasPool = !product.weights?.length || product.weights.some(w => (w.freeQuantity ?? w.quantity ?? 0) > 0);
+    const isZeroStock = sale && (avail <= 0 || !hasPool);
+    items.push({
+      id: product.id,
+      label: product.name,
+      unit: product.unit,
+      subtitle: sale ? `Mevcut: ${format(avail, product.unit)}` : '',
+      badge: product.scrap ? 'Hurda' : '',
+      keywords: [product.id, ...product.weights.map(w => w.name)].join(' '),
+      disabled: isZeroStock,
+      disabledReason: isZeroStock ? 'Stok yok' : '',
+      available: !isZeroStock
+    });
+  }
+  if (sale) {
+    for (const piece of snapshot?.inventoryItems || []) {
+      const product = snapshot.products.find(p => p.id === piece.accountId);
+      if (!product?.canSell) continue;
+      items.push({
+        id: 'serial:' + piece.code,
+        label: [piece.code, product.name, piece.description].filter(Boolean).join(' · '),
+        unit: product.unit,
+        code: piece.code,
+        barcode: piece.barcode || '',
+        badge: 'Tekil',
+        subtitle: [piece.barcode ? 'Barkod: ' + piece.barcode : '', piece.actualWeight ? format(piece.actualWeight, 'GRAM') : ''].filter(Boolean).join(' · '),
+        keywords: [product.name, piece.code, piece.barcode, piece.description, ...product.weights.map(w => w.name)].filter(Boolean).join(' '),
+        disabled: false,
+        available: true
+      });
+    }
+  }
+  items.sort((a, b) => Number(!!a.disabled) - Number(!!b.disabled));
+  return items;
+}
+function syncProductSelect(row, items, selectedId) {
+  const select = row.querySelector('[data-product]');
+  if (!select) return;
+  if (items.length <= 50) {
+    select.innerHTML = items.map(m => '<option value="' + esc(m.id) + '"' + (m.code ? ' data-code="' + esc(m.code) + '"' : '') + '>' + esc(m.label) + '</option>').join('');
+  } else {
+    const selected = items.find(m => m.id === selectedId);
+    select.innerHTML = '<option value="">Ürün seçin</option>' + (selected ? '<option value="' + esc(selected.id) + '"' + (selected.code ? ' data-code="' + esc(selected.code) + '"' : '') + '>' + esc(selected.label) + '</option>' : '');
+  }
+  select.value = selectedId || '';
+}
 function listProducts(row,preserve) {
   const search=row.querySelector('[data-product-search]').value, normalized=normalize(search), literal=search.trim().toLocaleLowerCase('tr');
   const selected=preserve || row.querySelector('[data-product]').value;
@@ -318,18 +394,78 @@ function addItem(data={}) {
   const row=document.createElement('article');row.className='checkout-line';row.dataset.item='';
   row.innerHTML='<div class="access-bar"><strong data-title></strong><button type="button" data-remove class="button text">Satırı kaldır</button></div><label>Ürün ara<input data-product-search type="search" autocomplete="off" maxlength="160" placeholder="Kod, barkod, ad veya ayar"></label><p data-results role="status"></p><label>Ürün<select data-product required></select></label><small data-available></small><div class="access-columns">'+numeric('data-quantity','<span data-quantity-label>Miktar</span>')+numeric('data-value','Satır toplamı · TL')+'</div><div data-weight-fields class="access-columns" hidden><label>Ayar hesabı<select data-pool></select></label>'+numeric('data-weight','Gerçek gram',false)+'</div><details data-price'+(operation==='purchase'?' hidden':'')+'><summary>Fiyat ayrıntıları · isteğe bağlı</summary><div class="access-columns">'+numeric('data-quoted','Teklif edilen satır bedeli · TL',false)+'<label>Fiyat kaynağı<input data-source maxlength="120"></label></div><div data-components></div><button type="button" data-add-component class="button secondary compact">Fiyat bileşeni ekle</button></details>';
   $('items').append(row);
-  row.querySelector('[data-product-search]').value=data.search || '';
-  listProducts(row,data.selection);
+  const searchInput=row.querySelector('[data-product-search]');
+  const productSelect=row.querySelector('[data-product]');
+  if(comboboxLib){
+    const resultsEl=row.querySelector('[data-results]');
+    if(resultsEl)resultsEl.hidden=true;
+    const selectLabel=productSelect.closest('label');
+    if(selectLabel)selectLabel.hidden=true;
+    productSelect.tabIndex=-1;
+    productSelect.setAttribute('aria-hidden','true');
+    const items=productChoices();
+    const initialId=data.selection || items.find(it=>!it.disabled)?.id || '';
+    const cbItems=(data.selection && !items.some(it=>it.id===data.selection))
+      ? [{id:data.selection,label:data.selection+' · yeniden seçin',disabled:false},...items]
+      : items;
+    syncProductSelect(row,cbItems,initialId);
+    configureItem(row,false);
+    let syncingProduct=false;
+    const productCb=comboboxLib.create({
+      input:searchInput,
+      label:'Ürün',
+      placeholder:'Kod, barkod, ad veya ayar',
+      items:cbItems,
+      value:initialId,
+      allowEmpty:false,
+      clearable:false,
+      required:true,
+      maxResults:20,
+      openOnFocus:true,
+      invalidTextBehavior:'error',
+      emptyMessage:'Eşleşen ürün yok.',
+      onChange:(val,_item,meta)=>{
+        if(syncingProduct)return;
+        syncingProduct=true;
+        try{
+          const changedProduct=productSelect.value!==val;
+          syncProductSelect(row,cbItems,val);
+          if(changedProduct)configureItem(row,true);
+          changed();
+        }finally{syncingProduct=false;}
+        if(meta?.source==='keyboard'||meta?.source==='pointer'){
+          const nextTarget=itemProduct(row).serial?row.querySelector('[data-value]'):row.querySelector('[data-quantity]');
+          if(nextTarget&&!nextTarget.disabled){
+            if(meta.source==='keyboard')nextTarget.focus();
+            else queueMicrotask(()=>nextTarget.focus());
+          }
+        }
+      }
+    });
+    row._productCombobox=productCb;
+    productSelect.addEventListener('change',()=>{
+      if(syncingProduct)return;
+      syncingProduct=true;
+      try{
+        productCb.setValue(productSelect.value,{emitChange:false});
+        configureItem(row,true);
+        changed();
+      }finally{syncingProduct=false;}
+    });
+  }else{
+    searchInput.value=data.search || '';
+    listProducts(row,data.selection);
+    searchInput.addEventListener('input',()=>{listProducts(row);changed();});
+    searchInput.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();(itemProduct(row).serial?row.querySelector('[data-value]'):row.querySelector('[data-quantity]')).focus();}});
+    productSelect.addEventListener('change',()=>{configureItem(row,true);changed();});
+  }
   for(const key of ['quantity','value','weight']) row.querySelector('[data-'+key+']').value=data[key] ?? row.querySelector('[data-'+key+']').value;
   if(data.weightAccount) row.querySelector('[data-pool]').value=data.weightAccount;
   row.querySelector('[data-quoted]').value=data.pricing?.quotedTL || '';
   row.querySelector('[data-source]').value=data.pricing?.source || '';
   for(const part of data.pricing?.components || []) priceFields(row,part);
   row.querySelector('[data-add-component]').addEventListener('click',()=>{if(row.querySelector('[data-components]').children.length<12){priceFields(row);changed();}});
-  row.querySelector('[data-product-search]').addEventListener('input',()=>{listProducts(row);changed();});
-  row.querySelector('[data-product-search]').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();(itemProduct(row).serial?row.querySelector('[data-value]'):row.querySelector('[data-quantity]')).focus();}});
-  row.querySelector('[data-product]').addEventListener('change',()=>{configureItem(row,true);changed();});
-  row.querySelector('[data-remove]').addEventListener('click',()=>{row.remove();renumber();changed();});
+  row.querySelector('[data-remove]').addEventListener('click',()=>{row._productCombobox?.destroy?.();row.remove();renumber();changed();});
   renumber();
   return row;
 }
@@ -357,11 +493,21 @@ function allocationOptions(row,preserve) {
   const kind=row.dataset.allocation,cari=['credits','debts'].includes(kind);
   const accounts=allocationChoices(row);
   const select=row.querySelector('[data-account]'),previous=preserve || select.value;
-  select.innerHTML='<option value="">Hesap seçin</option>'+accounts.map(a=>option(a.id,a.name+' · '+a.unit)).join('');
-  if(previous) {
-    if(!accounts.some(a=>a.id===previous)) select.insertAdjacentHTML('beforeend',option(previous,previous+' · yeniden seçin'));
-    select.value=previous;
-  } else if(cari && accounts.length===1) select.value=accounts[0].id;
+  if(row._accountCombobox){
+    const cbItems=accounts.map(a=>({id:a.id,label:a.name,unit:a.unit,subtitle:a.unit,keywords:[a.id,a.name,a.unit].filter(Boolean).join(' ')}));
+    let targetId=previous || '';
+    if(previous && !accounts.some(a=>a.id===previous)) cbItems.push({id:previous,label:previous+' · yeniden seçin',unit:''});
+    else if(!previous && cari && accounts.length===1) targetId=accounts[0].id;
+    row._accountCombobox.setItems(cbItems);
+    if(targetId)row._accountCombobox.setValue(targetId,{emitChange:false});
+    else row._accountCombobox.clear({emitChange:false});
+  }else{
+    select.innerHTML='<option value="">Hesap seçin</option>'+accounts.map(a=>option(a.id,a.name+' · '+a.unit)).join('');
+    if(previous) {
+      if(!accounts.some(a=>a.id===previous)) select.insertAdjacentHTML('beforeend',option(previous,previous+' · yeniden seçin'));
+      select.value=previous;
+    } else if(cari && accounts.length===1) select.value=accounts[0].id;
+  }
   configureAllocation(row);
 }
 function configureAllocation(row) {
@@ -383,14 +529,19 @@ function addAllocation(kind,data={}) {
   row.dataset.category=allocationCategory(kind,data);
   const label={money:'Para hesabı',product:'Ürün',scrap:'Hurda hesabı',customer:'Seçilen müşterinin cari hesabı'}[row.dataset.category];
   row.innerHTML='<label>'+label+'<select data-account required></select></label><div class="access-columns">'+numeric('data-quantity','<span data-quantity-label>Miktar</span>')+'<div data-reference>'+numeric('data-value','Anlaşılmış TL karşılığı')+'</div></div><div data-weight-fields class="access-columns" hidden><label>Ayar hesabı<select data-pool></select></label>'+numeric('data-weight','Gerçek gram',false)+'</div><button type="button" data-remove class="button text">Karşılığı kaldır</button>';
-  $(kind).append(row);allocationOptions(row,data.accountId);
+  $(kind).append(row);
+  const accountSelect=row.querySelector('[data-account]');
+  if(comboboxLib?.enhanceSelect){
+    row._accountCombobox=comboboxLib.enhanceSelect(accountSelect,{smallListThreshold:50,maxNativeOptions:2,allowEmpty:true,emptyLabel:'Hesap seçin',placeholder:'Hesap veya ürün ara…',invalidTextBehavior:'revert',formatSelectedText:item=>item.unit?`${item.label} · ${item.unit}`:item.label});
+  }
+  allocationOptions(row,data.accountId);
   for(const key of ['quantity','weight'])row.querySelector('[data-'+key+']').value=data[key] || '';
   row.querySelector('[data-value]').value=data.valueTL || '';
   if(data.weightAccount)row.querySelector('[data-pool]').value=data.weightAccount;
   configureAllocation(row);
   row.querySelector('[data-account]').addEventListener('change',()=>{for(const key of ['quantity','value','weight'])row.querySelector('[data-'+key+']').value='';configureAllocation(row);changed();});
   row.querySelector('[data-quantity]').addEventListener('input',()=>configureAllocation(row));
-  row.querySelector('[data-remove]').addEventListener('click',()=>{row.remove();changed();});
+  row.querySelector('[data-remove]').addEventListener('click',()=>{row._accountCombobox?.destroy?.();row.remove();changed();});
   return row;
 }
 function draft() {
@@ -472,17 +623,41 @@ function renderLiveSummary() {
     linesList.innerHTML = items.join('') || '<li class="context-note">Henüz satır yok.</li>';
   }
 }
-function selectedPerson(person) {
+function selectedPerson(person, { syncCombobox = true } = {}) {
   selectedCustomer=person;
   $('customer').innerHTML=option('','Müşteri seçilmedi')+(person?option(person.id,person.name+' · '+person.accounts[0].unit):'');
   $('customer').value=person?.id || '';
+  if(syncCombobox&&customerCombobox){
+    if(person){
+      const unit=person.accounts?.[0]?.unit || '';
+      customerCombobox.setValue(person.id,{
+        emitChange:false,
+        item:{
+          id:person.id,
+          label:person.name,
+          unit,
+          phone:person.phone || '',
+          taxId:person.taxId || '',
+          disambiguationLabel:[unit,person.phone,person.taxId?'TC/VKN '+person.taxId:''].filter(Boolean).join(' · ')
+        }
+      });
+    }else{
+      customerCombobox.setValue('',{emitChange:false});
+    }
+  }
   $('customer-balance').textContent=person?person.accounts.map(a=>a.name+' · '+(a.balance<0?'Borcumuz ':a.balance>0?'Alacağımız ':'Bakiye ')+format(Math.abs(a.balance),a.unit)).join(' / '):'';
   for(const kind of ['credits','debts'])for(const row of $(kind).children)allocationOptions(row);
   renderLiveSummary();
 }
 function restoreDraft(saved) {
   rendering=true;
-  for(const id of ['items',...groups])$(id).replaceChildren();
+  for(const id of ['items',...groups]){
+    for(const row of $(id).children){
+      row._productCombobox?.destroy?.();
+      row._accountCombobox?.destroy?.();
+    }
+    $(id).replaceChildren();
+  }
   selectedPerson(saved?.customer || null);
   draftRevision=saved?.revision ?? snapshot.revision;draftDate=saved?.date ?? snapshot.date;
   draftDirty=Boolean(saved);
@@ -517,6 +692,11 @@ function totals() {
     eq.classList.toggle('is-error',!balanced&&!partial);
   }
   for(const btn of document.querySelectorAll('[data-add]'))btn.disabled=$(btn.dataset.add).children.length>=30;
+  if(quickFillCashBtn){
+    const primaryKind=operation==='sale'?'received':'given';
+    const cashAcc=(snapshot?.payments || []).find(p=>p.id==='nakit') || (snapshot?.payments || []).find(p=>p.unit==='TL');
+    quickFillCashBtn.hidden=!(flowMode==='quick'&&$(primaryKind).children.length===0&&total>0&&incomplete===0&&Boolean(cashAcc));
+  }
   renderLiveSummary();
   return {total,difference,incomplete};
 }
@@ -600,13 +780,13 @@ async function refresh() {
 }
 async function lookupCustomer(id) {
   const sequence=++customerSequence,selected=workspace;
-  if(!id){selectedPerson(null);changed();return;}
-  customerLoading=true;selectedPerson(null);changed();status('Müşteri hesabı yükleniyor…');
+  if(!id){selectedPerson(null,{syncCombobox:true});changed();return;}
+  customerLoading=true;selectedPerson(null,{syncCombobox:false});changed();status('Müşteri hesabı yükleniyor…');
   try {
     const person=await api(route('customers',selected)+'&id='+encodeURIComponent(id));
     if(sequence!==customerSequence || selected!==workspace)return;
-    selectedPerson(person);changed();status('');
-  }catch(error){if(sequence===customerSequence){selectedPerson(null);status(error.message);changed();}}
+    selectedPerson(person,{syncCombobox:true});changed();status('');
+  }catch(error){if(sequence===customerSequence){selectedPerson(null,{syncCombobox:true});status(error.message);changed();}}
   finally {if(sequence===customerSequence){customerLoading=false;controls();}}
 }
 async function sendPending() {
@@ -621,8 +801,9 @@ async function sendPending() {
     message=(result.duplicate?'Önceki kayıt doğrulandı. ':'İşlem kaydedildi. ')+'Kayıt '+result.id;
     if(request.kind==='trade') {
       clearStoredDraft(selected,request.operation);
+      customerCombobox?.clear?.({emitChange:false});
       $('search').value='';
-      rendering=true;for(const id of ['items',...groups])$(id).replaceChildren();rendering=false;
+      rendering=true;for(const id of ['items',...groups]){for(const row of $(id).children){row._productCombobox?.destroy?.();row._accountCombobox?.destroy?.();}$(id).replaceChildren();}rendering=false;
       snapshot=null;
     } else {
       if(draftRevision===request.envelope.revision && draftDate===request.envelope.command.date) draftRevision=result.revision;
@@ -818,20 +999,95 @@ $('open-customer-drawer')?.addEventListener('click', () => {
   });
   controls();
 });
+const quickExtrasHost=$('trade')?.querySelector('.checkout-quick-extras');
+if(quickExtrasHost&&!$('quick-fill-cash')){
+  quickFillCashBtn=document.createElement('button');
+  quickFillCashBtn.type='button';
+  quickFillCashBtn.id='quick-fill-cash';
+  quickFillCashBtn.className='button secondary compact';
+  quickFillCashBtn.dataset.quickFillCash='';
+  quickFillCashBtn.textContent='Tam tutarı Nakit doldur';
+  quickFillCashBtn.hidden=true;
+  quickFillCashBtn.addEventListener('click',()=>{
+    if(writing||pending||review||!snapshot)return;
+    const primaryKind=operation==='sale'?'received':'given';
+    const cashAcc=(snapshot?.payments || []).find(p=>p.id==='nakit') || (snapshot?.payments || []).find(p=>p.unit==='TL');
+    if($(primaryKind).children.length>0||!cashAcc)return;
+    const totalsRes=totals();
+    if(totalsRes.total<=0||totalsRes.incomplete>0)return;
+    const row=addAllocation(primaryKind,{category:'money',accountId:cashAcc.id});
+    if(!row)return;
+    const qtyInput=row.querySelector('[data-quantity]');
+    if(qtyInput){
+      qtyInput.value=codec?codec.canonicalFromScaled(totalsRes.total,'TL'):(totalsRes.total/100).toFixed(2);
+      qtyInput.dispatchEvent(new Event('input',{bubbles:true}));
+    }
+    changed({preferredStep:2});
+    $('record')?.focus({preventScroll:true});
+  });
+  quickExtrasHost.prepend(quickFillCashBtn);
+}
 syncCustomerDrawerTrigger();
-$('search').addEventListener('input',async()=>{
-  const sequence=++customerSequence,selected=workspace,query=$('search').value.trim();
-  customerLoading=false;controls();
-  if(query.length<2)return;
-  try {
-    const people=await api(route('customers',selected)+'&q='+encodeURIComponent(query));
-    if(sequence!==customerSequence || selected!==workspace)return;
-    $('customer').innerHTML=option('','Müşteri seçilmedi')+people.map(p=>option(p.id,p.name+' · '+p.unit)).join('');
-    if(selectedCustomer&&!people.some(p=>p.id===selectedCustomer.id))$('customer').insertAdjacentHTML('beforeend',option(selectedCustomer.id,selectedCustomer.name));
-    $('customer').value=selectedCustomer?.id || '';
-    if(!people.length)status('Müşteri bulunamadı. Yeni müşteri kartı açabilirsiniz.');
-  }catch(error){if(sequence===customerSequence)status(error.message);}
-});
+if(comboboxLib&&$('search')){
+  const customerFieldLabel=$('customer')?.closest('label');
+  if(customerFieldLabel)customerFieldLabel.hidden=true;
+  $('customer').tabIndex=-1;
+  $('customer').setAttribute('aria-hidden','true');
+  customerCombobox=comboboxLib.create({
+    input:$('search'),
+    label:'Müşteri ara ve seç',
+    placeholder:'Ad, telefon, TC/VKN veya kod ile ara…',
+    allowEmpty:true,
+    clearable:true,
+    debounceMs:180,
+    minQueryLength:2,
+    maxResults:20,
+    openOnFocus:false,
+    invalidTextBehavior:'error',
+    emptyMessage:'Müşteri bulunamadı. Yeni müşteri kartı açabilirsiniz.',
+    formatSelectedText:item=>item.unit?`${item.label} · ${item.unit}`:item.label,
+    provider:async(query,{signal,limit})=>{
+      const selectedWs=workspace;
+      const url=route('customers',selectedWs)+'&q='+encodeURIComponent(query)+'&limit='+encodeURIComponent(limit||20)+'&meta=1';
+      const data=await apiWithSignal(url,signal);
+      const rawItems=Array.isArray(data)?data:(data?.items||[]);
+      const total=Array.isArray(data)?data.length:(Number.isFinite(Number(data?.total))?Number(data.total):rawItems.length);
+      return {
+        items:rawItems.map(p=>({
+          id:p.id,
+          label:p.name,
+          unit:p.unit||'',
+          phone:p.phone||'',
+          taxId:p.taxId||'',
+          disambiguationLabel:p.disambiguationLabel||[p.unit,p.phone,p.taxId?`TC/VKN ${p.taxId}`:''].filter(Boolean).join(' · ')
+        })),
+        total
+      };
+    },
+    onQuery:()=>{
+      ++customerSequence;
+      customerLoading=false;
+      controls();
+    },
+    onChange:val=>{
+      void lookupCustomer(val);
+    }
+  });
+}else{
+  $('search').addEventListener('input',async()=>{
+    const sequence=++customerSequence,selected=workspace,query=$('search').value.trim();
+    customerLoading=false;controls();
+    if(query.length<2)return;
+    try {
+      const people=await api(route('customers',selected)+'&q='+encodeURIComponent(query));
+      if(sequence!==customerSequence || selected!==workspace)return;
+      $('customer').innerHTML=option('','Müşteri seçilmedi')+people.map(p=>option(p.id,p.name+' · '+p.unit)).join('');
+      if(selectedCustomer&&!people.some(p=>p.id===selectedCustomer.id))$('customer').insertAdjacentHTML('beforeend',option(selectedCustomer.id,selectedCustomer.name));
+      $('customer').value=selectedCustomer?.id || '';
+      if(!people.length)status('Müşteri bulunamadı. Yeni müşteri kartı açabilirsiniz.');
+    }catch(error){if(sequence===customerSequence)status(error.message);}
+  });
+}
 $('customer').addEventListener('change',()=>void lookupCustomer($('customer').value));
 $('customer-form').elements.unit.addEventListener('change',()=>{
   const other=$('customer-form').elements.unit.value==='other';
@@ -846,7 +1102,7 @@ $('customer-form').addEventListener('submit',event=>{
   saveDraft();queue({id:crypto.randomUUID(),revision:snapshot.revision,command:c},'customer');
 });
 $('operation').addEventListener('change',()=>{saveDraft();++customerSequence;customerLoading=false;operation=$('operation').value;review=null;$('review').hidden=true;restoreDraft(readStoredDraft(workspace, operation));status('');});
-$('workspace').addEventListener('change',()=>{saveDraft();workspace=$('workspace').value;++customerSequence;customerLoading=false;selectedCustomer=null;externalRevision=0;snapshot=null;review=null;$('review').hidden=true;$('search').value='';void refresh();});
+$('workspace').addEventListener('change',()=>{saveDraft();workspace=$('workspace').value;++customerSequence;customerLoading=false;selectedCustomer=null;externalRevision=0;snapshot=null;review=null;$('review').hidden=true;customerCombobox?.clear?.({emitChange:false});$('search').value='';void refresh();});
 $('refresh').addEventListener('click',()=>void refresh());
 $('retry').addEventListener('click',()=>void sendPending());
 $('accept-snapshot').addEventListener('click',()=>{if(snapshot){draftRevision=snapshot.revision;draftDate=snapshot.date;changed();}});
@@ -890,4 +1146,168 @@ window.addEventListener('pagehide', () => {
   else draftDirty = false;
   broadcast?.close();
 });
+let checkoutPaletteInitialized=false;
+function initCheckoutCommandPalette(){
+  if(!paletteLib||checkoutPaletteInitialized)return;
+  checkoutPaletteInitialized=true;
+  paletteLib.configure({
+    title:'Tezgâh Komut Paleti',
+    placeholder:'Tezgâh komutu veya müşteri ara…',
+    groupOrder:['actions','navigation','records','commands'],
+    maxResults:24,
+    maxPerGroup:8,
+    debounceMs:150,
+    isBlocked:()=>{
+      if(writing||pending||review)return{blocked:true,reason:pending?'Önce sonucu belirsiz son isteği doğrulayın.':'İşlem devam ederken komut paleti açılamaz.'};
+      if(!snapshot)return{blocked:true,reason:'Tezgâh mevcutları henüz yüklenmedi.'};
+      return false;
+    },
+    onBlocked:reason=>status(reason)
+  });
+
+  paletteLib.registerProvider({
+    id:'checkout-actions',
+    group:'actions',
+    groupLabel:'Tezgâh Araçları',
+    priority:10,
+    getItems:()=>[
+      {
+        id:'checkout-op-sale',
+        group:'navigation',
+        groupLabel:'İşlem Türü',
+        title:'Müşteriye satış moduna geç',
+        keywords:'satis musteriye satis mod',
+        badge:operation==='sale'?'Aktif':'',
+        when:()=>Boolean(snapshot?.initialized),
+        action:()=>{
+          if(writing||pending||review||!snapshot?.initialized)return;
+          $('operation').value='sale';
+          $('operation').dispatchEvent(new Event('change',{bubbles:true}));
+        }
+      },
+      {
+        id:'checkout-op-purchase',
+        group:'navigation',
+        groupLabel:'İşlem Türü',
+        title:'Müşteriden alış moduna geç',
+        keywords:'alis musteriden alis hurda mod',
+        badge:operation==='purchase'?'Aktif':'',
+        when:()=>Boolean(snapshot?.initialized),
+        action:()=>{
+          if(writing||pending||review||!snapshot?.initialized)return;
+          $('operation').value='purchase';
+          $('operation').dispatchEvent(new Event('change',{bubbles:true}));
+        }
+      },
+      {
+        id:'checkout-focus-customer',
+        title:'Müşteri ara ve seç',
+        keywords:'musteri ara telefon tc kod',
+        when:()=>Boolean(snapshot?.initialized),
+        action:()=>{$('search')?.focus();}
+      },
+      {
+        id:'checkout-focus-product',
+        title:'Ürün ara',
+        keywords:'urun ara stok kod barkod',
+        when:()=>Boolean(snapshot?.initialized),
+        action:()=>{
+          let target=$('items')?.querySelector('[data-product-search]');
+          if(!target){
+            const row=addItem();
+            changed({preferredStep:1});
+            target=row?.querySelector('[data-product-search]');
+          }
+          target?.focus();
+        }
+      },
+      {
+        id:'checkout-open-customer-drawer',
+        title:'Yeni müşteri kartı aç',
+        keywords:'yeni musteri kart ekle olustur',
+        when:()=>Boolean(snapshot?.initialized),
+        action:()=>{
+          const openBtn=$('open-customer-drawer');
+          if(openBtn&&!openBtn.hidden){
+            openBtn.click();
+          }else{
+            const details=$('new-customer');
+            if(details){details.hidden=false;details.open=true;}
+            $('customer-form')?.elements?.name?.focus();
+          }
+        }
+      },
+      {
+        id:'checkout-toggle-stock-panel',
+        title:'Stokları incele panelini aç/kapat',
+        keywords:'stok incele mevcut liste',
+        when:()=>Boolean(snapshot?.initialized),
+        action:()=>{
+          const panel=$('stock-panel');
+          if(!panel)return;
+          panel.open=!panel.open;
+          if(panel.open)$('stock-search')?.focus();
+        }
+      },
+      {
+        id:'checkout-mode-quick',
+        group:'commands',
+        groupLabel:'Görünüm ve Araçlar',
+        title:'Hızlı Moda geç',
+        keywords:'hizli mod tek ekran',
+        badge:flowMode==='quick'?'Aktif':'',
+        when:()=>Boolean(snapshot?.initialized)&&!isComplexCheckoutState(),
+        action:()=>{document.querySelector('[data-flow-mode="quick"]')?.click();}
+      },
+      {
+        id:'checkout-mode-guided',
+        group:'commands',
+        groupLabel:'Görünüm ve Araçlar',
+        title:'Rehberli Adımlara geç',
+        keywords:'rehberli adimlar',
+        badge:flowMode==='guided'?'Aktif':'',
+        when:()=>Boolean(snapshot?.initialized),
+        action:()=>{document.querySelector('[data-flow-mode="guided"]')?.click();}
+      },
+      {
+        id:'checkout-refresh',
+        group:'commands',
+        groupLabel:'Görünüm ve Araçlar',
+        title:'Mevcutları yenile',
+        keywords:'yenile guncelle tazele',
+        action:()=>{void refresh();}
+      }
+    ]
+  });
+
+  paletteLib.registerProvider({
+    id:'checkout-customers',
+    group:'records',
+    groupLabel:'Müşteriler',
+    priority:20,
+    minQueryLength:2,
+    when:()=>Boolean(snapshot?.initialized),
+    search:async(query,{signal,limit})=>{
+      if(!snapshot?.initialized)return{items:[],total:0};
+      const q=String(query||'').trim();
+      if(q.length<2)return{items:[],total:0};
+      const url=route('customers',workspace)+'&q='+encodeURIComponent(q)+'&limit='+encodeURIComponent(limit||20)+'&meta=1';
+      const data=await apiWithSignal(url,signal);
+      const rawItems=Array.isArray(data)?data:(data?.items||[]);
+      const total=Array.isArray(data)?data.length:(Number.isFinite(Number(data?.total))?Number(data.total):rawItems.length);
+      return {
+        items:rawItems.map(p=>({
+          id:'customer:'+p.id,
+          title:p.name,
+          subtitle:p.disambiguationLabel||[p.unit,p.phone,p.taxId?`TC/VKN ${p.taxId}`:''].filter(Boolean).join(' · '),
+          badge:p.unit||'',
+          keywords:[p.id,p.phone,p.taxId].filter(Boolean),
+          action:()=>{void lookupCustomer(p.id);}
+        })),
+        total
+      };
+    }
+  });
+}
+initCheckoutCommandPalette();
 if(current())void refresh();

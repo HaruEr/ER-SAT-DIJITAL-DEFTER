@@ -21,12 +21,45 @@ function receiptSuffix(record, peers=[]){
   return (record.note?' · '+String(record.note).slice(0,90):'')+' · Fiş '+(id.length>width?'…':'')+id.slice(-width);
 }
 const receiptSelects='select[data-source-field="choice"],select[data-source-field="purchase"],select[data-target-field="purchaseId"],select[name="originalId"],select[data-field="source"]';
+const getSearchNorm = () => (typeof window !== 'undefined' && window.DefterSearchNorm) || (typeof globalThis !== 'undefined' && globalThis.DefterSearchNorm) || null;
+const getCombobox = () => (typeof window !== 'undefined' && window.DefterCombobox) || (typeof globalThis !== 'undefined' && globalThis.DefterCombobox) || null;
+const normalize = value => {
+  const helper = getSearchNorm();
+  if (helper?.normalizeSearch) return helper.normalizeSearch(value);
+  return String(value || '').toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ı/g, 'i').trim();
+};
+const matchesQuery = (parts, q) => {
+  const helper = getSearchNorm();
+  if (helper?.matchesSearch) return helper.matchesSearch(parts, q);
+  const nq = normalize(q);
+  return !nq || normalize(Array.isArray(parts) ? parts.filter(Boolean).join(' ') : parts).includes(nq);
+};
+function enhanceSupplierSelect(selectEl, items, { value, emptyLabel = 'Seçin', allowEmpty = true, placeholder = 'Ara ve seç…', smallListThreshold } = {}) {
+  const cb = getCombobox();
+  if (!cb?.enhanceSelect || !selectEl) return null;
+  return cb.enhanceSelect(selectEl, {
+    items,
+    ...(value !== undefined ? { value } : {}),
+    allowEmpty,
+    emptyLabel,
+    placeholder,
+    invalidTextBehavior: 'revert',
+    ...(smallListThreshold !== undefined ? { smallListThreshold } : {})
+  });
+}
+function destroyComboboxesIn(rootEl) {
+  const cb = getCombobox();
+  if (!cb?.getInstance || !rootEl) return;
+  for (const sel of rootEl.querySelectorAll('select')) cb.getInstance(sel)?.destroy();
+}
 function selectionSummary(select){
   if(!select)return;const label=select.closest('label');if(!label)return;
-  let summary=label.querySelector('.supplier-selection-summary');if(!summary){summary=select.ownerDocument.createElement('p');summary.className='supplier-selection-summary';summary.setAttribute('aria-live','polite');select.after(summary);}
-  summary.textContent=select.value?select.selectedOptions[0]?.textContent||'':'';summary.hidden=!summary.textContent;
+  const cb=getCombobox()?.getInstance?.(select);
+  const anchor=cb?.root||select;
+  let summary=label.querySelector('.supplier-selection-summary');if(!summary){summary=select.ownerDocument.createElement('p');summary.className='supplier-selection-summary';summary.setAttribute('aria-live','polite');anchor.after(summary);}
+  else if(summary.previousElementSibling!==anchor)anchor.after(summary);
+  summary.textContent=select.value?(select.selectedOptions?.[0]?.textContent||cb?.getSelectedItem?.()?.label||''):'';summary.hidden=!summary.textContent;
 }
-const normalize = value => String(value || '').toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i');
 const canonicalAmount = (context, el, unit, positive = true) => {
   if (!el) return '';
   if (context?.canonicalValue) return context.canonicalValue(el, unit, positive);
@@ -42,7 +75,9 @@ const editableAmount = (context, value) => {
 export function renderSupplierWorkspace(container, context) {
   const {escape:esc,format,day}=context;
   const memory=context.memory||SUPPLIER_DRAFTS,viewKey='supplier:view:'+(context.workspace||'default'),remembered=memory.get(viewKey);
-  let state=context.state,selectedId=remembered?.partyId||null,activeTask=remembered?.kind||null,query='',disposed=false,taskCleanup=null;
+  const hasInitialParty=Object.hasOwn(context,'initialPartyId');
+  const initialPartyId=context.initialPartyId||null,rememberedPartyId=remembered?.partyId||null;
+  let state=context.state,selectedId=hasInitialParty?initialPartyId:rememberedPartyId,activeTask=(!hasInitialParty||initialPartyId===rememberedPartyId)?(remembered?.kind||null):null,query='',disposed=false,taskCleanup=null;
   const pending=()=>Boolean(context.isPending?.());
   const firms=()=>state?.supplierParties;
   const status=message=>{const node=container.querySelector('[data-supplier-status]');if(node)node.textContent=message;};
@@ -54,7 +89,7 @@ export function renderSupplierWorkspace(container, context) {
   }).join('') : '<p class="context-note">Henüz hesap birimi yok.</p>';
   function drawList() {
     const list=container.querySelector('[data-supplier-list]');if(!list)return;
-    const matches=firms().filter(f=>normalize([f.name,f.phone,f.taxId].join(' ')).includes(normalize(query)));
+    const matches=firms().filter(f=>matchesQuery([f.name,f.phone,f.taxId],query));
     list.innerHTML=matches.map(f=>'<article class="account-card" data-firm-card="'+esc(f.id)+'"><h2><button type="button" class="button text" data-open-firm="'+esc(f.id)+'">'+esc(f.name)+'</button></h2>'+
       (f.phone?'<p>'+esc(f.phone)+'</p>':'')+balanceMarkup(f.accounts)+
       (f.lastEvent?'<p class="context-note">Son işlem: '+esc(day(f.lastEvent.date)+' · '+f.lastEvent.label)+'</p>':'<p class="context-note">Henüz işlem yok.</p>')+'</article>').join('')||
@@ -65,7 +100,15 @@ export function renderSupplierWorkspace(container, context) {
     const header='<div class="section-header"><h1>Toptancılar</h1><button type="button" class="button secondary" data-refresh-suppliers>Yenile</button></div><p role="status" aria-live="polite" data-supplier-status></p>';
     if(!Array.isArray(firms())) {container.innerHTML=header+'<p class="info neutral">Firma bilgileri alınamadı. Yeniden deneyin.</p>';return;}
     const firm=firms().find(f=>f.id===selectedId);
-    if(!firm)selectedId=null;
+    if(!firm){
+      const hadSelected=selectedId!==null;
+      selectedId=null;
+      if(hadSelected){
+        activeTask=null;
+        memory.set(viewKey,{partyId:null,kind:null});
+        context.onSelectFirm?.(null,{replace:true});
+      }
+    }
     if(firm) {
       container.innerHTML=header+'<div class="workbench-split" data-split-view="suppliers"><section class="section supplier-active-header"><div class="section-header"><h2 tabindex="-1" data-firm-heading>'+esc(firm.name)+'</h2><button type="button" class="button secondary" data-back-suppliers>Firma listesine dön</button></div>'+
         ([firm.phone,firm.taxId,firm.address].some(Boolean)?'<details class="supplier-contact-details"><summary>İletişim bilgileri</summary><p>'+[firm.phone,firm.taxId,firm.address].filter(Boolean).map(esc).join(' · ')+'</p></details>':'')+'<h3>Güncel hesaplar</h3><div class="supplier-balances">'+balanceMarkup(firm.accounts)+'</div>'+
@@ -117,8 +160,8 @@ export function renderSupplierWorkspace(container, context) {
   }
   function click(event) {
     const button=event.target.closest('button');if(!button||!container.contains(button)||disposed)return;context.onInteraction?.({kind:'action'});
-    if(button.hasAttribute('data-open-firm')){selectedId=button.dataset.openFirm;activeTask=null;memory.set(viewKey,{partyId:selectedId,kind:null});draw(true);}
-    else if(button.hasAttribute('data-back-suppliers')){selectedId=null;activeTask=null;memory.set(viewKey,{partyId:null,kind:null});draw(true);}
+    if(button.hasAttribute('data-open-firm')){selectedId=button.dataset.openFirm;activeTask=null;memory.set(viewKey,{partyId:selectedId,kind:null});context.onSelectFirm?.(selectedId,{replace:false});draw(true);}
+    else if(button.hasAttribute('data-back-suppliers')){selectedId=null;activeTask=null;memory.set(viewKey,{partyId:null,kind:null});context.onSelectFirm?.(null,{replace:false});draw(true);}
     else if(button.hasAttribute('data-refresh-suppliers'))context.refresh();
     else if(button.hasAttribute('data-create-firm'))openTask('create');
     else if(button.hasAttribute('data-edit-supplier'))openTask('profile');
@@ -131,6 +174,16 @@ export function renderSupplierWorkspace(container, context) {
   const interact=event=>{context.onInteraction?.({kind:'input'});if(event.target.matches(receiptSelects))selectionSummary(event.target);};container.addEventListener('click',click);container.addEventListener('input',input);container.addEventListener('change',interact);container.addEventListener('invalid',interact,true);draw();
   return {
     update(nextState,{completedDraftKey}={}){if(disposed)return;if(completedDraftKey)clearTask(completedDraftKey);if(activeTask==='reverse'&&(completedDraftKey===supplierDraftKey(context,'reverse',selectedId)||completedDraftKey==='supplier:draft:'+JSON.stringify([context.workspace||'default',selectedId,'reverse']))){activeTask='history';memory.set(viewKey,{partyId:selectedId,kind:activeTask});}state=nextState;draw();},
+    selectParty(partyId,{task=undefined}={}){
+      if(disposed)return;
+      const nextId=partyId||null;
+      const nextTask=task!==undefined?task:(nextId===selectedId?activeTask:null);
+      if(nextId===selectedId&&nextTask===activeTask)return;
+      selectedId=nextId;
+      activeTask=nextTask;
+      memory.set(viewKey,{partyId:selectedId,kind:activeTask});
+      draw(true);
+    },
     destroy(){if(disposed)return;disposed=true;clearTask();container.removeEventListener('click',click);container.removeEventListener('input',input);container.removeEventListener('change',interact);container.removeEventListener('invalid',interact,true);container.replaceChildren();}
   };
 }
@@ -180,12 +233,25 @@ function renderSupplierForm(panel, context) {
     for(const [name,title,physical] of definitions){
       const section=doc.createElement('fieldset');section.dataset.group=name;section.innerHTML='<legend>'+title+'</legend><div data-rows></div><button type="button" class="button secondary compact" data-add-row>Satır ekle</button>';
       form.append(section);
+      const choices=physical?catalog.filter(a=>name==='items'?(a.isPurchasable||a.isSaleable):a.kind==='asset'&&a.id!=='pos'):nativeAccounts;
+      const itemOptions=choices.map(a=>({
+        id:a.id,
+        label:(a.name||unitLabel(a.unit))+(physical?'':' · '+unitLabel(a.unit)),
+        unit:a.unit,
+        code:physical?a.id:'',
+        subtitle:physical?unitLabel(a.unit):(Number.isSafeInteger(a.balance)&&context.format?(a.balance<0?'Borcumuz ':a.balance>0?'Alacağımız ':'Bakiyesi sıfır ')+context.format(Math.abs(a.balance),a.unit):''),
+        meta:physical&&Number.isSafeInteger(state.balances?.[a.id])&&context.format?context.format(state.balances[a.id],a.unit):'',
+        keywords:[a.id,a.name,a.unit,unitLabel(a.unit),...(a.pairedGroups||[]).map(gid=>catalog.find(x=>x.id===gid)?.name||gid)].filter(Boolean)
+      }));
       const rows=()=>[...section.querySelectorAll('[data-row]')];
       const add=(values={})=>{
         if(rows().length>=30){info('Bir grupta en çok 30 satır eklenebilir.');return;}
         const row=doc.createElement('div');row.dataset.row='';row.className='form-grid';
-        const choices=physical?catalog.filter(a=>name==='items'?(a.isPurchasable||a.isSaleable):a.kind==='asset'&&a.id!=='pos'):nativeAccounts;
-        row.innerHTML='<label class="field"><span>'+ (physical?(name==='items'?'Ürün':'Ürün / kasa / banka'):'Firma hesabı') +'</span><select data-field="accountId" required><option value="">Seçin</option>'+choices.map(a=>'<option value="'+esc(a.id)+'">'+esc((a.name||unitLabel(a.unit))+' · '+unitLabel(a.unit))+'</option>').join('')+'</select></label>'+
+        const hasCombobox=Boolean(getCombobox()?.enhanceSelect);
+        const selectMarkup=hasCombobox
+          ?'<option value="">Seçin</option>'
+          :'<option value="">Seçin</option>'+choices.map(a=>'<option value="'+esc(a.id)+'">'+esc((a.name||unitLabel(a.unit))+' · '+unitLabel(a.unit))+'</option>').join('');
+        row.innerHTML='<label class="field"><span>'+ (physical?(name==='items'?'Ürün':'Ürün / kasa / banka'):'Firma hesabı') +'</span><select data-field="accountId" required>'+selectMarkup+'</select></label>'+
           '<label class="field"><span data-quantity-label>Miktar</span><input data-field="quantity" required inputmode="decimal" maxlength="24"></label>'+
           (physical?'<label class="field" data-weight-group hidden><span>Ayar / terazi grubu</span><select data-field="weightAccount"></select></label><label class="field" data-weight-input hidden><span>Gerçek toplam gram</span><input data-field="weight" inputmode="decimal" maxlength="24"></label>':'')+
           '<details><summary>Anlaşılan TL Referansı (Kasadan Çıkmaz) · isteğe bağlı</summary><label class="field"><span>Anlaşılmış TL referansı</span><input data-field="referenceTL" inputmode="decimal" maxlength="24"></label></details><button type="button" class="button text" data-remove-row>Satırı kaldır</button>';
@@ -199,9 +265,12 @@ function renderSupplierForm(panel, context) {
           }
         }
         accountSelect.addEventListener('change',configure);
-        row.querySelector('[data-remove-row]').addEventListener('click',()=>{row.remove();setDirty(true);remember();preview();});
-        section.querySelector('[data-rows]').append(row);accountSelect.value=values.accountId||'';configure();
-        for(const [k,v] of Object.entries(values)){const input=row.querySelector('[data-field="'+k+'"]');if(input&&!input.disabled)input.value=v;}
+        row.querySelector('[data-remove-row]').addEventListener('click',()=>{destroyComboboxesIn(row);row.remove();setDirty(true);remember();preview();});
+        section.querySelector('[data-rows]').append(row);
+        if(hasCombobox)enhanceSupplierSelect(accountSelect,itemOptions,{value:values.accountId||'',emptyLabel:'Seçin',placeholder:physical?'Ürün veya hesap ara…':'Firma hesabı ara…'});
+        else accountSelect.value=values.accountId||'';
+        configure();
+        for(const [k,v] of Object.entries(values)){if(k==='accountId')continue;const input=row.querySelector('[data-field="'+k+'"]');if(input&&!input.disabled)input.value=v;}
       };
       section.querySelector('[data-add-row]').addEventListener('click',()=>{add();setDirty(true);remember();preview();});
       groups.set(name,{rows,add,section});
@@ -247,7 +316,8 @@ function renderSupplierForm(panel, context) {
   function scope(){if(kind!=='payment')return;const reserved=form.elements.direction.value==='pay'&&form.elements.advanceScope.value==='reserved';form.elements.agreementId.required=reserved;const details=form.querySelector('[data-agreement-details]');details.querySelector('summary').textContent=reserved?'Anlaşma / sipariş · zorunlu':'Anlaşma / sipariş · isteğe bağlı';if(reserved||form.elements.agreementId.value)details.open=true;}
   function revealInput(input){
     if(!input)return;for(let node=input.parentElement;node&&node!==form;node=node.parentElement)if(node.tagName==='DETAILS')node.open=true;
-    input.focus();input.scrollIntoView?.({block:'center'});
+    const target=getCombobox()?.getInstance?.(input)?.input||input;
+    target.focus();target.scrollIntoView?.({block:'center'});
   }
   function preferredCredit(){
     const charges=groups.get('charges')?.rows()||[];
@@ -352,7 +422,7 @@ function renderSupplierForm(panel, context) {
   for(const select of form.querySelectorAll(receiptSelects))selectionSummary(select);
   for(const details of form.querySelectorAll('details'))if([...details.querySelectorAll('input,textarea')].some(input=>!input.disabled&&input.type!=='checkbox'&&input.value.trim()))details.open=true;
   if(kind==='unit'){const configureUnit=()=>{const other=form.elements.unit.value==='other';form.elements.currencyCode.closest('label').hidden=!other;form.elements.currencyCode.required=other;};form.elements.unit.addEventListener('change',configureUnit);configureUnit();}
-  if(kind==='payment'){form.elements.advanceScope.addEventListener('change',scope);form.elements.direction.addEventListener('change',()=>{for(const group of groups.values())for(const row of group.rows())row.remove();const names=form.elements.direction.value==='collect'?['received','debts']:['given','credits'];for(const name of names)groups.get(name).add();scope();remember();preview();info('İşlem yönü değiştirildi; önceki karşılık satırları temizlendi.');});scope();}
+  if(kind==='payment'){form.elements.advanceScope.addEventListener('change',scope);form.elements.direction.addEventListener('change',()=>{for(const group of groups.values())for(const row of group.rows()){destroyComboboxesIn(row);row.remove();}const names=form.elements.direction.value==='collect'?['received','debts']:['given','credits'];for(const name of names)groups.get(name).add();scope();remember();preview();info('İşlem yönü değiştirildi; önceki karşılık satırları temizlendi.');});scope();}
   paymentLayout();
   if(kind==='payment')form.elements.direction.addEventListener('change',()=>{form.elements.agreementId.value='';form.elements.advanceScope.value='general';sourcePicker?.reset();paymentLayout();scope();setDirty(true);remember();preview();});
   if(['purchase','payment'].includes(kind)&&context.request)sourcePicker=attachSupplierSources(form,context,saved?.links||[]);
@@ -389,7 +459,7 @@ function renderSupplierForm(panel, context) {
     catch(error){if(form.isConnected)info(error.message||'İşlem kaydedilemedi. Taslak korunuyor.');}
     finally{sending=false;if(form.isConnected)save.disabled=stale();}
   });
-  return completedDraftKey=>{if(destroyed)return;destroyed=true;if(completedDraftKey===key||completedDraftKey===legacyKey)completed=true;if(!sending)remember();sourcePicker?.destroy();receiptPicker?.destroy();};
+  return completedDraftKey=>{if(destroyed)return;destroyed=true;if(completedDraftKey===key||completedDraftKey===legacyKey)completed=true;if(!sending)remember();sourcePicker?.destroy();receiptPicker?.destroy();destroyComboboxesIn(form);};
 }
 
 
@@ -399,7 +469,7 @@ function renderSupplierRead(panel, context) {
   const doc=panel.ownerDocument,scope={supplierId:partyId,startDate:'',endDate:'',limit:50,documents:'omit'},revision=state.revision;
   panel.insertAdjacentHTML('beforeend','<form data-supplier-period class="form-grid"><label class="field"><span>Başlangıç tarihi</span><input type="date" name="startDate"></label><label class="field"><span>Bitiş tarihi</span><input type="date" name="endDate"></label>'+(kind==='history'?'<label class="field"><span>Hareketlerde ara</span><input type="search" data-supplier-history-search placeholder="İşlem, ürün veya açıklama…" maxlength="160"></label>':'')+'<button class="button secondary">Dönemi göster</button></form><p role="status" data-supplier-read-status></p><div data-supplier-read-result></div><button type="button" class="button secondary" data-supplier-more hidden>Daha eski hareketleri göster</button><button type="button" class="button" data-supplier-print disabled>Yazdır</button><button type="button" class="button secondary" data-supplier-pdf disabled>PDF indir</button><button type="button" class="button secondary" data-supplier-csv disabled>CSV indir</button>');
   const form=panel.querySelector('[data-supplier-period]'),historySearch=form.querySelector('[data-supplier-history-search]'),status=panel.querySelector('[data-supplier-read-status]'),result=panel.querySelector('[data-supplier-read-result]'),more=panel.querySelector('[data-supplier-more]'),print=panel.querySelector('[data-supplier-print]'),csv=panel.querySelector('[data-supplier-csv]'),pdf=panel.querySelector('[data-supplier-pdf]');
-  const filterEvents=events=>{const q=normalize(historySearch?.value||'');return !q?events:events.filter(e=>normalize([e.label,day(e.date),e.meta?.note,e.id,...(e.meta?.lines||[]).map(l=>(state.accounts||[]).find(a=>a.id===l.accountId)?.name||'')].filter(Boolean).join(' ')).includes(q));};
+  const filterEvents=events=>{const q=historySearch?.value||'';return !normalize(q)?events:events.filter(e=>matchesQuery([e.label,day(e.date),e.meta?.note,e.id,...(e.meta?.lines||[]).map(l=>(state.accounts||[]).find(a=>a.id===l.accountId)?.name||'')],q));};
   historySearch?.addEventListener('input',()=>{if(snapshot)result.innerHTML=eventsMarkup(filterEvents(snapshot.events),true);});
   const current=ticket=>!disposed&&panel.isConnected&&ticket===generation;
   const signature=page=>JSON.stringify([page.revision,page.supplier?.id,page.accounts,page.statements,page.startDate,page.endDate,page.total]);
@@ -525,11 +595,45 @@ function attachSupplierSources(form, context, saved=[]) {
   function refreshOptions(){if(!loaded)return;updateCurrentSources();sourceStatus();for(const row of rows()){const select=row.querySelector('select');options(select,select.value);configure(row);}}
   function refreshCurrent(event){if(section.contains(event.target)||!event.target.closest('[data-group="credits"]')&&!['agreementId','advanceScope'].includes(event.target.name))return;refreshOptions();}
   form.addEventListener('input',refreshCurrent);form.addEventListener('change',refreshCurrent);
-  function options(select,old){select.innerHTML='<option value="">Ödeme / avans seçin</option>'+choices.map(({source,line})=>'<option value="'+esc(JSON.stringify([source.id,line.accountId]))+'">'+esc(day(source.date)+' · '+(source.kind==='current'?'Bu işlemde verdiğimiz karşılık':source.kind==='supplierReturn'?'İade alacağı':'Ödeme / avans')+' · '+unitLabel(line.unit)+' · Kullanılabilir '+format(line.remaining,line.unit)+(source.agreementId?' · '+source.agreementId:'')+receiptSuffix(source,choices.map(c=>c.source)))+'</option>').join('');select.value=old||'';}
+  function buildChoiceItems(){
+    const srcs=choices.map(c=>c.source);
+    return choices.map(({source,line})=>({
+      id:JSON.stringify([source.id,line.accountId]),
+      label:day(source.date)+' · '+(source.kind==='current'?'Bu işlemde verdiğimiz karşılık':source.kind==='supplierReturn'?'İade alacağı':'Ödeme / avans')+' · '+unitLabel(line.unit)+' · Kullanılabilir '+format(line.remaining,line.unit)+(source.agreementId?' · '+source.agreementId:'')+receiptSuffix(source,srcs),
+      unit:line.unit,
+      keywords:[source.id,line.accountId,source.agreementId,source.note].filter(Boolean)
+    }));
+  }
+  function options(select,old){
+    const cb=getCombobox()?.getInstance?.(select);
+    if(cb){
+      cb.setItems(buildChoiceItems());
+      if(old&&cb.hasValue(old))cb.setValue(old,{emitChange:false});
+      else cb.clear({emitChange:false});
+      return;
+    }
+    select.innerHTML='<option value="">Ödeme / avans seçin</option>'+choices.map(({source,line})=>'<option value="'+esc(JSON.stringify([source.id,line.accountId]))+'">'+esc(day(source.date)+' · '+(source.kind==='current'?'Bu işlemde verdiğimiz karşılık':source.kind==='supplierReturn'?'İade alacağı':'Ödeme / avans')+' · '+unitLabel(line.unit)+' · Kullanılabilir '+format(line.remaining,line.unit)+(source.agreementId?' · '+source.agreementId:'')+receiptSuffix(source,choices.map(c=>c.source)))+'</option>').join('');select.value=old||'';
+  }
   function configure(row){
     const selected=choices.find(c=>JSON.stringify([c.source.id,c.line.accountId])===row.querySelector('select').value),approval=row.querySelector('[data-source-field="overrideReserved"]'),reason=row.querySelector('[data-source-field="reason"]');
     const targetSelect=row.querySelector('[data-source-field="purchase"]');
-    if(targetSelect){const old=targetSelect.value;targetSelect.innerHTML='<option value="">Alış / açık belge seçin</option>'+targets.filter(t=>t.line.accountId===selected?.line.accountId).map(t=>'<option value="'+esc(JSON.stringify([t.purchase.id,t.line.accountId]))+'">'+esc(day(t.purchase.date)+' · '+(t.purchase.kind==='supplierReturn'?'İade sonrası kalan borç':'Açık alış / borç')+' · '+format(t.line.remaining,t.line.unit)+(t.purchase.agreementId?' · '+t.purchase.agreementId:'')+receiptSuffix(t.purchase,targets.map(t=>t.purchase)))+'</option>').join('');targetSelect.value=old;}
+    if(targetSelect){
+      const old=targetSelect.value,filtered=targets.filter(t=>t.line.accountId===selected?.line.accountId),pubs=targets.map(t=>t.purchase);
+      const cb=getCombobox()?.getInstance?.(targetSelect);
+      if(cb){
+        const targetItems=filtered.map(t=>({
+          id:JSON.stringify([t.purchase.id,t.line.accountId]),
+          label:day(t.purchase.date)+' · '+(t.purchase.kind==='supplierReturn'?'İade sonrası kalan borç':'Açık alış / borç')+' · '+format(t.line.remaining,t.line.unit)+(t.purchase.agreementId?' · '+t.purchase.agreementId:'')+receiptSuffix(t.purchase,pubs),
+          unit:t.line.unit,
+          keywords:[t.purchase.id,t.line.accountId,t.purchase.agreementId,t.purchase.note].filter(Boolean)
+        }));
+        cb.setItems(targetItems);
+        if(old&&cb.hasValue(old))cb.setValue(old,{emitChange:false});
+        else cb.clear({emitChange:false});
+      }else{
+        targetSelect.innerHTML='<option value="">Alış / açık belge seçin</option>'+filtered.map(t=>'<option value="'+esc(JSON.stringify([t.purchase.id,t.line.accountId]))+'">'+esc(day(t.purchase.date)+' · '+(t.purchase.kind==='supplierReturn'?'İade sonrası kalan borç':'Açık alış / borç')+' · '+format(t.line.remaining,t.line.unit)+(t.purchase.agreementId?' · '+t.purchase.agreementId:'')+receiptSuffix(t.purchase,pubs))+'</option>').join('');targetSelect.value=old;
+      }
+    }
     const target=targets.find(t=>JSON.stringify([t.purchase.id,t.line.accountId])===targetSelect?.value);
     const currentAgreement=kind==='allocation'?(target?.purchase.agreementId||''):(form.elements.agreementId?.value.trim()||''),reserved=selected?.source.advanceScope==='reserved'&&(selected.source.agreementId||'')!==currentAgreement;
     row.querySelector('[data-source-override]').hidden=!reserved;approval.required=reserved;reason.required=reserved;reason.disabled=!reserved;if(!reserved){approval.checked=false;reason.value='';}
@@ -540,11 +644,21 @@ function attachSupplierSources(form, context, saved=[]) {
     const row=doc.createElement('div');row.className='form-grid';
     row.innerHTML='<label class="field"><span>Kaynak ödeme / avans</span><select data-source-field="choice" required></select></label><label class="field"><span>Kullanılacak miktar · kaynağın biriminde</span><input data-source-field="quantity" inputmode="decimal" maxlength="24" required></label><div data-source-override hidden><label><input type="checkbox" data-source-field="overrideReserved">Bu kullanım için başka anlaşmaya ayrılmış tutarı kullanmayı onaylıyorum.</label><label class="field"><span>Bu kullanımın gerekçesi</span><input data-source-field="reason" maxlength="300"></label></div><details><summary>Teknik kayıt bilgileri</summary><p data-source-id></p></details><button type="button" class="button text" data-remove-source>Kaynağı kaldır</button>';
     if(kind==='allocation')row.querySelector('[data-source-override]').insertAdjacentHTML('beforebegin','<label class="field"><span>Bağlanacak alış / açık belge</span><select data-source-field="purchase" required></select></label>');
-    host.append(row);options(row.querySelector('select'),values.choice);
+    host.append(row);
+    const choiceSelect=row.querySelector('[data-source-field="choice"]'),purchaseSelect=row.querySelector('[data-source-field="purchase"]');
+    enhanceSupplierSelect(choiceSelect,[],{emptyLabel:'Ödeme / avans seçin',placeholder:'Ödeme / avans ara…'});
+    if(purchaseSelect)enhanceSupplierSelect(purchaseSelect,[],{emptyLabel:'Alış / açık belge seçin',placeholder:'Alış / açık belge ara…'});
+    options(choiceSelect,values.choice);
     for(const input of row.querySelectorAll('[data-source-field]')){const value=values[input.dataset.sourceField];if(input.type==='checkbox')input.checked=!!value;else if(input.tagName!=='SELECT')input.value=value||'';}
-    row.querySelector('select').addEventListener('change',()=>configure(row));
-    row.querySelector('[data-source-field="purchase"]')?.addEventListener('change',()=>configure(row));
-    row.querySelector('[data-remove-source]').addEventListener('click',()=>{row.remove();form.dispatchEvent(new doc.defaultView.Event('input',{bubbles:true}));});configure(row);if(kind==='allocation'&&values.purchase){row.querySelector('[data-source-field="purchase"]').value=values.purchase;configure(row);}
+    choiceSelect.addEventListener('change',()=>configure(row));
+    purchaseSelect?.addEventListener('change',()=>configure(row));
+    row.querySelector('[data-remove-source]').addEventListener('click',()=>{destroyComboboxesIn(row);row.remove();form.dispatchEvent(new doc.defaultView.Event('input',{bubbles:true}));});configure(row);
+    if(kind==='allocation'&&values.purchase){
+      const pcb=getCombobox()?.getInstance?.(purchaseSelect);
+      if(pcb){if(pcb.hasValue(values.purchase))pcb.setValue(values.purchase,{emitChange:false});}
+      else purchaseSelect.value=values.purchase;
+      configure(row);
+    }
   }
   async function load(){
     const ticket=++generation;loaded=false;const prior=host.children.length?snapshot():saved;status.textContent='Kaynaklar yükleniyor…';
@@ -554,7 +668,7 @@ function attachSupplierSources(form, context, saved=[]) {
       if(response.revision!==state.revision||response.supplier?.id!==partyId||!response.documents)throw Error('Kaynaklar doğrulanamadı. Defteri yenileyin.');
       if(context.editOriginalId){if(response.amendment?.originalId!==context.editOriginalId)throw Error('Düzeltme kaynakları doğrulanamadı.');response.documents=response.amendment.documents;}
       targets=(response.documents.purchases||[]).flatMap(purchase=>purchase.charges.filter(line=>line.remaining>0).map(line=>({purchase,line})));
-      persistedChoices=response.documents.sources.flatMap(source=>source.credits.filter(line=>line.remaining>0&&!source.blockedAccounts?.includes(line.accountId)).map(line=>({source,line})));updateCurrentSources();loaded=true;if(response.documents.unresolvedReceipts?.length&&!section.querySelector('[data-supplier-legacy]'))section.insertAdjacentHTML('beforeend','<p>Kaynağı belirtilmemiş eski tahsilatlar var. İlgili eski avanslar kullanılmadan önce kaynakları eşleştirin.</p><button type="button" class="button secondary" data-supplier-legacy>Eski tahsilat kaynaklarını eşleştir</button>');host.replaceChildren();for(const values of prior)add(values);
+      persistedChoices=response.documents.sources.flatMap(source=>source.credits.filter(line=>line.remaining>0&&!source.blockedAccounts?.includes(line.accountId)).map(line=>({source,line})));updateCurrentSources();loaded=true;if(response.documents.unresolvedReceipts?.length&&!section.querySelector('[data-supplier-legacy]'))section.insertAdjacentHTML('beforeend','<p>Kaynağı belirtilmemiş eski tahsilatlar var. İlgili eski avanslar kullanılmadan önce kaynakları eşleştirin.</p><button type="button" class="button secondary" data-supplier-legacy>Eski tahsilat kaynaklarını eşleştir</button>');destroyComboboxesIn(host);host.replaceChildren();for(const values of prior)add(values);
       sourceStatus();form.dispatchEvent(new doc.defaultView.Event('supplier-sources-ready'));
     }catch(error){if(!disposed&&form.isConnected&&ticket===generation)status.textContent=error.message;}
   }
@@ -562,7 +676,7 @@ function attachSupplierSources(form, context, saved=[]) {
   section.querySelector('[data-reload-sources]').addEventListener('click',load);
   form.elements.agreementId?.addEventListener('input',()=>rows().forEach(configure));
   load();
-  return {snapshot,refresh:refreshOptions,reset(){saved=[];host.replaceChildren();load();},read(){
+  return {snapshot,refresh:refreshOptions,reset(){saved=[];destroyComboboxesIn(host);host.replaceChildren();load();},read(){
     updateCurrentSources();
     if(rows().length&&!loaded)return {error:'Ödeme / avans kaynakları doğrulanamadı.'};
     const result=[],sourceTotals=new Map(),targetTotals=new Map();
@@ -575,7 +689,7 @@ function attachSupplierSources(form, context, saved=[]) {
       result.push({... (match.source.id?{sourceId:match.source.id}:{}),...(target?{purchaseId:target.purchase.id}:{}),accountId:match.line.accountId,quantity:canonicalAmount(context,quantityEl,match.line.unit,true),...(data.overrideReserved?{overrideReserved:true,reason:data.reason}:{})});
     }
     return {rows:result};
-  },destroy(){disposed=true;generation++;form.removeEventListener('input',refreshCurrent);form.removeEventListener('change',refreshCurrent);}};
+  },destroy(){disposed=true;generation++;destroyComboboxesIn(host);form.removeEventListener('input',refreshCurrent);form.removeEventListener('change',refreshCurrent);}};
 }
 
 
@@ -611,16 +725,32 @@ async function renderSupplierDocumentTask(panel, context) {
   function lineGroup(name,title,physical=false){
     const fieldset=doc.createElement('fieldset');fieldset.dataset.documentGroup=name;fieldset.innerHTML='<legend>'+title+'</legend><div data-lines></div><button type="button" class="button secondary" data-add-document-line>Satır ekle</button>';form.append(fieldset);
     const host=fieldset.querySelector('[data-lines]'),rows=()=>[...host.children];
+    const choices=physical?catalog.filter(a=>a.kind==='asset'&&a.id!=='pos'):accounts;
+    const itemOptions=choices.map(a=>({
+      id:a.id,
+      label:(a.name||unitLabel(a.unit))+(physical?'':' · '+unitLabel(a.unit)),
+      unit:a.unit,
+      code:physical?a.id:'',
+      subtitle:physical?unitLabel(a.unit):(Number.isSafeInteger(a.balance)?(a.balance<0?'Borcumuz ':a.balance>0?'Alacağımız ':'Bakiyesi sıfır ')+format(Math.abs(a.balance),a.unit):''),
+      keywords:[a.id,a.name,a.unit,unitLabel(a.unit),...(a.pairedGroups||[]).map(gid=>catalog.find(x=>x.id===gid)?.name||gid)].filter(Boolean)
+    }));
     const add=(value={})=>{
       if(rows().length>=30)return;
-      const row=doc.createElement('div');row.className='form-grid';const choices=physical?catalog.filter(a=>a.kind==='asset'&&a.id!=='pos'):accounts;
-      row.innerHTML='<label class="field"><span>'+ (physical?'Alınan ürün / kasa / banka':'Firma hesabı') +'</span><select data-field="accountId" required><option value="">Seçin</option>'+choices.map(a=>'<option value="'+esc(a.id)+'">'+esc((a.name||unitLabel(a.unit))+' · '+unitLabel(a.unit))+'</option>').join('')+'</select></label><label class="field"><span>Miktar</span><input data-field="quantity" required inputmode="decimal" maxlength="24"></label>'+
+      const row=doc.createElement('div');row.className='form-grid';
+      const hasCombobox=Boolean(getCombobox()?.enhanceSelect);
+      const selectMarkup=hasCombobox
+        ?'<option value="">Seçin</option>'
+        :'<option value="">Seçin</option>'+choices.map(a=>'<option value="'+esc(a.id)+'">'+esc((a.name||unitLabel(a.unit))+' · '+unitLabel(a.unit))+'</option>').join('');
+      row.innerHTML='<label class="field"><span>'+ (physical?'Alınan ürün / kasa / banka':'Firma hesabı') +'</span><select data-field="accountId" required>'+selectMarkup+'</select></label><label class="field"><span>Miktar</span><input data-field="quantity" required inputmode="decimal" maxlength="24"></label>'+
         (physical?'<label class="field" data-weight-label hidden><span>Ayar / terazi</span><select data-field="weightAccount"></select></label><label class="field" data-weight-value hidden><span>Gerçek toplam gram</span><input data-field="weight" inputmode="decimal" maxlength="24"></label>':'')+
         '<details><summary>TL referansı · isteğe bağlı</summary><label class="field"><span>Anlaşılmış TL referansı</span><input data-field="referenceTL" inputmode="decimal" maxlength="24"></label></details><button type="button" class="button text" data-remove-document-line>Satırı kaldır</button>';
       const account=row.querySelector('select');
       const configure=()=>{if(!physical)return;const a=choices.find(a=>a.id===account.value),ids=a?.pairedGroups||[],group=row.querySelector('[data-field="weightAccount"]'),weight=row.querySelector('[data-field="weight"]');group.innerHTML=ids.map(id=>'<option value="'+esc(id)+'">'+esc(catalog.find(a=>a.id===id)?.name||id)+'</option>').join('');group.disabled=weight.disabled=!ids.length;group.required=weight.required=!!ids.length;row.querySelector('[data-weight-label]').hidden=row.querySelector('[data-weight-value]').hidden=!ids.length;};
-      host.append(row);account.value=value.accountId||'';configure();for(const[k,v]of Object.entries(value)){const input=row.querySelector('[data-field="'+k+'"]');if(input&&!input.disabled)input.value=v;}
-      account.addEventListener('change',configure);row.querySelector('[data-remove-document-line]').addEventListener('click',()=>{row.remove();setDirty(true);remember();});
+      host.append(row);
+      if(hasCombobox)enhanceSupplierSelect(account,itemOptions,{value:value.accountId||'',emptyLabel:'Seçin',placeholder:physical?'Ürün veya hesap ara…':'Firma hesabı ara…'});
+      else account.value=value.accountId||'';
+      configure();for(const[k,v]of Object.entries(value)){if(k==='accountId')continue;const input=row.querySelector('[data-field="'+k+'"]');if(input&&!input.disabled)input.value=v;}
+      account.addEventListener('change',configure);row.querySelector('[data-remove-document-line]').addEventListener('click',()=>{destroyComboboxesIn(row);row.remove();setDirty(true);remember();});
     };
     fieldset.querySelector('[data-add-document-line]').addEventListener('click',()=>{add();setDirty(true);remember();});groups.set(name,{rows,add});
   }
@@ -642,9 +772,18 @@ async function renderSupplierDocumentTask(panel, context) {
     if(targetHost.children.length>=30)return;
     const row=doc.createElement('div');row.className='form-grid';
     const candidates=documents.purchases.filter(p=>p.charges.some(c=>c.accountId===form.elements.toAccountId.value&&c.remaining>0));
-    row.innerHTML='<label class="field"><span>Açık belge</span><select data-target-field="purchaseId" required><option value="">Seçin</option>'+candidates.map(p=>'<option value="'+esc(p.id)+'">'+esc(day(p.date)+' · '+(p.kind==='supplierReturn'?'İade sonrası kalan borç':'Alış / açık borç')+' · '+format(p.charges.find(c=>c.accountId===form.elements.toAccountId.value).remaining,accounts.find(a=>a.id===form.elements.toAccountId.value)?.unit)+receiptSuffix(p,candidates))+'</option>').join('')+'</select></label><label class="field"><span>Bu belgeye bağlanacak miktar</span><input data-target-field="quantity" required inputmode="decimal" maxlength="24"></label><label><input type="checkbox" data-target-field="overrideReserved">Bu belgeyi farklı anlaşmayla bağlamayı onaylıyorum.</label><label class="field"><span>Farklı anlaşma gerekçesi</span><input data-target-field="reason" maxlength="300"></label><button type="button" class="button text">Kaldır</button>';
-    targetHost.append(row);for(const input of row.querySelectorAll('[data-target-field]'))if(input.type==='checkbox')input.checked=!!values[input.dataset.targetField];else input.value=values[input.dataset.targetField]||'';
-    row.querySelector('button').addEventListener('click',()=>{row.remove();setDirty(true);remember();});
+    const hasCombobox=Boolean(getCombobox()?.enhanceSelect);
+    const targetItems=candidates.map(p=>({
+      id:p.id,
+      label:day(p.date)+' · '+(p.kind==='supplierReturn'?'İade sonrası kalan borç':'Alış / açık borç')+' · '+format(p.charges.find(c=>c.accountId===form.elements.toAccountId.value).remaining,accounts.find(a=>a.id===form.elements.toAccountId.value)?.unit)+receiptSuffix(p,candidates),
+      keywords:[p.id,p.agreementId,p.note].filter(Boolean)
+    }));
+    row.innerHTML='<label class="field"><span>Açık belge</span><select data-target-field="purchaseId" required><option value="">Seçin</option>'+(hasCombobox?'':targetItems.map(item=>'<option value="'+esc(item.id)+'">'+esc(item.label)+'</option>').join(''))+'</select></label><label class="field"><span>Bu belgeye bağlanacak miktar</span><input data-target-field="quantity" required inputmode="decimal" maxlength="24"></label><label><input type="checkbox" data-target-field="overrideReserved">Bu belgeyi farklı anlaşmayla bağlamayı onaylıyorum.</label><label class="field"><span>Farklı anlaşma gerekçesi</span><input data-target-field="reason" maxlength="300"></label><button type="button" class="button text">Kaldır</button>';
+    targetHost.append(row);
+    const targetSel=row.querySelector('[data-target-field="purchaseId"]');
+    if(hasCombobox)enhanceSupplierSelect(targetSel,targetItems,{value:values.purchaseId||'',emptyLabel:'Seçin',placeholder:'Açık belge ara…'});
+    for(const input of row.querySelectorAll('[data-target-field]'))if(input.type==='checkbox')input.checked=!!values[input.dataset.targetField];else if(!hasCombobox||input!==targetSel)input.value=values[input.dataset.targetField]||'';
+    row.querySelector('button').addEventListener('click',()=>{destroyComboboxesIn(row);row.remove();setDirty(true);remember();});
   }
   function returnProducts(values={}){
     const purchase=refundable.find(p=>p.id===form.elements.originalId.value),products=form.querySelector('[data-return-products]'),reductions=form.querySelector('[data-return-reductions]');
@@ -722,21 +861,35 @@ async function renderSupplierDocumentTask(panel, context) {
     target.innerHTML='<h4>'+esc(heading)+'</h4>'+list('Firmaya çıkan',outgoing,'İade ürünü miktarı girilmedi.')+list('Firmadan giren',incoming,'Alınan karşılık satırı girilmedi.')+list('Firma bakiyesi: önce → sonra',balances,'Cari alacak satırı girilmedi; bakiye önizlemesi yok.')+list('Alış belgesi ile anlaşılan cari alacak',differences,'Belgeden düşüm girilmedi; cari alacak satırı girilmedi.')+(!outgoing.length||!credits.size&&!incoming.length?'<p>İade kaydı için ürün ve anlaşılan karşılığı tamamlayın.</p>':'');
   }
   if(saved){for(const[name,value]of Object.entries(saved.fields||{}))if(form.elements[name])form.elements[name].value=value;}
+  if(form.elements.originalId?.tagName==='SELECT')enhanceSupplierSelect(form.elements.originalId,undefined,{emptyLabel:'Seçin',placeholder:'Belge ara…'});
+  if(form.elements.fromAccountId?.tagName==='SELECT')enhanceSupplierSelect(form.elements.fromAccountId,undefined,{emptyLabel:'Seçin',placeholder:'Alacak birimi ara…'});
+  if(form.elements.toAccountId?.tagName==='SELECT')enhanceSupplierSelect(form.elements.toAccountId,undefined,{emptyLabel:'Seçin',placeholder:'Borç birimi ara…'});
   if(kind==='legacyLink'){
     const host=form.querySelector('[data-legacy-rows]'),rows=()=>[...host.children];
     const receipt=()=>documents.unresolvedReceipts.find(r=>r.id===form.elements.originalId.value);
     const add=(value={})=>{
       if(rows().length>=30)return;
       const choices=(receipt()?.sources||[]).flatMap(source=>source.credits.map(line=>({source,line}))),row=doc.createElement('div');row.className='form-grid';
-      row.innerHTML='<label class="field"><span>Önceki kaynak ödeme</span><select data-field="source" required><option value="">Seçin</option>'+choices.map(({source,line})=>'<option value="'+esc(JSON.stringify([source.id,line.accountId]))+'">'+esc(day(source.date)+' · '+unitLabel(line.unit)+' · '+format(line.remaining,line.unit)+receiptSuffix(source,receipt()?.sources||[]))+'</option>').join('')+'</select></label><label class="field"><span>Eşleştirilecek miktar</span><input data-field="quantity" required inputmode="decimal" maxlength="24"></label><button type="button" class="button text">Kaldır</button>';
-      host.append(row);row.querySelector('select').value=value.source||'';row.querySelector('input').value=value.quantity||'';row.querySelector('button').addEventListener('click',()=>{row.remove();setDirty(true);remember();});
+      const srcItems=choices.map(({source,line})=>({
+        id:JSON.stringify([source.id,line.accountId]),
+        label:day(source.date)+' · '+unitLabel(line.unit)+' · '+format(line.remaining,line.unit)+receiptSuffix(source,receipt()?.sources||[]),
+        unit:line.unit,
+        keywords:[source.id,line.accountId,source.note].filter(Boolean)
+      }));
+      const hasCombobox=Boolean(getCombobox()?.enhanceSelect);
+      row.innerHTML='<label class="field"><span>Önceki kaynak ödeme</span><select data-field="source" required><option value="">Seçin</option>'+(hasCombobox?'':choices.map(({source,line})=>'<option value="'+esc(JSON.stringify([source.id,line.accountId]))+'">'+esc(day(source.date)+' · '+unitLabel(line.unit)+' · '+format(line.remaining,line.unit)+receiptSuffix(source,receipt()?.sources||[]))+'</option>').join(''))+'</select></label><label class="field"><span>Eşleştirilecek miktar</span><input data-field="quantity" required inputmode="decimal" maxlength="24"></label><button type="button" class="button text">Kaldır</button>';
+      host.append(row);
+      const srcSelect=row.querySelector('select');
+      if(hasCombobox)enhanceSupplierSelect(srcSelect,srcItems,{value:value.source||'',emptyLabel:'Seçin',placeholder:'Kaynak ödeme ara…'});
+      else srcSelect.value=value.source||'';
+      row.querySelector('input').value=value.quantity||'';row.querySelector('button').addEventListener('click',()=>{destroyComboboxesIn(row);row.remove();setDirty(true);remember();});
     };
     groups.set('legacyUses',{rows,add});form.querySelector('[data-add-legacy-source]').addEventListener('click',()=>{add();setDirty(true);remember();});
     const show=()=>{form.querySelector('[data-legacy-amounts]').textContent=receipt()?'Eşleştirilecek: '+receipt().debts.map(row=>format(row.quantity,row.unit)).join(' / '):'Eski tahsilat seçin.';};
-    form.elements.originalId.addEventListener('change',()=>{host.replaceChildren();show();setDirty(true);remember();});show();
+    form.elements.originalId.addEventListener('change',()=>{destroyComboboxesIn(host);host.replaceChildren();show();setDirty(true);remember();});show();
   }
   if(kind==='return'){returnProducts(saved?.fields);form.elements.originalId.addEventListener('change',()=>{returnProducts();setDirty(true);remember();});}
-  if(kind==='offset'){for(const row of saved?.targets||[])addTarget(row);form.elements.toAccountId.addEventListener('change',()=>{targetHost.replaceChildren();setDirty(true);remember();});}
+  if(kind==='offset'){for(const row of saved?.targets||[])addTarget(row);form.elements.toAccountId.addEventListener('change',()=>{destroyComboboxesIn(targetHost);targetHost.replaceChildren();setDirty(true);remember();});}
   for(const[name,rows]of Object.entries(saved?.arrays||{}))for(const row of rows)groups.get(name)?.add(row);
   for(const select of form.querySelectorAll(receiptSelects))selectionSummary(select);
   for(const details of form.querySelectorAll('details'))if([...details.querySelectorAll('input,textarea')].some(input=>!input.disabled&&input.type!=='checkbox'&&input.value.trim()))details.open=true;
@@ -802,6 +955,6 @@ async function renderSupplierDocumentTask(panel, context) {
     catch(error){if(form.isConnected)status.textContent=error.message;}
     finally{sending=false;if(save.isConnected)save.disabled=stale();}
   });
-  return completedDraftKey=>{if(completedDraftKey===key||completedDraftKey===legacyKey)completed=true;if(!sending)remember();sourcePicker?.destroy();};
+  return completedDraftKey=>{if(completedDraftKey===key||completedDraftKey===legacyKey)completed=true;if(!sending)remember();sourcePicker?.destroy();destroyComboboxesIn(form);};
 }
 

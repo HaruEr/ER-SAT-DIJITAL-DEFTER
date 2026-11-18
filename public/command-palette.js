@@ -929,6 +929,7 @@
       }
 
       if (!promises.length) {
+        if (destroyed || !openState || seq !== asyncSeq || controller?.signal?.aborted) return;
         lastAsyncResult = {
           items: syncItems,
           totalCount: syncExtraTotal,
@@ -941,6 +942,7 @@
         return;
       }
 
+      if (destroyed || !openState || seq !== asyncSeq || controller?.signal?.aborted) return;
       lastAsyncResult = {
         items: syncItems,
         totalCount: syncExtraTotal,
