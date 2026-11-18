@@ -1856,3 +1856,46 @@ test('M4.2 Iter 3: checkout.js parseSignedTL non-codec fallback normalizes -0 to
   assert.equal(invalidAmount, null);
   assert.equal(input.checkValidity(), false);
 });
+
+test('Scale C summary heap fix: renderSummary consumes server-paginated /api/summary responses and triggers page/filter requests', async t => {
+  const baseRepo = seedRepo('demo');
+  t.after(() => baseRepo.close());
+  const seenQueries = [];
+  const app = await createOwnerApp(t, {
+    url: 'http://127.0.0.1:4317/#v=summary',
+    reposOverride: { demo: baseRepo, dukkan: seedRepo('dukkan') },
+    summaryOverride: (st, parsed) => {
+      seenQueries.push(Object.fromEntries(parsed.searchParams.entries()));
+      const baseSummary = workdaySummary(st, parsed.searchParams.get('date') || st.date);
+      const page = Number(parsed.searchParams.get('page') || '1');
+      const q = (parsed.searchParams.get('q') || '').toLowerCase();
+      const filtered = q
+        ? baseSummary.accounts.filter(r => r.accountId.toLowerCase().includes(q))
+        : baseSummary.accounts;
+      const pageSize = Number(parsed.searchParams.get('pageSize') || '50');
+      const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+      return {
+        date: baseSummary.date,
+        accounts: filtered.slice((page - 1) * pageSize, page * pageSize),
+        totals: baseSummary.totals,
+        paginated: true,
+        totalAccounts: baseSummary.accounts.length,
+        filteredAccounts: filtered.length,
+        page,
+        pageSize,
+        totalPages
+      };
+    }
+  });
+  await tick(40);
+  assert.ok(seenQueries.length >= 1);
+  assert.equal(seenQueries[0].paginated, '1');
+  assert.equal(seenQueries[0].pageSize, '50');
+  assert.equal(seenQueries[0].page, '1');
+  assert.ok(app.document.querySelectorAll('#summary-result tbody tr').length > 0);
+  const searchEl = app.document.querySelector('#summary-search');
+  setFieldValue(app.window, searchEl, 'nakit');
+  await tick(40);
+  assert.equal(seenQueries.at(-1).q, 'nakit');
+  assert.equal(app.document.querySelectorAll('#summary-result tbody tr').length, 1);
+});

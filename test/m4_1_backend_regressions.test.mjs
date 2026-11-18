@@ -1645,3 +1645,48 @@ test('CHAL-M33-P3 iter3: pre-link native allocation and offset amended post-link
   assert.deepEqual(repo.state().balances, replay(repo.events()).balances);
   repo.close();
 });
+
+test('Scale C summary heap fix: GET /api/summary?paginated=1 slices and filters accurately in full & hot modes while preserving unpaginated API', async t => {
+  const dataDirectory = mkdtempSync(join(tempRoot, 'm4-summary-paginated-'));
+  const { server, repositories } = createApp({ dataDirectory });
+  t.after(async () => { server.closeAllConnections?.(); await new Promise(r => server.close(r)); for (const r of repositories.values()) { try { r.close(); } catch {} } rmSync(dataDirectory, { recursive: true, force: true }); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  await authenticateTestOwner(server);
+  const base = `http://127.0.0.1:${server.address().port}`;
+  repositories.get('demo')?.close();
+  const repo = new Repository(join(dataDirectory, 'demo.sqlite'), 'demo', { cacheMaxBytes: 96 * 1024 });
+  repositories.set('demo', repo);
+  const d0 = '2026-11-10';
+  repo.execute({ id: 'init-open', revision: 0, command: { type: 'opening', date: d0, balances: zeroBalances({ nakit: '100000' }) } });
+  for (let i = 0; i < 65; i++) {
+    exec(repo, `cust-${i}`, {
+      type: 'account', date: d0, name: i === 12 ? 'Şahin Çelik Özel' : `Müşteri ${String(i).padStart(3, '0')}`,
+      unit: 'TL', kind: 'receivable', partyType: 'customer', opening: '0'
+    });
+  }
+  const resFullUnpaged = await fetch(`${base}/api/summary?workspace=demo&date=${d0}`, { headers: { connection: 'close' } });
+  assert.equal(resFullUnpaged.status, 200);
+  const fullUnpaged = await resFullUnpaged.json();
+  assert.equal(fullUnpaged.paginated, undefined);
+  assert.ok(fullUnpaged.accounts.length >= 65);
+
+  const resPage1 = await fetch(`${base}/api/summary?workspace=demo&date=${d0}&paginated=1&page=1&pageSize=50`, { headers: { connection: 'close' } });
+  assert.equal(resPage1.status, 200);
+  const page1 = await resPage1.json();
+  assert.equal(page1.paginated, true);
+  assert.equal(page1.page, 1);
+  assert.equal(page1.pageSize, 50);
+  assert.equal(page1.accounts.length, 50);
+  assert.equal(page1.totalAccounts, fullUnpaged.accounts.length);
+  assert.deepEqual(page1.totals, fullUnpaged.totals);
+
+  const resSearch = await fetch(`${base}/api/summary?workspace=demo&date=${d0}&paginated=1&q=sahin&kind=customer&unit=TL`, { headers: { connection: 'close' } });
+  assert.equal(resSearch.status, 200);
+  const searchBody = await resSearch.json();
+  assert.equal(searchBody.paginated, true);
+  assert.equal(searchBody.filteredAccounts, 1);
+  assert.equal(searchBody.accounts[0].accountId, 'cari-cust-12');
+
+  const resBadPage = await fetch(`${base}/api/summary?workspace=demo&date=${d0}&paginated=1&page=0`, { headers: { connection: 'close' } });
+  assert.equal(resBadPage.status, 400);
+});

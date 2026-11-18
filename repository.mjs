@@ -22,6 +22,7 @@ import {
   hydrateLedger,
   journalFilterHash,
   normalizeJournalOptions,
+  normalizeSearch,
   parseJournalCursor,
   projectAccountStatement,
   projectHotLedger,
@@ -522,45 +523,91 @@ export class Repository {
     })();
     return computeAccountStatement(hot.state.revision, account, events, { startDate, endDate });
   }
-  workdaySummary(date) {
+  workdaySummary(date, options = null) {
     const owned = this.#ownedLedger();
+    let result;
+    let accountsList;
     if (owned.mode === 'full') {
       const state = owned.data.state;
-      return computeWorkdaySummary(state, date || state.date);
-    }
-    const hot = owned.data;
-    const targetDate = date || hot.state.date;
-    if (!hot.state.initialized) fail('Önce başlangıç devrini onaylayın.');
-    validDate(targetDate);
-    if (targetDate < hot.openingDate || targetDate > hot.state.date) fail('Özet tarihi başlangıç ile açık iş günü arasında olmalı.');
-    const rows = new Map(
-      hot.state.accounts
-        .filter(a => !hot.accountCreatedDates.has(a.id) || hot.accountCreatedDates.get(a.id) <= targetDate)
-        .map(a => [a.id, { accountId: a.id, unit: a.unit, opening: 0, incoming: 0, outgoing: 0, adjustment: 0, closing: 0 }])
-    );
-    const adjIds = new Set();
-    const totals = { sales: 0, purchases: 0 };
-    const isOpening = e => ['opening', 'account', 'fundAccount', 'stockAccount', 'nominalOpening'].includes(e.type);
-    const isAdjustment = e => ['close', 'stocktake'].includes(e.type) || (e.type === 'movement' && e.label === 'Açılış düzeltmesi');
-    const stmt = this.db.prepare('SELECT id, date, type, label, revenue, purchase_total, original_id, entries_json FROM ledger_journal WHERE date <= ? ORDER BY seq');
-    for (const e of stmt.iterate(targetDate)) {
-      if (isAdjustment(e)) adjIds.add(e.id);
-      if (e.date === targetDate) {
-        totals.sales += e.revenue || 0;
-        totals.purchases += e.purchase_total || 0;
+      accountsList = state.accounts;
+      result = computeWorkdaySummary(state, date || state.date);
+    } else {
+      const hot = owned.data;
+      accountsList = hot.state.accounts;
+      const targetDate = date || hot.state.date;
+      if (!hot.state.initialized) fail('Önce başlangıç devrini onaylayın.');
+      validDate(targetDate);
+      if (targetDate < hot.openingDate || targetDate > hot.state.date) fail('Özet tarihi başlangıç ile açık iş günü arasında olmalı.');
+      const rows = new Map(
+        hot.state.accounts
+          .filter(a => !hot.accountCreatedDates.has(a.id) || hot.accountCreatedDates.get(a.id) <= targetDate)
+          .map(a => [a.id, { accountId: a.id, unit: a.unit, opening: 0, incoming: 0, outgoing: 0, adjustment: 0, closing: 0 }])
+      );
+      const adjIds = new Set();
+      const totals = { sales: 0, purchases: 0 };
+      const isOpening = e => ['opening', 'account', 'fundAccount', 'stockAccount', 'nominalOpening'].includes(e.type);
+      const isAdjustment = e => ['close', 'stocktake'].includes(e.type) || (e.type === 'movement' && e.label === 'Açılış düzeltmesi');
+      const stmt = this.db.prepare('SELECT id, date, type, label, revenue, purchase_total, original_id, entries_json FROM ledger_journal WHERE date <= ? ORDER BY seq');
+      for (const e of stmt.iterate(targetDate)) {
+        if (isAdjustment(e)) adjIds.add(e.id);
+        if (e.date === targetDate) {
+          totals.sales += e.revenue || 0;
+          totals.purchases += e.purchase_total || 0;
+        }
+        const reversedAdj = e.type === 'reverse' && adjIds.has(e.original_id);
+        for (const entry of JSON.parse(e.entries_json)) {
+          const row = rows.get(entry.accountId);
+          if (!row) continue;
+          if (e.date < targetDate || isOpening(e)) row.opening += entry.delta;
+          else if (isAdjustment(e) || reversedAdj) row.adjustment += entry.delta;
+          else if (entry.delta >= 0) row.incoming += entry.delta;
+          else row.outgoing -= entry.delta;
+        }
       }
-      const reversedAdj = e.type === 'reverse' && adjIds.has(e.original_id);
-      for (const entry of JSON.parse(e.entries_json)) {
-        const row = rows.get(entry.accountId);
-        if (!row) continue;
-        if (e.date < targetDate || isOpening(e)) row.opening += entry.delta;
-        else if (isAdjustment(e) || reversedAdj) row.adjustment += entry.delta;
-        else if (entry.delta >= 0) row.incoming += entry.delta;
-        else row.outgoing -= entry.delta;
-      }
+      for (const row of rows.values()) row.closing = row.opening + row.incoming - row.outgoing + row.adjustment;
+      result = { date: targetDate, accounts: [...rows.values()], totals };
     }
-    for (const row of rows.values()) row.closing = row.opening + row.incoming - row.outgoing + row.adjustment;
-    return { date: targetDate, accounts: [...rows.values()], totals };
+    if (!options?.paginated) return result;
+    const kind = options.kind || 'all';
+    const unit = options.unit || '';
+    const active = options.active === true || options.active === '1' || options.active === 'true';
+    const qTokens = options.q ? normalizeSearch(String(options.q).trim()).split(/\s+/).filter(Boolean) : [];
+    const pageSize = Math.max(1, Math.min(200, Number(options.pageSize) || 50));
+    const requestedPage = Math.max(1, Number(options.page) || 1);
+    const accountMap = new Map(accountsList.map(a => [a.id, a]));
+    const isStock = a => a.kind === 'asset' && Boolean(a.isSaleable || a.isPurchasable || a.pairedGroups?.length || ['bilezik22', 'taki14', 'taki22'].includes(a.id));
+    const filtered = result.accounts.filter(row => {
+      const a = accountMap.get(row.accountId);
+      if (!a) return false;
+      if (a.retired && row.opening === 0 && row.incoming === 0 && row.outgoing === 0 && row.adjustment === 0 && row.closing === 0) return false;
+      if (unit && row.unit !== unit) return false;
+      if (active && !row.incoming && !row.outgoing && !row.adjustment) return false;
+      if (kind !== 'all') {
+        if (kind === 'stock' && !isStock(a)) return false;
+        if (kind === 'money' && !(a.kind === 'asset' && !isStock(a))) return false;
+        if (kind === 'customer' && !(a.kind === 'receivable' && (a.partyType || 'customer') === 'customer')) return false;
+        if (kind === 'supplier' && !(a.kind === 'receivable' && a.partyType === 'supplier')) return false;
+      }
+      if (qTokens.length) {
+        const nameNorm = normalizeSearch(a.name || '');
+        for (let i = 0; i < qTokens.length; i++) if (!nameNorm.includes(qTokens[i])) return false;
+      }
+      return true;
+    });
+    const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+    const page = Math.max(1, Math.min(requestedPage, totalPages));
+    const startIdx = (page - 1) * pageSize;
+    return {
+      date: result.date,
+      accounts: filtered.slice(startIdx, startIdx + pageSize),
+      totals: result.totals,
+      paginated: true,
+      totalAccounts: result.accounts.length,
+      filteredAccounts: filtered.length,
+      page,
+      pageSize,
+      totalPages
+    };
   }
   recoveryInfo() {
     // Read a consistent metadata/archiveability snapshot without replaying the ledger.

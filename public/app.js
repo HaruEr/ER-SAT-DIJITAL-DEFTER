@@ -2890,52 +2890,66 @@ function renderSummary() {
   const result=$('#summary-result'),status=$('#summary-status'),selectedWorkspace=workspace;let sequence=0,loaded=null,page=1;
   const draw=({ resetPage = true, focusPagination = null } = {})=>{
     if(!loaded)return;
-    const group=$('#summary-kind').value,qRaw=$('#summary-search').value.trim(),unit=$('#summary-unit').value,active=$('#summary-active').checked;
-    const qTokens=qRaw?(searchNorm?.tokenizeSearch?searchNorm.tokenizeSearch(qRaw):normalize(qRaw).split(' ').filter(Boolean)):[];
-    const rows=loaded.accounts.filter(row=>{
-      const a=account(row.accountId);
-      if(!a)return false;
-      if(a.retired&&['opening','incoming','outgoing','adjustment','closing'].every(key=>row[key]===0))return false;
-      if(unit&&row.unit!==unit)return false;
-      if(active&&!row.incoming&&!row.outgoing&&!row.adjustment)return false;
-      if(group!=='all'){
-        if(group==='stock'&&!isStockAccount(a))return false;
-        if(group==='money'&&!(a.kind==='asset'&&!isStockAccount(a)))return false;
-        if(group==='customer'&&!(a.kind==='receivable'&&(a.partyType||'customer')==='customer'))return false;
-        if(group==='supplier'&&!(a.kind==='receivable'&&a.partyType==='supplier'))return false;
-      }
-      if(qTokens.length){
-        const nameNorm=accountNameNorm(a);
-        for(let i=0;i<qTokens.length;i++)if(!nameNorm.includes(qTokens[i]))return false;
-      }
-      return true;
-    });
-    const totalPages=Math.max(1,Math.ceil(rows.length/SUMMARY_PAGE_SIZE));
-    if(resetPage)page=1;
-    page=Math.max(1,Math.min(page,totalPages));
-    const startIdx=(page-1)*SUMMARY_PAGE_SIZE;
-    const paged=rows.slice(startIdx,startIdx+SUMMARY_PAGE_SIZE);
-    const paginationMarkup=rows.length>SUMMARY_PAGE_SIZE
-      ? `<nav class="workbench-pagination" aria-label="Özet tablosu sayfalaması"><span class="context-note" id="summary-page-info">Sayfa ${page} / ${totalPages} · ${startIdx+1}–${startIdx+paged.length} / ${rows.length}</span><div class="workbench-actions"><button type="button" class="button secondary compact" id="summary-prev"${page<=1?' disabled':''}>← Önceki</button><button type="button" class="button secondary compact" id="summary-next"${page>=totalPages?' disabled':''}>Sonraki →</button></div></nav>`
+    const isServerPaged=loaded.paginated===true;
+    let paged,totalRows,totalAll,totalPages,startIdx;
+    if(isServerPaged){
+      paged=loaded.accounts;
+      totalRows=loaded.filteredAccounts;
+      totalAll=loaded.totalAccounts;
+      totalPages=Math.max(1,loaded.totalPages||1);
+      page=Math.max(1,Math.min(loaded.page||1,totalPages));
+      startIdx=(page-1)*(loaded.pageSize||SUMMARY_PAGE_SIZE);
+    }else{
+      const group=$('#summary-kind').value,qRaw=$('#summary-search').value.trim(),unit=$('#summary-unit').value,active=$('#summary-active').checked;
+      const qTokens=qRaw?(searchNorm?.tokenizeSearch?searchNorm.tokenizeSearch(qRaw):normalize(qRaw).split(' ').filter(Boolean)):[];
+      const rows=loaded.accounts.filter(row=>{
+        const a=account(row.accountId);
+        if(!a)return false;
+        if(a.retired&&['opening','incoming','outgoing','adjustment','closing'].every(key=>row[key]===0))return false;
+        if(unit&&row.unit!==unit)return false;
+        if(active&&!row.incoming&&!row.outgoing&&!row.adjustment)return false;
+        if(group!=='all'){
+          if(group==='stock'&&!isStockAccount(a))return false;
+          if(group==='money'&&!(a.kind==='asset'&&!isStockAccount(a)))return false;
+          if(group==='customer'&&!(a.kind==='receivable'&&(a.partyType||'customer')==='customer'))return false;
+          if(group==='supplier'&&!(a.kind==='receivable'&&a.partyType==='supplier'))return false;
+        }
+        if(qTokens.length){
+          const nameNorm=accountNameNorm(a);
+          for(let i=0;i<qTokens.length;i++)if(!nameNorm.includes(qTokens[i]))return false;
+        }
+        return true;
+      });
+      totalPages=Math.max(1,Math.ceil(rows.length/SUMMARY_PAGE_SIZE));
+      if(resetPage)page=1;
+      page=Math.max(1,Math.min(page,totalPages));
+      startIdx=(page-1)*SUMMARY_PAGE_SIZE;
+      paged=rows.slice(startIdx,startIdx+SUMMARY_PAGE_SIZE);
+      totalRows=rows.length;
+      totalAll=loaded.accounts.length;
+    }
+    const paginationMarkup=totalRows>SUMMARY_PAGE_SIZE
+      ? `<nav class="workbench-pagination" aria-label="Özet tablosu sayfalaması"><span class="context-note" id="summary-page-info">Sayfa ${page} / ${totalPages} · ${startIdx+1}–${startIdx+paged.length} / ${totalRows}</span><div class="workbench-actions"><button type="button" class="button secondary compact" id="summary-prev"${page<=1?' disabled':''}>← Önceki</button><button type="button" class="button secondary compact" id="summary-next"${page>=totalPages?' disabled':''}>Sonraki →</button></div></nav>`
       : '';
     result.innerHTML=`<div class="summary-day"><div><span class="eyebrow">Görüntülenen iş günü</span><h2>${esc(day(loaded.date))}</h2><p>Gün toplamları hesap filtresinden etkilenmez. Kâr değildir.</p></div><dl><div><dt>Net satış</dt><dd>${esc(formatted(loaded.totals.sales))}</dd></div><div><dt>Net alış</dt><dd>${esc(formatted(loaded.totals.purchases))}</dd></div></dl></div><div class="table-wrap summary-ledger"><table><caption>Hesap hareket cetveli · ${esc(day(loaded.date))}<span>Gelen devir + giriş − çıkış + sayım düzeltmesi = gün sonu bakiye. Her satır kendi biriminde okunur. Farklı birimler toplanmaz.</span></caption><thead><tr><th scope="col">Hesap / birim</th><th scope="col" class="numeric">Gelen devir</th><th scope="col" class="numeric">Giriş</th><th scope="col" class="numeric">Çıkış</th><th scope="col" class="numeric">Sayım düzeltmesi</th><th scope="col" class="numeric">Gün sonu bakiye</th></tr></thead><tbody>${paged.map(row=>`<tr><th scope="row">${summaryAccountLabel(row.accountId)}<small>${esc(units[row.unit].label)}</small></th>${['opening','incoming','outgoing','adjustment','closing'].map(key=>`<td class="numeric">${esc(formatted(row[key],row.unit))}</td>`).join('')}</tr>`).join('')||'<tr><td colspan="6">Bu filtrelerle eşleşen hesap yok.</td></tr>'}</tbody></table></div>${paginationMarkup}`;
     enhanceTables(result);
-    if(rows.length>SUMMARY_PAGE_SIZE){
+    if(totalRows>SUMMARY_PAGE_SIZE){
       const prevBtn=result.querySelector('#summary-prev'),nextBtn=result.querySelector('#summary-next'),ledgerWrap=result.querySelector('.summary-ledger');
-      prevBtn?.addEventListener('click',()=>{if(page>1){page--;draw({resetPage:false,focusPagination:'prev'});}});
-      nextBtn?.addEventListener('click',()=>{if(page<totalPages){page++;draw({resetPage:false,focusPagination:'next'});}});
+      prevBtn?.addEventListener('click',()=>{if(page>1){if(isServerPaged)load(page-1,'prev');else{page--;draw({resetPage:false,focusPagination:'prev'});}}});
+      nextBtn?.addEventListener('click',()=>{if(page<totalPages){if(isServerPaged)load(page+1,'next');else{page++;draw({resetPage:false,focusPagination:'next'});}}});
       if(focusPagination){
         if(ledgerWrap)ledgerWrap.scrollTop=0;
         const targetBtn=focusPagination==='prev'?(prevBtn&&!prevBtn.disabled?prevBtn:nextBtn):(nextBtn&&!nextBtn.disabled?nextBtn:prevBtn);
         targetBtn?.focus({preventScroll:true});
       }
-      status.textContent=`${day(loaded.date)} özeti hazır. ${rows.length} / ${loaded.accounts.length} hesap eşleşti (Sayfa ${page} / ${totalPages}: ${startIdx+1}–${startIdx+paged.length} gösteriliyor).`;
+      status.textContent=`${day(loaded.date)} özeti hazır. ${totalRows} / ${totalAll} hesap eşleşti (Sayfa ${page} / ${totalPages}: ${startIdx+1}–${startIdx+paged.length} gösteriliyor).`;
     }else{
-      status.textContent=`${day(loaded.date)} özeti hazır. ${rows.length} / ${loaded.accounts.length} hesap gösteriliyor.`;
+      status.textContent=`${day(loaded.date)} özeti hazır. ${totalRows} / ${totalAll} hesap gösteriliyor.`;
     }
   };
-  const load=async()=>{const ticket=++sequence,date=$('#f-summaryDate').value;status.textContent='Özet hazırlanıyor…';result.textContent='';loaded=null;page=1;try{const summary=await request('summary',undefined,selectedWorkspace,{query:{date}});if(view!=='summary'||workspace!==selectedWorkspace||ticket!==sequence||!result.isConnected)return;loaded=summary;draw({resetPage:true});}catch(error){if(result.isConnected&&ticket===sequence){status.textContent='Özet alınamadı. Tarihi kontrol ederek yeniden deneyin.';result.textContent='Özet alınamadı: '+error.message;}}};
-  $('#summary-form').addEventListener('submit',e=>{e.preventDefault();load();});for(const id of ['summary-kind','summary-unit','summary-active'])$('#'+id).addEventListener('change',()=>draw({resetPage:true}));$('#summary-search').addEventListener('input',()=>draw({resetPage:true}));load();
+  const load=async(targetPage=1,focusPagination=null)=>{const ticket=++sequence,date=$('#f-summaryDate').value,kind=$('#summary-kind').value,unit=$('#summary-unit').value,q=$('#summary-search').value.trim(),active=$('#summary-active').checked;if(!loaded){status.textContent='Özet hazırlanıyor…';result.textContent='';}page=targetPage;try{const query={date,paginated:'1',page:String(targetPage),pageSize:String(SUMMARY_PAGE_SIZE),kind,unit,q,...(active?{active:'1'}:{})};const summary=await request('summary',undefined,selectedWorkspace,{query});if(view!=='summary'||workspace!==selectedWorkspace||ticket!==sequence||!result.isConnected)return;loaded=summary;draw({resetPage:false,focusPagination});}catch(error){if(result.isConnected&&ticket===sequence){status.textContent='Özet alınamadı. Tarihi kontrol ederek yeniden deneyin.';result.textContent='Özet alınamadı: '+error.message;}}};
+  const onFilterChange=()=>{if(loaded?.paginated)load(1);else draw({resetPage:true});};
+  $('#summary-form').addEventListener('submit',e=>{e.preventDefault();loaded=null;load(1);});for(const id of ['summary-kind','summary-unit','summary-active'])$('#'+id).addEventListener('change',onFilterChange);$('#summary-search').addEventListener('input',onFilterChange);load(1);
 }
 
 function returnProductFields(form, update) {

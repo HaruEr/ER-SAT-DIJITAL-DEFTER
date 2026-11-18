@@ -205,7 +205,21 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
         return json(200, { ...receipt, reauthenticate:true });
       }
       if (req.method === 'GET' && url.pathname === '/api/summary') {
-        return json(200, repository.workdaySummary(url.searchParams.get('date') || undefined));
+        const paginated = url.searchParams.get('paginated') === '1' || url.searchParams.has('page') || url.searchParams.has('pageSize');
+        if (!paginated) return json(200, repository.workdaySummary(url.searchParams.get('date') || undefined));
+        const pageParam = url.searchParams.get('page');
+        const pageSizeParam = url.searchParams.get('pageSize');
+        if (pageParam !== null && (!/^\d+$/.test(pageParam) || Number(pageParam) < 1)) fail('Geçerli sayfa numarası seçin.');
+        if (pageSizeParam !== null && (!/^\d+$/.test(pageSizeParam) || Number(pageSizeParam) < 1)) fail('Geçerli sayfa boyutu seçin.');
+        return json(200, repository.workdaySummary(url.searchParams.get('date') || undefined, {
+          paginated: true,
+          page: pageParam ? Number(pageParam) : 1,
+          pageSize: pageSizeParam ? Math.min(200, Number(pageSizeParam)) : 50,
+          kind: url.searchParams.get('kind') || 'all',
+          unit: url.searchParams.get('unit') || '',
+          q: url.searchParams.get('q') || '',
+          active: url.searchParams.get('active') === '1' || url.searchParams.get('active') === 'true'
+        }));
       }
       if (req.method === 'GET' && url.pathname === '/api/backup') return json(200, repository.backup(), { 'Content-Disposition': `attachment; filename="kuyumcu-${url.searchParams.get('workspace') || 'demo'}-${new Date().toISOString().slice(0, 10)}.json"` });
       if (req.method !== 'POST' || !['/api/command', '/api/restore'].includes(url.pathname)) return json(404, { error: 'İşlem bulunamadı.' });
