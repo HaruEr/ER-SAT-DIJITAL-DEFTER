@@ -207,6 +207,16 @@ function parse(input,unit='TL',signed=false,optional=false,allowZero=false) {
   if (!Number.isSafeInteger(amount) || Math.abs(amount)>1e12 || (!signed && (amount<0 || (!allowZero && amount===0)))) {input.setCustomValidity('Geçerli, sınırlar içinde miktar girin.');return null;}
   return amount;
 }
+function clearAmountInputState(input) {
+  if (!input) return;
+  if (codec?.clearInputState) { codec.clearInputState(input); return; }
+  if (input.dataset) {
+    delete input.dataset.amountResolution;
+    delete input.dataset.canonicalAmount;
+    delete input.dataset.formattedPreview;
+  }
+  input.setCustomValidity?.('');
+}
 function parseReadOnlyAmount(rawValue, unit='TL') {
   const text = String(rawValue ?? '').trim();
   if (!text) return null;
@@ -306,7 +316,7 @@ function configureItem(row,clear=false) {
   for(const key of ['quantity','weight']) row.querySelector('[data-'+key+']').readOnly=!!serial;
   select.disabled=!!serial || !pools.length;
   select.required=!!pools.length;
-  if(clear) for(const key of ['quantity','weight','value','quoted','source']) row.querySelector('[data-'+key+']').value='';
+  if(clear) for(const key of ['quantity','weight','value','quoted','source']) { const el=row.querySelector('[data-'+key+']'); clearAmountInputState(el); el.value=''; }
   if(clear) row.querySelector('[data-components]').replaceChildren();
   if(serial) {
     row.querySelector('[data-quantity]').value='1';
@@ -417,6 +427,7 @@ function addItem(data={}) {
       placeholder:'Kod, barkod, ad veya ayar',
       items:cbItems,
       value:initialId,
+      allowDisabled:Boolean(data.selection),
       allowEmpty:false,
       clearable:false,
       required:true,
@@ -430,6 +441,9 @@ function addItem(data={}) {
         try{
           const changedProduct=productSelect.value!==val;
           syncProductSelect(row,cbItems,val);
+          productSelect.setCustomValidity('');
+          searchInput.setCustomValidity('');
+          searchInput.removeAttribute('aria-invalid');
           if(changedProduct)configureItem(row,true);
           changed();
         }finally{syncingProduct=false;}
@@ -443,11 +457,22 @@ function addItem(data={}) {
       }
     });
     row._productCombobox=productCb;
+    productSelect.addEventListener('invalid',event=>{
+      if(!row._productCombobox)return;
+      event.preventDefault();
+      const msg=productSelect.validationMessage||'Geçerli hesap veya ürün seçin.';
+      row._productCombobox.input.setCustomValidity?.(msg);
+      row._productCombobox.input.setAttribute('aria-invalid','true');
+      row._productCombobox.focus();
+    });
     productSelect.addEventListener('change',()=>{
       if(syncingProduct)return;
       syncingProduct=true;
       try{
         productCb.setValue(productSelect.value,{emitChange:false});
+        productSelect.setCustomValidity('');
+        searchInput.setCustomValidity('');
+        searchInput.removeAttribute('aria-invalid');
         configureItem(row,true);
         changed();
       }finally{syncingProduct=false;}
@@ -499,7 +524,7 @@ function allocationOptions(row,preserve) {
     if(previous && !accounts.some(a=>a.id===previous)) cbItems.push({id:previous,label:previous+' · yeniden seçin',unit:''});
     else if(!previous && cari && accounts.length===1) targetId=accounts[0].id;
     row._accountCombobox.setItems(cbItems);
-    if(targetId)row._accountCombobox.setValue(targetId,{emitChange:false});
+    if(targetId)row._accountCombobox.setValue(targetId,{emitChange:false,allowDisabled:Boolean(previous)});
     else row._accountCombobox.clear({emitChange:false});
   }else{
     select.innerHTML='<option value="">Hesap seçin</option>'+accounts.map(a=>option(a.id,a.name+' · '+a.unit)).join('');
@@ -539,7 +564,7 @@ function addAllocation(kind,data={}) {
   row.querySelector('[data-value]').value=data.valueTL || '';
   if(data.weightAccount)row.querySelector('[data-pool]').value=data.weightAccount;
   configureAllocation(row);
-  row.querySelector('[data-account]').addEventListener('change',()=>{for(const key of ['quantity','value','weight'])row.querySelector('[data-'+key+']').value='';configureAllocation(row);changed();});
+  row.querySelector('[data-account]').addEventListener('change',()=>{for(const key of ['quantity','value','weight']){const el=row.querySelector('[data-'+key+']');clearAmountInputState(el);el.value='';}configureAllocation(row);changed();});
   row.querySelector('[data-quantity]').addEventListener('input',()=>configureAllocation(row));
   row.querySelector('[data-remove]').addEventListener('click',()=>{row._accountCombobox?.destroy?.();row.remove();changed();});
   return row;
@@ -702,7 +727,13 @@ function totals() {
 }
 function validateRow(row,product,primary) {
   const select=row.querySelector(primary?'[data-product]':'[data-account]');
-  select.setCustomValidity(product?'':'Geçerli hesap veya ürün seçin.');
+  const msg=product?'':'Geçerli hesap veya ürün seçin.';
+  select.setCustomValidity(msg);
+  if(primary&&row._productCombobox?.input){
+    row._productCombobox.input.setCustomValidity?.(msg);
+    if(msg)row._productCombobox.input.setAttribute('aria-invalid','true');
+    else row._productCombobox.input.removeAttribute('aria-invalid');
+  }
   if(!product)return;
   parse(row.querySelector('[data-quantity]'),product.unit);
   parse(row.querySelector('[data-value]'));
@@ -713,7 +744,14 @@ function command() {
   for(const row of $('items').children) {
     const {product,serial}=itemProduct(row);validateRow(row,product,true);
     if(!product)continue;
-    if(serials.has(serial?.code))row.querySelector('[data-product]').setCustomValidity('Tekil ürün bu işlemde bir kez seçilebilir.');
+    if(serials.has(serial?.code)){
+      const dupMsg='Tekil ürün bu işlemde bir kez seçilebilir.';
+      row.querySelector('[data-product]').setCustomValidity(dupMsg);
+      if(row._productCombobox?.input){
+        row._productCombobox.input.setCustomValidity?.(dupMsg);
+        row._productCombobox.input.setAttribute('aria-invalid','true');
+      }
+    }
     if(serial)serials.add(serial.code);
     const item={accountId:product.id,quantity:canonical(row.querySelector('[data-quantity]'),product.unit,true),value:canonical(row.querySelector('[data-value]'),'TL',true)};
     if(serial)item.inventoryCode=serial.code;
@@ -907,6 +945,18 @@ function syncFlowMode({ preferredStep = null, notify = false } = {}) {
   setCheckoutStep(activeStep);
 }
 const validateCheckoutStep = stepNum => {
+  if (stepNum === 1) {
+    for (const row of $('items').children) {
+      const { product } = itemProduct(row);
+      validateRow(row, product, true);
+    }
+  } else if (stepNum === 2) {
+    for (const kind of groups) {
+      for (const row of $(kind).children) {
+        validateRow(row, allocationAccount(row), false);
+      }
+    }
+  }
   const panel = $('trade').querySelector(`[data-step-panel="${stepNum}"]`);
   const invalid = panel && [...panel.querySelectorAll('input,select,textarea')].find(el => !el.disabled && !el.checkValidity());
   if (invalid) {
@@ -1091,10 +1141,23 @@ if(comboboxLib&&$('search')){
 $('customer').addEventListener('change',()=>void lookupCustomer($('customer').value));
 $('customer-form').elements.unit.addEventListener('change',()=>{
   const other=$('customer-form').elements.unit.value==='other';
-  $('other-unit-field').hidden=!other;$('customer-form').elements.currencyCode.required=other;
+  const codeEl=$('customer-form').elements.currencyCode;
+  $('other-unit-field').hidden=!other;codeEl.required=other;
+  if(!other){codeEl.value='';codeEl.setCustomValidity('');}
+});
+$('customer-form').elements.currencyCode.addEventListener('input',()=>{
+  const codeEl=$('customer-form').elements.currencyCode;
+  codeEl.value=codeEl.value.toUpperCase();
+  codeEl.setCustomValidity(/^[A-Z]{3}$/.test(codeEl.value) && !['TRY', 'HAS'].includes(codeEl.value) ? '' : 'Üç harfli döviz kodu yazın.');
 });
 $('customer-form').addEventListener('submit',event=>{
-  event.preventDefault();if(writing||pending||!snapshot||!$('customer-form').reportValidity())return;
+  event.preventDefault();
+  if($('customer-form').elements.unit.value==='other'){
+    const codeEl=$('customer-form').elements.currencyCode;
+    const val=codeEl.value.trim().toUpperCase();
+    codeEl.setCustomValidity(/^[A-Z]{3}$/.test(val) && !['TRY', 'HAS'].includes(val) ? '' : 'Üç harfli döviz kodu yazın.');
+  }
+  if(writing||pending||!snapshot||!$('customer-form').reportValidity())return;
   uiKit?.clearBanner?.($('customer-drawer-notice'));
   const fields=Object.fromEntries(new FormData($('customer-form')));
   const c={type:'account',date:snapshot.date,name:fields.name.trim(),unit:fields.unit==='other'?fields.currencyCode.toUpperCase():fields.unit,partyType:'customer',opening:'0'};

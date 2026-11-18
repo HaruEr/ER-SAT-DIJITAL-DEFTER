@@ -203,6 +203,17 @@
     return result.scaled;
   }
 
+  function clearInputState(input) {
+    if (!input) return;
+    if (input.dataset) {
+      delete input.dataset.amountResolution;
+      delete input.dataset.canonicalAmount;
+      delete input.dataset.formattedPreview;
+    }
+    input.setCustomValidity?.('');
+    clearDisambiguation(input);
+  }
+
   function canonicalInputValue(input, unit = 'TL', positive = false) {
     if (!input) return '';
     const scaled = parseInputElement(input, unit, positive);
@@ -226,7 +237,8 @@
     canonicalFromScaled,
     parseUserAmount,
     parseInputElement,
-    canonicalInputValue
+    canonicalInputValue,
+    clearInputState
   };
   root.DefterAmountCodec = exportsObj;
   if (typeof globalThis !== 'undefined') globalThis.DefterAmountCodec = exportsObj;

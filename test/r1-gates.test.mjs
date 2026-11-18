@@ -300,7 +300,7 @@ test('R1 Suppliers: remember() keeps stamp.revision/date, disables stale submit,
     assert.ok(retSave, 'Document task must have explicit button[type="submit"]');
     assert.equal(retForm.dataset.draftDirty, 'true');
     assert.equal(retSave.disabled, true);
-    assert.equal(retReviews.length >= 2, true);
+    assert.equal(retReviews.length, 1);
     assert.equal(root.querySelector('[data-draft-stale]') !== null, true);
 
     // Edit while stale keeps return draft revision at 6
@@ -309,7 +309,7 @@ test('R1 Suppliers: remember() keeps stamp.revision/date, disables stale submit,
     retForm.querySelector('input[name="note"]').dispatchEvent(new window.Event('input', { bubbles: true }));
     assert.equal(store.getDraft(retKey).meta.revision, 6);
 
-    retReviews[1].click();
+    retReviews[0].click();
     assert.equal(retSave.disabled, false);
     assert.equal(retReviews.every(b => b.hidden === true), true);
     assert.equal(store.getDraft(retKey).meta.revision, 7);

@@ -203,7 +203,17 @@ function selectHasValue(control, value) {
   }
   return [...control.options].some(option => option.value === val);
 }
-function setSelectControlValue(control, value, { emit = true } = {}) {
+function clearAmountInputState(input) {
+  if (!input) return;
+  if (codec?.clearInputState) { codec.clearInputState(input); return; }
+  if (input.dataset) {
+    delete input.dataset.amountResolution;
+    delete input.dataset.canonicalAmount;
+    delete input.dataset.formattedPreview;
+  }
+  input.setCustomValidity?.('');
+}
+function setSelectControlValue(control, value, { emit = true, allowDisabled = false } = {}) {
   if (!control) return false;
   const val = value === null || value === undefined ? '' : String(value);
   if (control.tagName !== 'SELECT') {
@@ -214,7 +224,8 @@ function setSelectControlValue(control, value, { emit = true } = {}) {
   const cb = globalThis.DefterCombobox?.getInstance?.(control);
   if (cb) {
     if (!selectHasValue(control, val)) return false;
-    cb.setValue(val, { emitChange: false });
+    const accepted = cb.setValue(val, { emitChange: false, allowDisabled });
+    if (!accepted) return false;
     if (emit) control.dispatchEvent(new Event('change', { bubbles: true }));
     return true;
   }
@@ -222,6 +233,14 @@ function setSelectControlValue(control, value, { emit = true } = {}) {
   control.value = val;
   if (emit) control.dispatchEvent(new Event('change', { bubbles: true }));
   return true;
+}
+
+function destroyComboboxesIn(rootEl) {
+  const cbLib = globalThis.DefterCombobox;
+  if (!cbLib?.getInstance || !rootEl) return;
+  for (const el of rootEl.querySelectorAll('select, .defter-combobox-input')) {
+    cbLib.getInstance(el)?.destroy?.({ restoreOptions: false });
+  }
 }
 
 function prepareDraftForms() {
@@ -254,7 +273,7 @@ function prepareDraftForms() {
                 control.value = value;
                 control.dispatchEvent(new Event('input', { bubbles: true }));
               } else if (selectHasValue(control, value)) {
-                setSelectControlValue(control, value, { emit: true });
+                setSelectControlValue(control, value, { emit: true, allowDisabled: true });
               } else {
                 control.dispatchEvent(new Event('change', { bubbles: true }));
               }
@@ -371,24 +390,15 @@ const matchesSearchText = (haystack, query) => searchNorm
 
 let cachedAccountsSrc = null, cachedAccountMap = null, cachedActiveList = null;
 const accountSearchCache = new WeakMap();
-const partyUnitComboCache = new WeakMap();
-const partyFirmComboCache = new WeakMap();
 function partyComboboxItem(a, { firmOnly = false } = {}) {
-  const cache = firmOnly ? partyFirmComboCache : partyUnitComboCache;
-  let item = cache.get(a);
-  if (!item) {
-    item = {
-      id: a.id,
-      label: a.name,
-      unit: firmOnly ? '' : a.unit,
-      subtitle: firmOnly ? 'Toptancı Firma' : (units[a.unit]?.label || a.unit),
-      phone: a.phone || '',
-      taxId: a.taxId || '',
-      keywords: [a.id, units[a.unit]?.label].filter(Boolean).join(' ')
-    };
-    cache.set(a, item);
-  }
-  return item;
+  return {
+    id: a.id,
+    label: a.name,
+    unit: firmOnly ? '' : a.unit,
+    subtitle: firmOnly ? 'Toptancı Firma' : (units[a.unit]?.label || a.unit),
+    phone: a.phone || '',
+    taxId: a.taxId || ''
+  };
 }
 function accountSearchText(a) {
   let text = accountSearchCache.get(a);
@@ -472,6 +482,7 @@ async function refresh(announce = true, { allowBusy = false } = {}) {
 }
 function renderLoadError(message) {
   $('#business-date').textContent = 'Bilgi alınamadı';
+  destroyComboboxesIn($('#main'));
   $('#main').innerHTML = `<section class="load-error section" aria-labelledby="load-error-title"><span class="eyebrow">DEFTERE ERİŞİM</span><h1 id="load-error-title">Defter açılamadı</h1><p>Önce yeniden deneyin. Defter yine açılamıyorsa seçili alana ait JSON yedeği veya akışlı arşivle kurtarma seçeneklerini kontrol edebilirsiniz.</p><p class="context-note">${esc(message)}</p><div class="recovery-actions"><button id="load-retry" class="button" type="button">Tekrar dene</button><button id="load-recovery" class="button secondary" type="button">Yedekten kurtar</button></div><div id="recovery-panel" class="recovery-panel"></div></section>`;
   $('#load-retry').addEventListener('click', () => refresh());
   $('#load-recovery').addEventListener('click', openRecovery);
@@ -877,6 +888,7 @@ function render() {
   if (supplierWorkspace && (view!=='suppliers'||supplierWorkspaceScope!==workspace||!state.initialized)) {
     supplierWorkspace.destroy(); supplierWorkspace=null;
   }
+  if (!supplierWorkspace) destroyComboboxesIn($('#main'));
   if (partyReturnContext && (partyReturnContext.workspace!==workspace || partyReturnContext.ownerView!==view)) partyReturnContext=null;
   $('#workspace').value = workspace;
   $('#business-date').textContent = day(state.date);
@@ -973,6 +985,9 @@ function renderOverview() {
   const foreign=direction=>Object.entries(flow.byUnit||{}).filter(([unit,row])=>unit!=='TL'&&row[direction]).map(([unit,row])=>`<small>${esc(formatted(row[direction],unit))}</small>`).join('');
   const cash=activeAccounts().filter(a=>a.kind==='asset'&&a.physical&&a.unit==='TL').reduce((sum,a)=>sum+(state.balances[a.id]||0),0);
   const physical=activeAccounts().filter(isStockAccount),count=state.overview?.todaysCount??state.journal.filter(e=>e.date===state.date).length;
+  const OVERVIEW_STOCK_LIMIT = 50;
+  const shownPhysical = physical.length > OVERVIEW_STOCK_LIMIT ? physical.slice(0, OVERVIEW_STOCK_LIMIT) : physical;
+  const renderPhysicalRows = list => list.map(a=>`<tr><td><strong>${esc(a.name)}</strong></td><td class="numeric">${esc(formatted(state.balances[a.id],a.unit))}</td><td><span class="badge">${a.countPolicy==='periodic'?'Dönemsel tartım':'Günlük sayım'}</span></td></tr>`).join('');
   const openOrders=(state.customerOrders||[]).filter(o=>o.status==='open').length;
   const liquidByUnit=new Map();
   for(const a of financialAccounts()){const b=state.balances[a.id]||0;if(b||a.unit==='TL')liquidByUnit.set(a.unit,(liquidByUnit.get(a.unit)||0)+b);}
@@ -999,7 +1014,12 @@ function renderOverview() {
       `<article class="overview-block"><h3>4. Günün Nabzı</h3><p class="context-note">Son hareketlerin hızlı özeti</p>${recentEvents.map((e,idx)=>`<div class="balance-row"><span>${esc(e.label)}</span><button type="button" class="button text compact" data-overview-popover="${idx}">Özet</button></div>`).join('')||'<p class="muted">Bugün henüz hareket yok.</p>'}</article>`+
     `</section>`+
     overviewFlowChart(flow)+
-    `<div class="split"><div><section class="section"><div class="section-header"><h2>Son hareketler</h2><span class="badge gold">${count} işlem · açık gün</span></div>${recentEvents.map(e=>`<div class="balance-row"><span>${esc(e.label)}<small>${esc(day(e.date))}</small></span><span class="badge">${e.meta.revenue?esc(formatted(e.meta.revenue)):e.meta.total?esc(formatted(e.meta.total)):'Kayıtlı'}</span></div>`).join('')}<button class="button secondary" type="button" data-go="journal">Günlük İşlemler</button></section><section class="section"><h2>Hesaplara hızlı erişim</h2><div class="workbench-actions"><button class="button secondary" type="button" data-go="accounts">Müşteriler</button><button class="button secondary" type="button" data-go="suppliers">Toptancılar</button><button class="button secondary" type="button" data-go="banks">Banka/Pos/Kasa</button></div><p class="context-note">Giriş ve çıkış tutarları kâr değildir. Açık alacaklar Müşteri ve Toptancı ekranlarında izlenir.</p></section></div><section class="section"><div class="section-header"><div><h2>Anlık Stok Durumu</h2><p class="muted">Ürün adedi ve terazi gramı ayrı takip edilir.</p></div><button class="button text" type="button" data-go="stocks">Stok Ekranı →</button></div><div class="table-wrap"><table class="inventory-table"><thead><tr><th>Ürün / stok grubu</th><th class="numeric">Mevcut</th><th>Kontrol</th></tr></thead><tbody>${physical.map(a=>`<tr><td><strong>${esc(a.name)}</strong></td><td class="numeric">${esc(formatted(state.balances[a.id],a.unit))}</td><td><span class="badge">${a.countPolicy==='periodic'?'Dönemsel tartım':'Günlük sayım'}</span></td></tr>`).join('')}</tbody></table></div></section></div></div>`;
+    `<div class="split"><div><section class="section"><div class="section-header"><h2>Son hareketler</h2><span class="badge gold">${count} işlem · açık gün</span></div>${recentEvents.map(e=>`<div class="balance-row"><span>${esc(e.label)}<small>${esc(day(e.date))}</small></span><span class="badge">${e.meta.revenue?esc(formatted(e.meta.revenue)):e.meta.total?esc(formatted(e.meta.total)):'Kayıtlı'}</span></div>`).join('')}<button class="button secondary" type="button" data-go="journal">Günlük İşlemler</button></section><section class="section"><h2>Hesaplara hızlı erişim</h2><div class="workbench-actions"><button class="button secondary" type="button" data-go="accounts">Müşteriler</button><button class="button secondary" type="button" data-go="suppliers">Toptancılar</button><button class="button secondary" type="button" data-go="banks">Banka/Pos/Kasa</button></div><p class="context-note">Giriş ve çıkış tutarları kâr değildir. Açık alacaklar Müşteri ve Toptancı ekranlarında izlenir.</p></section></div><section class="section"><div class="section-header"><div><h2>Anlık Stok Durumu</h2><p class="muted">Ürün adedi ve terazi gramı ayrı takip edilir.</p></div><button class="button text" type="button" data-go="stocks">Stok Ekranı →</button></div><div class="table-wrap"><table class="inventory-table"><thead><tr><th>Ürün / stok grubu</th><th class="numeric">Mevcut</th><th>Kontrol</th></tr></thead><tbody>${renderPhysicalRows(shownPhysical)}</tbody></table></div>${physical.length > OVERVIEW_STOCK_LIMIT ? `<div class="workbench-pagination"><span class="context-note">İlk ${OVERVIEW_STOCK_LIMIT} / ${physical.length} stok gösteriliyor.</span><button type="button" class="button secondary compact" id="overview-show-all-stocks">Tümünü göster (${physical.length})</button></div>` : ''}</section></div></div>`;
+  document.getElementById('overview-show-all-stocks')?.addEventListener('click', btnEv => {
+    const tbody = document.querySelector('.overview-screen .inventory-table tbody');
+    if (tbody) tbody.innerHTML = renderPhysicalRows(physical);
+    btnEv.currentTarget.closest('.workbench-pagination')?.remove();
+  });
   document.querySelectorAll('[data-overview-popover]').forEach(btn=>btn.addEventListener('click',()=>{
     const ev=recentEvents[Number(btn.dataset.overviewPopover)];
     if(!ev||!uiKit?.openPopover)return;
@@ -1131,7 +1151,7 @@ function renderAccounts(stock=false){
     remember({editor:null,operation:kind});editor.hidden=true;editor.innerHTML='';
     renderSale($('#special-operation'),rows.filter(a=>a.unit==='TL'),kind);
   };
-  const openEditor=existing=>{captureDrafts();if(existing&&partyReturnContext?.ownerView===view)partyReturnContext=null;remember({editor:existing?.id||'new',operation:null,guided:null});const special=$('#special-operation');if(special)special.innerHTML='';editor.hidden=false;stock?renderStockForm(editor,existing):renderPartyForm(editor,false,existing);};
+  const openEditor=existing=>{captureDrafts();if(existing&&partyReturnContext?.ownerView===view)partyReturnContext=null;remember({editor:existing?.id||'new',operation:null,guided:null});const special=$('#special-operation');if(special){destroyComboboxesIn(special);special.innerHTML='';}editor.hidden=false;stock?renderStockForm(editor,existing):renderPartyForm(editor,false,existing);};
   $(`#${stock?'add-stock':'add-account'}`).addEventListener('click',()=>{captureDrafts();if(partyReturnContext?.ownerView===view)partyReturnContext=null;const form=editor.querySelector('form');if(!editor.hidden&&(form?.id==='account-form'||form?.dataset.draftEntity==='new')){remember({editor:null});editor.hidden=true;editor.innerHTML='';}else{openEditor();editor.scrollIntoView?.({block:'nearest'});}});
   $('#stock-movement')?.addEventListener('click',()=>openOperation('stock'));
   const search=$(`#${prefix}-search`),unit=$(`#${prefix}-unit`),sign=$('#account-sign'),clearBtn=$(`#${prefix}-clear`),list=$(`#${prefix}-list`),pagination=$('#workbench-pagination');
@@ -1452,6 +1472,7 @@ async function seedDemo() {
 function renderTransaction() {
   captureDrafts();
   if (canonicalTransactionRoute()) { render(); return; }
+  destroyComboboxesIn($('#main'));
   if (!['sale','sale-multi','purchase','collection','customer-exchange','movement'].includes(transactionTab)) transactionTab = 'sale';
   if (transactionTab === 'sale-multi') transactionTab = 'sale';
   const money = transactionTab === 'movement',activeTab=transactionTab==='customer-exchange'?'collection':transactionTab;
@@ -1473,6 +1494,7 @@ function renderTransaction() {
 }
 
 function renderCollectionForm(container, partyType = 'customer', editingCommand = null) {
+  destroyComboboxesIn(container);
   const allCaris=activeAccounts().filter(a=>a.kind==='receivable' && ((a.partyType || 'customer')===partyType || a.id===editingCommand?.customerAccount));
   const balanceFor=a=>{let balance=state.balances[a.id]||0;if(editingCommand?.customerAccount===a.id){const input=document.createElement('input');input.value=editingCommand.quantity;const amount=parseAmount(input,a.unit)||0;balance+=editingCommand.direction==='collect'?amount:-amount;}return balance;};
   container.innerHTML=`<h2>${partyType==='supplier'?'Firma':'Cari'} tahsilat / ödeme</h2><p class="subtitle">Kişiyi bulun; borç veya alacak durumuna uygun işlem otomatik seçilir.</p><form id="collection-form"><div class="workbench-filters"><label class="field" for="collection-search"><span>İsim, telefon veya TC/VKN ara</span><input type="search" id="collection-search" name="collectionSearch" maxlength="160" autocomplete="off"></label><label class="field" for="collection-filter"><span>Hesap durumu</span><select id="collection-filter" name="collectionFilter"><option value="all">Borç ve alacak bulunanlar</option><option value="claim">Alacağımız bulunanlar</option><option value="debt">Borcumuz bulunanlar</option></select></label></div><div class="form-grid">${field('customerAccount','Hesap',{options:[]})}${field('direction','Yapılacak işlem',{options:[]})}${field('target','Ödemenin yapılacağı kasa / banka',{options:[]})}${field('quantity','Miktar')}${field('note','Açıklama · isteğe bağlı',{full:true,required:false})}</div><p class="context-note" id="collection-balance" role="status"></p>${action('İşlemi kaydet','Tutar, seçilen hesabın borç veya alacağını aşamaz.')}</form>`;
@@ -1530,6 +1552,7 @@ function renderCollectionForm(container, partyType = 'customer', editingCommand 
 }
 
 function renderFinanceForm(container, kind = 'transfer') {
+  destroyComboboxesIn(container);
   const funds=financialAccounts().filter(a=>a.id!=='pos');
   if(kind==='settlement'){
     const banks=funds.filter(a=>a.unit==='TL'&&!a.physical);
@@ -1576,7 +1599,7 @@ function unallocatedStock(id) {
   return Math.max(0, (state.balances[id] || 0) - (state.inventoryReserved?.[id] || 0));
 }
 
-function attachSaleProductSearch(row, catalog, product, id) {
+function attachSaleProductSearch(row, catalogOrGetter, product, id) {
   const panel = document.createElement('div');
   panel.className = 'sale-product-search';
   panel.innerHTML = `<label class="field"><span>Ürün ara</span><input type="search" data-product-search maxlength="160" autocomplete="off" placeholder="Kod, ürün adı veya terazi grubu" aria-controls="sale-product-results-${id}"></label>
@@ -1595,6 +1618,7 @@ function attachSaleProductSearch(row, catalog, product, id) {
     const raw = search.value.trim();
     const query = normalize(raw);
     if (row.dataset.inventoryCode || !query) { clear(); return; }
+    const catalog = typeof catalogOrGetter === 'function' ? catalogOrGetter() : catalogOrGetter;
     const matches = catalog.filter(item => item.code.includes(query) || item.name.includes(query) || item.groups.some(g => g.key.includes(query)));
     const exact = matches.filter(item => item.code === query);
     const literal = exact.find(item => item.account.id === raw);
@@ -1740,17 +1764,20 @@ function salePricingDetails(event) {
 }
 
 function renderSale(container, caris, mode = 'sale', editingCommand = null) {
+  destroyComboboxesIn(container);
   const isExchange=mode.endsWith('-exchange'),isStock=mode==='stock',isPurchase=['purchase','supplier-purchase'].includes(mode),supplier=mode.startsWith('supplier-'),partyType=supplier?'supplier':'customer';
   const supportsQuickFlow = !isStock && !isExchange && !supplier && !editingCommand && view !== 'edit';
   const canCreateStock=!isStock&&!isExchange&&!supplier&&view!=='edit'&&Boolean(uiKit?.openDrawer);
   let flowMode=supportsQuickFlow?'quick':'guided',activeStep=1;
   const stock=activeAccounts().filter(a=>(isPurchase?a.isPurchasable||a.isSaleable:a.isSaleable)&&!(a.id==='gramToplam'&&state.nominalUnconfirmed));
-  const retailSearch = mode === 'sale' && !editingCommand ? stock.map(a => ({
+  const isRetailSale = mode === 'sale' && !editingCommand;
+  let retailSearchCache = null;
+  const getRetailSearch = isRetailSale ? () => (retailSearchCache ||= stock.map(a => ({
     account: a,
     code: normalize(a.id),
     name: normalize(a.name),
     groups: a.pairedGroups.map(id => ({ id, name: account(id).name, key: normalize(account(id).name) }))
-  })) : null;
+  }))) : null;
   const editingCaris=new Set([editingCommand?.counterpartyId,editingCommand?.counterpartyAccount,editingCommand?.customerAccount,...(editingCommand?.credits||[]).map(row=>row.accountId),...(editingCommand?.debts||[]).map(row=>row.accountId)]);
   const legacyMultiCari=Boolean(editingCommand&&!Array.isArray(editingCommand.received)&&!Array.isArray(editingCommand.given)&&[...editingCaris].filter(Boolean).length>1);
   const ownCaris=activeAccounts().filter(a=>a.kind==='receivable'&&((a.partyType||'customer')===partyType || editingCaris.has(a.id)));
@@ -1774,7 +1801,7 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
   const partyEmptyLabel=supplier?'Firma seçin':'Peşin / Kayıtsız müşteri';
   const partyField=field('counterpartyId',supplier?'İşlem yapılan firma':'İşlem yapılan müşteri',{required:supplier||isExchange,options:hasCombobox?[['',partyEmptyLabel]]:[['',partyEmptyLabel],...partyChoices.map(a=>[a.id,supplier&&!legacyMultiCari?a.name:`${a.name} · ${units[a.unit].label}`])]});
   const stockComboboxItems=stock.map(a=>{
-    const avail=retailSearch?unallocatedStock(a.id):(state.balances[a.id]||0);
+    const avail=isRetailSale?unallocatedStock(a.id):(state.balances[a.id]||0);
     const hasPool=!a.pairedGroups?.length||a.pairedGroups.some(gid=>unallocatedStock(gid)>0);
     const isDisabled=(!isPurchase&&!isStock&&!editingCommand)&&(unallocatedStock(a.id)<=0||!hasPool);
     const groupNames=(a.pairedGroups||[]).map(gid=>account(gid)?.name).filter(Boolean);
@@ -1785,7 +1812,6 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
       code:a.id,
       meta:isPurchase?units[a.unit].label:formatted(avail,a.unit),
       subtitle:groupNames.join(', '),
-      keywords:[a.id,a.name,...groupNames].filter(Boolean).join(' '),
       disabled:isDisabled,
       disabledReason:isDisabled?'Stok Yok':''
     };
@@ -2120,13 +2146,13 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
     }else if(choices.some(a=>a.id===selected)){select.value=selected;}
     if(cari&&!form.querySelector('#f-counterpartyId').value&&select.value)setSelectControlValue(form.querySelector('#f-counterpartyId'),select.value,{emit:false});
     const change=()=>{const a=account(select.value);if(!a)return;q.previousElementSibling.textContent=(cari&&supplier?'Anlaşılan miktar · ':'Miktar · ')+units[a.unit].label;v.readOnly=a.unit==='TL';v.closest('label').hidden=a.unit==='TL';v.value=a.unit==='TL'?q.value:'';v.setCustomValidity('');const groups=cari?[]:a.pairedGroups||[];group.innerHTML=groups.map(id=>`<option value="${esc(id)}">${esc(account(id).name)}</option>`).join('');group.required=groups.length>0;group.disabled=!groups.length;group.closest('label').hidden=!groups.length;weight.required=groups.length>0;weight.disabled=!groups.length;weight.closest('label').hidden=!groups.length;weight.value='';weight.setCustomValidity('');row.querySelector('[data-allocation-note]').textContent=cari?(creditDirection?'Alacağımızı artırır / borcumuzu azaltır.':'Borcumuzu artırır / alacağımızı azaltır.') : '';row.querySelector('[data-allocation-note]').hidden=!cari;updateTotals();if(!restoringDraft&&kind==='payment'&&isNonTlPaymentRow(row))syncFlowMode({preferredStep:2,notify:true});};
-    select.addEventListener('change',change);row.querySelectorAll('input').forEach(input=>input.addEventListener('input',updateTotals));row.querySelector('[data-remove-allocation]').addEventListener('click',()=>{const next=row.nextElementSibling||row.previousElementSibling;globalThis.DefterCombobox?.getInstance?.(select)?.destroy?.();row.remove();updateTotals();syncFlowMode({preferredStep:activeStep,notify:false});(next?.querySelector('select')||form.querySelector(`[data-add-allocation="${kind}"]`))?.focus({preventScroll:true});});change();connectFieldHints(row);return row;
+    select.addEventListener('change',()=>{clearAmountInputState(q);clearAmountInputState(weight);change();});row.querySelectorAll('input').forEach(input=>input.addEventListener('input',updateTotals));row.querySelector('[data-remove-allocation]').addEventListener('click',()=>{const next=row.nextElementSibling||row.previousElementSibling;globalThis.DefterCombobox?.getInstance?.(select)?.destroy?.({restoreOptions:false});row.remove();updateTotals();syncFlowMode({preferredStep:activeStep,notify:false});(next?.querySelector('select')||form.querySelector(`[data-add-allocation="${kind}"]`))?.focus({preventScroll:true});});change();connectFieldHints(row);return row;
   };
 
   const addRow=()=>{
     if(rows().length>=30||!stock.length)return;
     const id=nextRow++,row=document.createElement('section');row.className='sale-item';
-    const itemSelectMarkup=hasCombobox?'':stock.map(a=>`<option value="${esc(a.id)}">${esc(a.name)}${isPurchase?'':' · '+esc(formatted(retailSearch?unallocatedStock(a.id):state.balances[a.id],a.unit))}</option>`).join('');
+    const itemSelectMarkup=hasCombobox?'':stock.map(a=>`<option value="${esc(a.id)}">${esc(a.name)}${isPurchase?'':' · '+esc(formatted(isRetailSale?unallocatedStock(a.id):state.balances[a.id],a.unit))}</option>`).join('');
     row.innerHTML=`<div class="sale-line-header"><h3 class="sale-line-title"></h3><button class="button text" type="button" data-remove-item aria-label="Bu ürün satırını kaldır">Satırı kaldır</button></div><div class="form-grid three"><label class="field" for="item-account-${id}"><span>Ürün</span><select id="item-account-${id}" data-item-field="accountId" required>${itemSelectMarkup}</select></label><label class="field" for="item-quantity-${id}"><span>Ürün miktarı</span><input id="item-quantity-${id}" data-item-field="quantity" value="1" inputmode="numeric" required maxlength="24"></label>${isStock?'':`<label class="field" for="item-value-${id}"><span>${isPurchase?'Toplam alış bedeli':'Toplam satış tutarı'} · TL</span><input id="item-value-${id}" data-item-field="value" inputmode="decimal" required maxlength="24"></label>`}<label class="field" for="item-group-${id}"><span>Ayar / terazi grubu</span><select id="item-group-${id}" data-item-field="weightAccount"></select></label><label class="field" for="item-weight-${id}"><span>Satırın toplam ağırlığı · gr</span><input id="item-weight-${id}" data-item-field="weight" inputmode="decimal" maxlength="24"><small>Adet başına değil, toplam gram.</small></label><p class="item-stock-note context-note" data-stock-note></p></div>`;
     form.querySelector('#sale-items').append(row);
     const product=row.querySelector('[data-item-field="accountId"]'),group=row.querySelector('[data-item-field="weightAccount"]'),weight=row.querySelector('[data-item-field="weight"]');
@@ -2148,9 +2174,9 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
       });
     }
     if (mode === 'sale') attachSaleLinePricing(row);
-    if (retailSearch) attachSaleProductSearch(row, retailSearch, product, id);
+    if (getRetailSearch) attachSaleProductSearch(row, getRetailSearch, product, id);
     const change=()=>{const a=account(product.value);if(!a)return;const groups=a.pairedGroups||[],q=row.querySelector('[data-item-field="quantity"]');q.previousElementSibling.textContent=a.unit==='GRAM'?'Toplam miktar · gr':'Ürün adedi';q.inputMode=a.unit==='ADET'?'numeric':'decimal';group.innerHTML=groups.map(id=>`<option value="${esc(id)}">${esc(account(id).name)}</option>`).join('');group.required=groups.length>0;group.disabled=!groups.length;group.closest('label').hidden=!groups.length;weight.required=groups.length>0;weight.disabled=!groups.length;weight.closest('label').hidden=!groups.length;weight.value='';weight.setCustomValidity('');row.querySelector('[data-stock-note]').textContent=groups.length?'Adet ve toplam gram birlikte kaydedilir.':a.id==='gramToplam'?'Paket adedi yerine toplam gramı girin.':'';row.querySelector('[data-stock-note]').hidden=!row.querySelector('[data-stock-note]').textContent;updateTotals();};
-    product.addEventListener('change',()=>{if(!restoringDraft)row.dataset.productTouched='true';change();connectFieldHints(row);});row.querySelector('[data-remove-item]').addEventListener('click',()=>{if(rows().length<2){if(!row.dataset.inventoryCode)return;globalThis.DefterCombobox?.getInstance?.(product)?.destroy?.();row.remove();addRow()?.querySelector('select').focus();updateTotals();syncFlowMode({preferredStep:activeStep,notify:false});return;}const next=row.nextElementSibling||row.previousElementSibling;globalThis.DefterCombobox?.getInstance?.(product)?.destroy?.();row.remove();updateTotals();syncFlowMode({preferredStep:activeStep,notify:false});next?.querySelector('select').focus({preventScroll:true});});row.querySelectorAll('input').forEach(input=>input.addEventListener('input',updateTotals));change();connectFieldHints(row);return row;
+    product.addEventListener('change',()=>{if(!restoringDraft)row.dataset.productTouched='true';clearAmountInputState(row.querySelector('[data-item-field="quantity"]'));clearAmountInputState(weight);change();connectFieldHints(row);});row.querySelector('[data-remove-item]').addEventListener('click',()=>{if(rows().length<2){if(!row.dataset.inventoryCode)return;globalThis.DefterCombobox?.getInstance?.(product)?.destroy?.({restoreOptions:false});row.remove();addRow()?.querySelector('select').focus();updateTotals();syncFlowMode({preferredStep:activeStep,notify:false});return;}const next=row.nextElementSibling||row.previousElementSibling;globalThis.DefterCombobox?.getInstance?.(product)?.destroy?.({restoreOptions:false});row.remove();updateTotals();syncFlowMode({preferredStep:activeStep,notify:false});next?.querySelector('select').focus({preventScroll:true});});row.querySelectorAll('input').forEach(input=>input.addEventListener('input',updateTotals));change();connectFieldHints(row);return row;
   };
   form.addEventListener('click',event=>{if(!restoringDraft&&event.target.closest('[data-add-allocation],[data-remove-allocation],[data-remove-item],#add-sale-item'))form.dataset.draftDirty='true';});
   form.querySelector('#add-sale-item').addEventListener('click',()=>{const row=addRow();if(!row)return;syncFlowMode({preferredStep:1,notify:true});row.querySelector('select').focus({preventScroll:true});});
@@ -2206,11 +2232,11 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
           }
         } else form.dataset.missingOrder = saved.orderId;
       }
-      for(const row of rows()){globalThis.DefterCombobox?.getInstance?.(row.querySelector('[data-item-field="accountId"]'))?.destroy?.();row.remove();}
-      for(const [index,savedRow] of (saved.items||[]).slice(0,30).entries()){const row=addRow();if(!row)continue;for(const key of ['accountId','quantity','weightAccount','weight','value']){const control=row.querySelector(`[data-item-field="${key}"]`);if(!control||savedRow[key]===undefined)continue;if(control.tagName!=='SELECT'||selectHasValue(control,savedRow[key]))setSelectControlValue(control,savedRow[key]);else control.dispatchEvent(new Event('change',{bubbles:true}));}if(savedRow.inventoryCode)lockInventoryRow(row,(state.inventoryItems||[]).find(item=>item.code===savedRow.inventoryCode),savedRow.inventoryCode);if(Array.isArray(saved.touchedRows)&&saved.touchedRows[index])row.dataset.productTouched='true';}
+      for(const row of rows()){globalThis.DefterCombobox?.getInstance?.(row.querySelector('[data-item-field="accountId"]'))?.destroy?.({restoreOptions:false});row.remove();}
+      for(const [index,savedRow] of (saved.items||[]).slice(0,30).entries()){const row=addRow();if(!row)continue;for(const key of ['accountId','quantity','weightAccount','weight','value']){const control=row.querySelector(`[data-item-field="${key}"]`);if(!control||savedRow[key]===undefined)continue;if(control.tagName!=='SELECT'||selectHasValue(control,savedRow[key]))setSelectControlValue(control,savedRow[key],{allowDisabled:true});else control.dispatchEvent(new Event('change',{bubbles:true}));}if(savedRow.inventoryCode)lockInventoryRow(row,(state.inventoryItems||[]).find(item=>item.code===savedRow.inventoryCode),savedRow.inventoryCode);if(Array.isArray(saved.touchedRows)&&saved.touchedRows[index])row.dataset.productTouched='true';}
       rows().forEach((row,i) => row.priceEditor?.restore(saved.salePricing?.lines[i]));
       if(!rows().length&&!isExchange)addRow();
-      for(const kind of ['payment','counterpayment','debt','counterdebt','scrap']){for(const row of allocationRows(kind)){globalThis.DefterCombobox?.getInstance?.(row.querySelector('[data-allocation-field="accountId"]'))?.destroy?.();row.remove();}for(const savedRow of (saved[kind]||[]).slice(0,30)){const row=addAllocation(kind,savedRow.paymentType||'',savedRow.accountId);if(!row)continue;for(const key of ['accountId','quantity','valueTL','weightAccount','weight']){const control=row.querySelector(`[data-allocation-field="${key}"]`);if(!control||savedRow[key]===undefined)continue;if(control.tagName!=='SELECT'||selectHasValue(control,savedRow[key]))setSelectControlValue(control,savedRow[key]);else control.dispatchEvent(new Event('change',{bubbles:true}));}}}
+      for(const kind of ['payment','counterpayment','debt','counterdebt','scrap']){for(const row of allocationRows(kind)){globalThis.DefterCombobox?.getInstance?.(row.querySelector('[data-allocation-field="accountId"]'))?.destroy?.({restoreOptions:false});row.remove();}for(const savedRow of (saved[kind]||[]).slice(0,30)){const row=addAllocation(kind,savedRow.paymentType||'',savedRow.accountId);if(!row)continue;for(const key of ['accountId','quantity','valueTL','weightAccount','weight']){const control=row.querySelector(`[data-allocation-field="${key}"]`);if(!control||savedRow[key]===undefined)continue;if(control.tagName!=='SELECT'||selectHasValue(control,savedRow[key]))setSelectControlValue(control,savedRow[key],{allowDisabled:true});else control.dispatchEvent(new Event('change',{bubbles:true}));}}}
       updateTotals();
       if(!isStock)setFlowMode(saved.flowMode==='guided'?'guided':'quick',{step:Number(saved.activeStep)||1,notify:false});
     }
@@ -2416,6 +2442,7 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
 }
 
 function renderTransactionEditor(container, original) {
+  destroyComboboxesIn(container);
   const command=original.editableCommand;
   if(!command){container.innerHTML='<p class="info">Bu kaydın düzenlenebilir işlem bilgisi bulunamadı.</p>';return false;}
   const amount=(value,unit='TL')=>{const input=document.createElement('input');input.value=value??'0';return parseAmount(input,unit)||0;};
@@ -2633,9 +2660,23 @@ function returnProductFields(form, update) {
   const { refundProduct: product, refundProductQuantity: qty, refundProductGroup: group, refundProductWeight: weight, refundProductValue: value } = form.elements;
   const controls = [qty, group, weight, value];
   const search = form.elements.refundItemSearch;
+  const availableSerialItems = (state.inventoryItems || []).filter(item => item.status === 'available');
   const inventoryByOptionId = new Map();
+  const toSerialCbItem = item => {
+    const optId = 'item:' + item.code;
+    inventoryByOptionId.set(optId, item);
+    return {
+      id: optId,
+      label: inventoryLabel(item),
+      code: item.code,
+      barcode: item.barcode || '',
+      badge: 'Tekil',
+      keywords: [item.code, item.barcode, item.description, account(item.accountId)?.name].filter(Boolean).join(' ')
+    };
+  };
+  const initialSerialItems = availableSerialItems.map(toSerialCbItem);
   const productCb = hasCombobox ? globalThis.DefterCombobox.enhanceSelect(product, {
-    items: baseProductItems,
+    items: [...baseProductItems, ...initialSerialItems],
     value: '',
     allowEmpty: true,
     clearable: true,
@@ -2645,21 +2686,29 @@ function returnProductFields(form, update) {
     formatSelectedText: item => item.meta ? `${item.label} · ${item.meta}` : item.label
   }) : null;
   const found = !hasCombobox ? document.createElement('optgroup') : null;
-  if (found) { found.label = 'Tekil ürünler'; product.append(found); }
+  if (found) {
+    found.label = 'Tekil ürünler';
+    for (const item of availableSerialItems) {
+      const option = document.createElement('option');
+      option.textContent = inventoryLabel(item);
+      option.value = 'item:' + item.code;
+      option.inventoryItem = item;
+      found.append(option);
+    }
+    product.append(found);
+  }
   const selectedItem = () => inventoryByOptionId.get(product.value) || product.selectedOptions?.[0]?.inventoryItem;
   if (search) {
     const draw = () => {
-      const matches = search.value.trim() ? (state.inventoryItems || []).filter(item => item.status === 'available' && inventoryMatches(item,search.value)) : [];
+      const q = search.value.trim();
+      const matches = q ? availableSerialItems.filter(item => inventoryMatches(item, search.value)) : [];
       const selected = selectedItem();
-      const exact = matches.find(item=>[item.code,item.barcode].includes(search.value.trim().toUpperCase()));
-      const shown = [...new Set([selected, exact,...matches.slice(0,12)].filter(Boolean))];
+      const exact = q ? matches.find(item=>[item.code,item.barcode].includes(q.toUpperCase())) : null;
+      const shown = q ? [...new Set([selected, exact,...matches.slice(0,12)].filter(Boolean))] : availableSerialItems;
       inventoryByOptionId.clear();
+      for (const item of availableSerialItems) inventoryByOptionId.set('item:' + item.code, item);
       if (productCb) {
-        const serialItems = shown.map(item => {
-          const optId = 'item:' + item.code;
-          inventoryByOptionId.set(optId, item);
-          return { id: optId, label: inventoryLabel(item), code: item.code, badge: 'Tekil' };
-        });
+        const serialItems = shown.map(toSerialCbItem);
         productCb.setItems([...baseProductItems, ...serialItems]);
         if (selected) productCb.setValue('item:' + selected.code, { emitChange: false });
       } else if (found) {
@@ -2701,7 +2750,7 @@ function returnProductFields(form, update) {
   };
   configure();
   form.elements.returnOperation.addEventListener('change', update);
-  product.addEventListener('change', () => { configure(); update(); });
+  product.addEventListener('change', () => { clearAmountInputState(qty); clearAmountInputState(weight); configure(); update(); });
   for (const field of controls) field.addEventListener('input', () => { field.setCustomValidity(''); update(); });
   return {
     value: () => product.value ? parseAmount(value, 'TL', true) || 0 : 0,
@@ -3069,7 +3118,7 @@ function renderJournal() {
       badge: a.retired ? 'Eski hesap' : '',
       phone: a.phone || '',
       taxId: a.taxId || '',
-      keywords: [a.id, units[a.unit]?.label, a.retired ? 'eski hesap' : ''].filter(Boolean).join(' ')
+      keywords: a.retired ? 'eski hesap' : ''
     })),
     value: savedFilters?.accountId || '',
     allowEmpty: true,
@@ -3116,6 +3165,7 @@ function renderJournal() {
   };
   const clear = () => { cancelSearchDebounce();search.value='';type.value='all';start.value='';end.value='';setSelectControlValue(selectedAccount,'',{emit:false});update();search.focus({preventScroll:true}); };
   const display = (items,reversed,context=[]) => {
+    destroyComboboxesIn(list);
     const filtered = search.value.trim() || type.value !== 'all' || start.value || end.value || selectedAccount.value;
     list.innerHTML = items.length ? items.map(event=>journalItemMarkup(event,reversed,[...context,...items])).join('') : filtered ? '<div class="empty"><strong class="empty-state-title">Eşleşen kayıt bulunamadı</strong><p>Aramayı değiştirin veya işlem türü filtresini temizleyin.</p><button type="button" id="journal-empty-clear" class="button secondary compact">Filtreleri temizle</button></div>' : '<div class="empty"><strong class="empty-state-title">Bu dönemde kayıt yok</strong><p>Önceki gün kayıtları için “Bütün geçmiş” seçin.</p></div>';
     list.querySelector('#journal-empty-clear')?.addEventListener('click',clear);
@@ -3195,7 +3245,7 @@ function renderJournal() {
     if(activeJournalController){try{activeJournalController.abort();}catch{}}
     activeJournalController=typeof AbortController==='function'?new AbortController():null;
     const controller=activeJournalController;
-    if(!append){items=[];reversed=new Set();receiptContext=new Map();nextCursor=null;pageFilters=filters;next.hidden=true;list.innerHTML='<div class="loading" role="status">Kayıtlar yükleniyor…</div>';}
+    if(!append){destroyComboboxesIn(list);items=[];reversed=new Set();receiptContext=new Map();nextCursor=null;pageFilters=filters;next.hidden=true;list.innerHTML='<div class="loading" role="status">Kayıtlar yükleniyor…</div>';}
     list.setAttribute('aria-busy','true');notice.setAttribute('role','status');notice.textContent='Hareket defteri hazırlanıyor…';next.disabled=true;updateClear();
     try {
       if(filters.startDate && filters.endDate && filters.startDate>filters.endDate)throw new Error('Başlangıç tarihi bitiş tarihinden sonra olamaz.');
@@ -3213,6 +3263,7 @@ function renderJournal() {
       if(ticket!==sequence||!current())return;
       items=[];reversed.clear();nextCursor=null;next.hidden=true;
       notice.setAttribute('role','alert');notice.textContent=error.status===409?'Kayıtlar değişti. Defteri yenileyerek listeyi yeniden açın.':'Hareket defteri alınamadı: '+error.message;
+      destroyComboboxesIn(list);
       list.innerHTML='<div class="empty"><strong class="empty-state-title">Liste yeniden yüklenmeli</strong><p>'+esc(error.message)+'</p><button id="journal-retry" type="button" class="button secondary compact">'+(error.status===409?'Defteri yenile':'Listeyi yeniden dene')+'</button></div>';
       list.querySelector('#journal-retry').addEventListener('click',()=>error.status===409?refresh():loadPage());
     } finally {
@@ -3322,7 +3373,7 @@ $('#navigation').addEventListener('click', e => { const b = e.target.closest('[d
 $('#refresh').addEventListener('click', () => refresh());
 $('#retry').textContent='Kaydı sorgula / yeniden dene';
 $('#retry').addEventListener('click', () => { if (pending) submit(pending.command, 'Bekleyen işlem doğrulandı.', pending); });
-$('#workspace').addEventListener('change', async e => { captureDrafts(); partyReturnContext=null; ++recoveryGeneration; workspace = e.target.value; localStorage.setItem('defter-workspace', workspace); detailId = getSelectedDetailId(view); pending = readPending(); state = null; $('#main').innerHTML = '<div class="loading">Çalışma alanı açılıyor…</div>'; await refresh(); syncUrlHash('replace'); });
+$('#workspace').addEventListener('change', async e => { captureDrafts(); partyReturnContext=null; ++recoveryGeneration; if (supplierWorkspace) { supplierWorkspace.destroy(); supplierWorkspace=null; } destroyComboboxesIn($('#main')); workspace = e.target.value; localStorage.setItem('defter-workspace', workspace); detailId = getSelectedDetailId(view); pending = readPending(); state = null; $('#main').innerHTML = '<div class="loading">Çalışma alanı açılıyor…</div>'; await refresh(); syncUrlHash('replace'); });
 document.addEventListener('invalid', event => {
   const control = event.target;
   if (!control.matches('input, select, textarea')) return;

@@ -397,10 +397,67 @@
 
     // 4. Bağlı Varlık / Kart durumu
     let entityDisabled = false;
-    const targetEntityId = meta.entityId || draft.data?.fields?.counterpartyId || draft.data?.fields?.customer || draft.data?.fields?.supplierId || draft.data?.fields?.stockId;
-    if (targetEntityId && isEntityDisabled(targetEntityId, liveState)) {
-      entityDisabled = true;
-      reasons.push(`Seçili kart (${targetEntityId}) kullanıma kapatılmış veya devre dışı bırakılmış.`);
+    const fields = draft.data?.fields || {};
+    const checkedIds = new Set();
+    const collectEntityId = val => {
+      if (typeof val !== 'string') return;
+      const trimmed = val.trim();
+      if (!trimmed || trimmed.startsWith('serial:') || trimmed.startsWith('item:')) return;
+      checkedIds.add(trimmed);
+    };
+    for (const id of [
+      meta.entityId,
+      fields.counterpartyId,
+      fields.customer,
+      fields.supplierId,
+      fields.stockId,
+      fields.accountId,
+      fields.customerAccount,
+      fields.fromAccount,
+      fields.toAccount,
+      fields.fromAccountId,
+      fields.toAccountId,
+      fields.bankAccount,
+      fields.target,
+      fields.refundProduct,
+      draft.data?.customer?.id
+    ]) {
+      collectEntityId(id);
+    }
+    const scanRowArray = rows => {
+      if (!Array.isArray(rows)) return;
+      for (const row of rows) {
+        if (!row || typeof row !== 'object') continue;
+        for (const key of ['accountId', 'selection', 'weightAccount', 'fromAccountId', 'toAccountId']) {
+          collectEntityId(row[key]);
+        }
+        for (const pairKey of ['choice', 'source']) {
+          if (typeof row[pairKey] === 'string' && row[pairKey].startsWith('[')) {
+            try {
+              const parsed = JSON.parse(row[pairKey]);
+              if (Array.isArray(parsed) && parsed.length === 2) collectEntityId(parsed[1]);
+            } catch {}
+          }
+        }
+      }
+    };
+    const scanContainer = obj => {
+      if (!obj || typeof obj !== 'object') return;
+      for (const key of ['items', 'payment', 'counterpayment', 'debt', 'counterdebt', 'scrap', 'received', 'given', 'credits', 'debts', 'charges', 'allocations', 'targets', 'links', 'debtLinks', 'legacyUses']) {
+        scanRowArray(obj[key]);
+      }
+    };
+    scanContainer(draft.data);
+    scanContainer(draft.data?.sale);
+    scanContainer(draft.data?.rows);
+    scanContainer(draft.data?.arrays);
+
+    for (const targetEntityId of checkedIds) {
+      if (isEntityDisabled(targetEntityId, liveState)) {
+        entityDisabled = true;
+        reasons.push(`Seçili kart (${targetEntityId}) kullanıma kapatılmış veya devre dışı bırakılmış.`);
+        break;
+      }
     }
 
     // 5. İş günü kontrolü (genel formlar)
