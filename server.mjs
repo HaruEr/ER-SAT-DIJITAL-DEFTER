@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { Repository, BACKUP_MAX_BYTES } from './repository.mjs';
-import { DomainError, fail, workdaySummary } from './domain.mjs';
+import { DomainError, fail } from './domain.mjs';
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const diagnosticCodes = new Set(['EACCES', 'EPERM', 'ENOENT', 'ENOSPC', 'EIO', 'EMFILE', 'ENFILE', 'ERR_SQLITE_ERROR', 'SQLITE_BUSY', 'SQLITE_LOCKED', 'SQLITE_CORRUPT', 'SQLITE_FULL', 'SQLITE_CANTOPEN', 'SQLITE_IOERR', 'BACKUP_HISTORY_INVALID', 'STORED_HISTORY_INVALID']);
 const operations = new Map(['state', 'summary', 'backup', 'command', 'restore', 'recovery'].map(name => [`/api/${name}`, name]));
@@ -205,8 +205,7 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
         return json(200, { ...receipt, reauthenticate:true });
       }
       if (req.method === 'GET' && url.pathname === '/api/summary') {
-        const state = repository.state();
-        return json(200, workdaySummary(state, url.searchParams.get('date') || state.date));
+        return json(200, repository.workdaySummary(url.searchParams.get('date') || undefined));
       }
       if (req.method === 'GET' && url.pathname === '/api/backup') return json(200, repository.backup(), { 'Content-Disposition': `attachment; filename="kuyumcu-${url.searchParams.get('workspace') || 'demo'}-${new Date().toISOString().slice(0, 10)}.json"` });
       if (req.method !== 'POST' || !['/api/command', '/api/restore'].includes(url.pathname)) return json(404, { error: 'İşlem bulunamadı.' });

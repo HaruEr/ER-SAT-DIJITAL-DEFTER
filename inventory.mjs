@@ -1,4 +1,4 @@
-import { fail, quantity, text } from './domain.mjs';
+import { amendmentValidation, fail, quantity, text } from './domain.mjs';
 
 export function usesInventory(command) {
   if (!command || typeof command !== 'object') return false;
@@ -136,7 +136,7 @@ export function checkReserved(state) {
   }
 }
 
-export function applyInventory(state, event, meta, tagged, entries) {
+export function applyInventory(state, event, meta, tagged, entries, validationMode) {
   const c = event.command;
   if (!tagged && !state.inventoryItems?.length) return;
   const previous = state.inventoryItems || [];
@@ -227,15 +227,17 @@ export function applyInventory(state, event, meta, tagged, entries) {
   }
   // Received and delivered stock may use the same account in one trade.
   // Stock received in this event cannot stand in for a reserved piece it delivers.
-  const outgoing = new Map();
-  for (const entry of entries) {
-    if (entry.delta < 0 && state.inventoryReserved?.[entry.accountId] > 0) {
-      outgoing.set(entry.accountId, (outgoing.get(entry.accountId) || 0) - entry.delta);
+  if (!(validationMode === amendmentValidation && ['reverse', 'supplierReverse'].includes(c.type))) {
+    const outgoing = new Map();
+    for (const entry of entries) {
+      if (entry.delta < 0 && state.inventoryReserved?.[entry.accountId] > 0) {
+        outgoing.set(entry.accountId, (outgoing.get(entry.accountId) || 0) - entry.delta);
+      }
     }
-  }
-  for (const [id, amount] of outgoing) {
-    if (amount > state.balances[id] - state.inventoryReserved[id] + (released[id] || 0)) {
-      fail('Verilen adet veya gram tekil ürünlere ayrılmış. Teslim edilen ürün kodunu seçin.');
+    for (const [id, amount] of outgoing) {
+      if (amount > state.balances[id] - state.inventoryReserved[id] + (released[id] || 0)) {
+        fail('Verilen adet veya gram tekil ürünlere ayrılmış. Teslim edilen ürün kodunu seçin.');
+      }
     }
   }
   if (items !== previous) {

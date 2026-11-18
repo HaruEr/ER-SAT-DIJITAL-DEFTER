@@ -52,7 +52,7 @@ export function eventVersion(command, state) {
   if (command.type === 'saleReturn' && Object.hasOwn(command, 'outgoing')) return 9;
   return financialVersion(command, state);
 }
-function financialVersion(command, state) {
+export function financialVersion(command, state) {
   if (supplierUnitFeature(command, state)) return 7;
   return priorEventVersion(command, state);
 }
@@ -147,7 +147,7 @@ export function quantity(value, unit, { signed = false, zero = true } = {}) {
   const [whole, fraction = ''] = normalized.replace('-', '').split('.');
   const result = (Number(whole) * spec.scale + Number(fraction.padEnd(spec.digits, '0'))) * (normalized.startsWith('-') ? -1 : 1);
   if (!Number.isSafeInteger(result) || Math.abs(result) > 1e12 || (!zero && result === 0)) fail('Miktar sıfır olamaz veya izin verilen sınırı aşıyor.');
-  return result;
+  return result === 0 ? 0 : result;
 }
 export function decimal(value, unit) { const spec = unitSpec(unit); return (value / spec.scale).toFixed(spec.digits); }
 export function validDate(value) {
@@ -316,7 +316,7 @@ function exchangeTrade(s, c, total, purchase, familyMode = false, advanceTL = 0)
       paymentLines: (purchase ? given : received).lines.filter(row => row.kind === 'money'),
       counterpartyId, counterpartyType: partyType, credit: credits.total, paid: given.total - received.total, outstanding: debts.total - credits.total } };
 }
-const amendmentValidation = Symbol('validate amendment balances after both legs');
+export const amendmentValidation = Symbol('validate amendment balances after both legs');
 export function supplierAmendmentPreview(state,originalId) {
   text(originalId,'Düzeltilecek işlem',100);
   const original=state.journal.find(entry=>entry.id===originalId);
@@ -1067,7 +1067,7 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
       meta = { counts: countRows, carried, nextDate, note: modern ? 'Günlük sayım kaydedildi; terazi gramları tartılmadan hesaplanan bakiyeyle devredildi.' : 'Farklar açıklamalı düzeltme olarak işlendi; bakiyeler taşındı.' };
     } else fail('Bilinmeyen işlem türü.');
   }
-  applyInventory(s, event, meta, inventoryTagged, entries);
+  applyInventory(s, event, meta, inventoryTagged, entries, validationMode);
   entriesApply(s, entries, validationMode);
   if (validationMode !== amendmentValidation) checkReserved(s);
   if (orderChange) {
@@ -1104,24 +1104,25 @@ export function workdaySummary(state, date = state.date) {
   if (!state.initialized) fail('Önce başlangıç devrini onaylayın.');
   validDate(date);
   if (date < state.journal[0].date || date > state.date) fail('Özet tarihi başlangıç ile açık iş günü arasında olmalı.');
-  const created = new Map(state.journal.filter(e => ['account', 'fundAccount', 'stockAccount'].includes(e.type)).map(e => [e.meta.accountId, e.date]));
+  const created = new Map(state.journal.filter(e => ['account', 'fundAccount', 'stockAccount', 'supplierUnit'].includes(e.type) && e.meta?.accountId).map(e => [e.meta.accountId, e.date]));
   const rows = new Map(state.accounts.filter(a => !created.has(a.id) || created.get(a.id) <= date).map(a => [a.id, { accountId: a.id, unit: a.unit, opening: 0, incoming: 0, outgoing: 0, adjustment: 0, closing: 0 }]));
-  const journal = new Map(state.journal.map(e => [e.id, e]));
+  const adjIds = new Set();
   const totals = { sales: 0, purchases: 0 };
   const isOpening = e => ['opening', 'account', 'fundAccount', 'stockAccount', 'nominalOpening'].includes(e.type);
   const isAdjustment = e => ['close', 'stocktake'].includes(e.type) || (e.type === 'movement' && e.label === 'Açılış düzeltmesi');
   for (const e of state.journal) {
     if (e.date > date) continue;
+    if (isAdjustment(e)) adjIds.add(e.id);
     if (e.date === date) {
       totals.sales += e.meta.revenue || 0;
       totals.purchases += e.meta.purchaseTotal || 0;
     }
-    const original = e.type === 'reverse' ? journal.get(e.meta.originalId) : null;
+    const reversedAdj = e.type === 'reverse' && adjIds.has(e.meta.originalId);
     for (const entry of e.entries) {
       const row = rows.get(entry.accountId);
       if (!row) continue;
       if (e.date < date || isOpening(e)) row.opening += entry.delta;
-      else if (isAdjustment(e) || (original && isAdjustment(original))) row.adjustment += entry.delta;
+      else if (isAdjustment(e) || reversedAdj) row.adjustment += entry.delta;
       else if (entry.delta >= 0) row.incoming += entry.delta;
       else row.outgoing -= entry.delta;
     }

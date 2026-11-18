@@ -189,13 +189,17 @@ export function assertSupplierUndoAllowed(state, originalId) {
   if(state.journal.some(e=>e.id!==originalId&&!reversed.has(e.id)&&(e.meta.allocations?.some(r=>r.sourceId===originalId||r.purchaseId===originalId)||e.meta.sourceUses?.some(r=>r.sourceId===originalId)||e.meta.debtUses?.some(r=>r.sourceId===originalId)||(e.type==='supplierLegacyReceiptLink'&&(e.meta.originalId===originalId||e.meta.uses.some(r=>r.sourceId===originalId)))||(e.type==='supplierReturn'&&e.meta.originalId===originalId)))) {
     fail('Bu belgeye bağlı etkin ödeme tahsisi var. Önce bağlı tahsisi geri alın.');
   }
-  const original=state.journal.find(e=>e.id===originalId);
+  const originPosition=new Map();
+  for(const [index,e] of state.journal.entries()) originPosition.set(e.id,originPosition.get(e.meta?.amendsOriginalId)??index);
+  const originalIndex=originPosition.get(originalId);
+  const original=originalIndex===undefined?undefined:state.journal.find(e=>e.id===originalId);
   if(original?.type==='supplierLegacyReceiptLink') {
-    const sources=new Set(original.meta.uses.map(r=>r.sourceId));
-    if(state.journal.some(e=>e.id!==originalId&&!reversed.has(e.id)&&[...(e.meta.allocations||[]),...(e.meta.sourceUses||[]),...(e.meta.debtUses||[])].some(r=>sources.has(r.sourceId))))fail('Eşlenen eski kaynak sonradan kullanılmış. Önce bağlı kullanımları geri alın.');
+    const linkedAccounts=new Set(original.meta.uses.map(r=>r.accountId));
+    const legacySources=new Set(state.journal.filter(e=>!reversed.has(e.id)&&e.meta?.supplierId!==original.meta.supplierId&&((e.type==='purchase'&&e.meta?.source==='supplier')||['collection','account','sale'].includes(e.type))).map(e=>e.id));
+    if(state.journal.some((e,index)=>index>originalIndex&&!reversed.has(e.id)&&e.meta?.supplierId===original.meta.supplierId&&[...(e.meta.allocations||[]),...(e.meta.sourceUses||[]),...(e.meta.debtUses||[])].some(r=>linkedAccounts.has(r.accountId)&&legacySources.has(r.sourceId))))fail('Eşlenen eski kaynak sonradan kullanılmış. Önce bağlı kullanımları geri alın.');
   }
   const targets=new Set((original?.meta.allocations||[]).map(r=>r.purchaseId));
-  if(state.journal.some(e=>e.type==='supplierReturn'&&!reversed.has(e.id)&&targets.has(e.meta.originalId)))fail('Bu tahsisin alışına bağlı iade var. Önce iadeyi geri alın.');
+  if(targets.size&&state.journal.some(e=>originPosition.get(e.id)>originalIndex&&e.type==='supplierReturn'&&!reversed.has(e.id)&&targets.has(e.meta.originalId)))fail('Bu tahsisin alışına bağlı iade var. Önce iadeyi geri alın.');
 }
 
 function fields(value, allowed) {

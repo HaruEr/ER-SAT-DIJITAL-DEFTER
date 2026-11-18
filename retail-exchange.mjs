@@ -1,4 +1,4 @@
-import { applyEvent, classicCashCustomer, fail, quantity, text } from './domain.mjs';
+import { applyEvent, classicCashCustomer, fail, financialVersion, quantity, text } from './domain.mjs';
 
 export const exchangeUndo = Symbol('undo both exchange legs');
 
@@ -39,8 +39,9 @@ export function applyExchange(state, event, seen) {
       const target = state.accounts.find(a => a.id === row?.accountId);
       return !target || target.kind !== 'asset' || ['GRAM','ADET'].includes(target.unit);
     })) fail('Değişimde yeni ürünleri teslim satırına, kalan fiilî para çıkışını ödeme hesabına yazın.');
-    const refund = child(firstId, hasCari ? 14 : 4, { type: 'saleReturn', originalId: original.id, items: c.returnItems,
-      ...(hasCari ? { outgoing:c.refunds, customerConsideration:c.customerConsideration } : { refunds:c.refunds }) });
+    const refundCommand = { type: 'saleReturn', originalId: original.id, items: c.returnItems,
+      ...(hasCari ? { outgoing:c.refunds, customerConsideration:c.customerConsideration } : { refunds:c.refunds }) };
+    const refund = child(firstId, hasCari ? 14 : financialVersion(refundCommand, state), refundCommand);
     result = applyEvent(state, refund, undefined, undefined, offset);
     const parties = new Set(original.entries.map(row => row.accountId).filter(id => state.accounts.some(a => a.id === id && a.kind === 'receivable')));
     const party = original.meta.counterpartyId || (parties.size === 1 ? [...parties][0] : '') ||
@@ -50,9 +51,10 @@ export function applyExchange(state, event, seen) {
       const fund = state.accounts.find(a => a.id === row?.accountId);
       if (!fund || ['ADET','GRAM'].includes(fund.unit)) fail('Değişim farkının tahsil edildiği ödeme hesabını seçin.');
     }
-    const sale = child(event.id, c.newItems.some(row => Object.hasOwn(row,'inventoryCode')) ? 8 : 6, {
+    const saleCommand = {
       type: 'sale', items: c.newItems, received: c.received, given: [], credits: [], debts: [], counterpartyId: party, counterpartyType: 'customer'
-    });
+    };
+    const sale = child(event.id, c.newItems.some(row => Object.hasOwn(row,'inventoryCode')) ? 8 : financialVersion(saleCommand, result), saleCommand);
     result = applyEvent(result, sale, undefined, undefined, offset);
     const [returnLeg, saleLeg] = result.journal.slice(-2);
     const returnedCodes = new Set(returnLeg.meta.lines.map(line => line.inventoryCode).filter(Boolean));
