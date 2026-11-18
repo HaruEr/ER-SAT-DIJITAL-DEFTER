@@ -33,3 +33,19 @@ Tüm satırların statik kaynak karşılığı adayda bulunur. Aşağıdaki tabl
 | Olay sürümleri 1–17, atomiklik, duplicate/revision, eski kayıt uyumu | domain/repository/archive + bütün finansal modüller | ledger, v3, archive, supplier-multi-unit, supplier-write-gate, master-financial-acceptance |
 
 Statik endpoint envanteri ayrıca /api/state, /api/summary, /api/backup, /api/command, /api/restore, /api/recovery, /api/archive, /api/archive/restore, /api/journal, /api/item-photo, /api/account-statement, /api/download-ticket, /api/checkout, /api/customers, /api/suppliers ve auth ailesini içerir. Statik dosyaların sunulması ile API yetkisi farklıdır; sayfa kabuğu public olsa da hassas veri requireSession arkasındadır.
+
+---
+
+## Güncel Geliştirme Eşdeğerliği (`b245e9c` → `6c9621d`)
+
+Yukarıdaki tablo 11 Kasım 2026 tarihli `8ddbdec` → `b62eb4e` başlangıç yayın adayının tarihî kanıtıdır. Ardından `feature/ui-ux-overhaul` dalında (`b245e9c..6c9621d`, 32 commit) mevcut finansal motor, rol sınırları ve olay uyumluluğu korunarak aşağıdaki yeni modüller ve test karşılıkları eklenmiştir:
+
+| Alan / Yetenek | Yeni / Güncellenen Kaynaklar | Yeni Test / Doğrulama Karşılığı |
+| --- | --- | --- |
+| Ortak UI Altyapısı (Toast, Banner, Modal, Drawer, Popover, Skeleton) | `public/ui-kit.js`, `public/styles.css`, `public/access.css` | `test/ui-kit-2a.test.mjs`, `test/ui-kit-2b.test.mjs`, `test/ui-kit-2c.test.mjs`, `test/ui-kit-2d.test.mjs`, `test/paket2-acceptance.test.mjs` |
+| Türkçe Miktar Sözleşmesi (`tr-TR`, `10.500` belirsizlik netleştirme) & Tarih Ayrımı | `public/amount-codec.js`, `public/date-format.js`, `domain.mjs` | `test/amount-codec.test.mjs`, `test/supplier-canonical-value.test.mjs`, `test/r1-gates.test.mjs` |
+| Kontrollü `sessionStorage` Taslak Protokolü & Hash Navigasyonu | `public/draft-store.js`, `public/app.js`, `public/checkout.js`, `public/suppliers.js` | `test/draft-store.test.mjs`, `test/draft-lifecycle.test.mjs`, `test/hash-navigation.test.mjs` |
+| Uyarlanabilir İşlem Akışı & Workbench Split View'ları | `public/app.js`, `public/checkout.js`, `public/suppliers.js`, `public/styles.css` | `test/paket4-unified-flow.test.mjs`, `test/paket5-workbench.test.mjs` |
+| Büyük Veri Ölçeği (`hot-v1` snapshot, artımlı indeksler, `/api/summary?paginated=1`) | `repository.mjs`, `ledger-view.mjs`, `domain.mjs`, `supplier-ledger.mjs`, `server.mjs` | `test/paket6a-performance-parity.test.mjs`, `scripts/benchmark-paket6a.mjs`, `test/m4_1_backend_regressions.test.mjs` |
+| Türkçe Arama Normalizasyonu, `DefterCombobox` & `Ctrl+K` Komut Paleti | `public/search-norm.js`, `public/combobox.js`, `public/command-palette.js` | `test/paket6b-combobox.test.mjs`, `test/paket6b-command-palette.test.mjs`, `test/paket6b-integration.test.mjs`, `test/paket6b-tier5-adversarial.test.mjs` |
+| M4 Bütünleşik Denetim Düzeltmeleri (`SILVER`, CSS/A11y, Rapor Portalı) | `retail-exchange.mjs`, `inventory.mjs`, `report-server.mjs`, `public/reports.*` | `test/m4_1_backend_regressions.test.mjs`, `test/m4_2_frontend_regressions.test.mjs`, `test/m4_3_css_report_regressions.test.mjs`, `qa-temp/paket6b-*.mjs` |
