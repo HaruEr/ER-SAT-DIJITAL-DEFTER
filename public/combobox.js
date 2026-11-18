@@ -8,7 +8,38 @@
   const itemRecordCache = new WeakMap();
   const selectHooks = new WeakMap();
   const patchedSelectProtos = new WeakMap();
+  const docPointerRegistry = new WeakMap();
   let instanceSeq = 0;
+
+  function getDocPointerReg(doc) {
+    let reg = docPointerRegistry.get(doc);
+    if (!reg) {
+      const openSet = new Set();
+      const onPointerDown = event => {
+        const entries = [...openSet];
+        const target = event.target;
+        for (let i = 0; i < entries.length; i++) {
+          const entry = entries[i];
+          if (entry.wasConnected && !entry.rootEl.isConnected) {
+            openSet.delete(entry);
+            entry.closeOnDetach();
+            continue;
+          }
+          if (entry.rootEl.isConnected) entry.wasConnected = true;
+          if (!entry.rootEl.contains(target) && !entry.panelEl.contains(target)) {
+            entry.onOutsidePointerDown();
+          }
+        }
+        if (openSet.size === 0 && reg.attached) {
+          doc.removeEventListener('pointerdown', onPointerDown);
+          reg.attached = false;
+        }
+      };
+      reg = { openSet, attached: false, onPointerDown };
+      docPointerRegistry.set(doc, reg);
+    }
+    return reg;
+  }
 
   function ensureSelectProtoPatched(HTMLSelectProto) {
     if (!HTMLSelectProto) return null;
@@ -157,6 +188,29 @@
     };
   }
 
+  function rawMatchesCached(raw, cachedItem) {
+    const id = String(raw.id ?? raw.value ?? '');
+    if (cachedItem.id !== id) return false;
+    const label = String(raw.label ?? raw.name ?? id);
+    if (cachedItem.label !== label) return false;
+    if (cachedItem.unit !== (raw.unit ? String(raw.unit) : '')) return false;
+    const subtitle = raw.subtitle ? String(raw.subtitle) : (raw.disambiguationLabel ? String(raw.disambiguationLabel) : '');
+    if (cachedItem.subtitle !== subtitle) return false;
+    if (cachedItem.meta !== (raw.meta ? String(raw.meta) : '')) return false;
+    if (cachedItem.phone !== (raw.phone ? String(raw.phone) : '')) return false;
+    if (cachedItem.taxId !== (raw.taxId ? String(raw.taxId) : '')) return false;
+    if (cachedItem.code !== (raw.code ? String(raw.code) : '')) return false;
+    if (cachedItem.barcode !== (raw.barcode ? String(raw.barcode) : '')) return false;
+    if (cachedItem.badge !== (raw.badge ? String(raw.badge) : '')) return false;
+    const disabled = Boolean(raw.disabled || raw.retired);
+    if (cachedItem.disabled !== disabled) return false;
+    const disabledReason = raw.disabledReason ? String(raw.disabledReason) : (raw.retired ? 'Pasif' : (disabled ? 'Devre Dışı' : ''));
+    if (cachedItem.disabledReason !== disabledReason) return false;
+    const keywords = Array.isArray(raw.keywords) ? raw.keywords.filter(Boolean).join(' ') : (raw.keywords ? String(raw.keywords) : '');
+    if (cachedItem.keywords !== keywords) return false;
+    return true;
+  }
+
   function buildIndexRecord(item, normalizeSearch) {
     const raw = item.raw;
     if (raw && typeof raw === 'object') {
@@ -172,10 +226,12 @@
         cached.item.taxId === item.taxId &&
         cached.item.code === item.code &&
         cached.item.barcode === item.barcode &&
-        cached.item.keywords === item.keywords &&
-        cached.item.disabled === item.disabled
+        cached.item.badge === item.badge &&
+        cached.item.disabled === item.disabled &&
+        cached.item.disabledReason === item.disabledReason &&
+        cached.item.keywords === item.keywords
       ) {
-        return cached.item === item ? cached : { ...cached, item };
+        return cached;
       }
     }
     const idNorm = normalizeSearch(item.id);
@@ -350,8 +406,9 @@
     panelEl.append(statusEl, listboxEl, emptyEl);
     rootEl.append(panelEl);
 
-    let indexedItems = [];
-    let itemMap = new Map();
+    let rawItems = [];
+    let indexedItems = null;
+    let itemMap = isAsync ? new Map() : null;
     let renderedItems = [];
     let optionButtons = [];
     let activeIndex = -1;
@@ -397,25 +454,97 @@
       }
     }
 
-    function setItems(nextItems = []) {
+    function rawHasId(id) {
+      const key = String(id ?? '');
+      if (itemMap) return itemMap.has(key);
+      for (let i = 0; i < rawItems.length; i++) {
+        const raw = rawItems[i];
+        if (raw === null || raw === undefined) continue;
+        const rawId = typeof raw === 'object' ? String(raw.id ?? raw.value ?? '') : String(raw);
+        if (rawId === key) return true;
+      }
+      return false;
+    }
+
+    function findItemById(id) {
+      if (id === '' || id === null || id === undefined) return null;
+      const key = String(id);
+      if (itemMap) return itemMap.get(key) || null;
+      for (let i = 0; i < rawItems.length; i++) {
+        const raw = rawItems[i];
+        if (raw === null || raw === undefined) continue;
+        if (typeof raw !== 'object') {
+          if (String(raw) === key) return normalizeItem(raw);
+        } else {
+          const rawId = String(raw.id ?? raw.value ?? '');
+          if (rawId === key) return normalizeItem(raw);
+        }
+      }
+      return null;
+    }
+
+    function ensureIndexed() {
+      if (isAsync || indexedItems !== null) return;
       const { normalizeSearch } = normHelper();
       const nextIndexed = [];
       const nextMap = new Map();
-      const list = Array.isArray(nextItems) ? nextItems : [];
-      for (let i = 0; i < list.length; i++) {
-        const item = normalizeItem(list[i]);
+      for (let i = 0; i < rawItems.length; i++) {
+        const raw = rawItems[i];
+        if (raw === null || raw === undefined) continue;
+        if (typeof raw === 'object') {
+          const cached = itemRecordCache.get(raw);
+          if (cached && rawMatchesCached(raw, cached.item)) {
+            nextMap.set(cached.id, cached.item);
+            nextIndexed.push(cached);
+            continue;
+          }
+        }
+        const item = normalizeItem(raw);
         if (!item) continue;
         nextMap.set(item.id, item);
         nextIndexed.push(buildIndexRecord(item, normalizeSearch));
       }
       indexedItems = nextIndexed;
       itemMap = nextMap;
-      if (committedValue !== '' && itemMap.has(committedValue)) {
-        committedItem = itemMap.get(committedValue);
-        committedLabel = String(formatSelectedText(committedItem) ?? committedItem.label);
+    }
+
+    function setItems(nextItems = []) {
+      rawItems = Array.isArray(nextItems) ? nextItems : [];
+      if (isAsync) {
+        if (!itemMap) itemMap = new Map();
+        else itemMap.clear();
+        for (let i = 0; i < rawItems.length; i++) {
+          const item = normalizeItem(rawItems[i]);
+          if (item) itemMap.set(item.id, item);
+        }
+      } else {
+        indexedItems = null;
+        itemMap = null;
+      }
+      if (committedValue !== '') {
+        const prevCommittedLabel = committedLabel;
+        const refreshed = findItemById(committedValue);
+        if (refreshed) {
+          committedItem = refreshed;
+          committedLabel = String(formatSelectedText(refreshed) ?? refreshed.label);
+          if (inputEl.value === prevCommittedLabel) {
+            inputEl.value = committedLabel;
+          }
+        } else {
+          committedValue = '';
+          committedItem = null;
+          committedLabel = '';
+          if (inputEl.value === prevCommittedLabel || !isOpen) {
+            inputEl.value = '';
+          }
+          clearValidityState();
+          syncClearVisibility();
+        }
       }
       if (isOpen && !isAsync) {
-        runSyncSearch(inputEl.value);
+        ensureIndexed();
+        const effectiveQuery = inputEl.value === committedLabel && committedValue !== '' ? '' : inputEl.value;
+        runSyncSearch(effectiveQuery);
       }
     }
 
@@ -606,6 +735,7 @@
     }
 
     function runSyncSearch(rawQuery) {
+      ensureIndexed();
       const { normalizeSearch } = normHelper();
       const qRaw = String(rawQuery ?? '').trim();
       const qNorm = normalizeSearch(qRaw);
@@ -844,6 +974,18 @@
       if (isOpen) positionPanel();
     }
 
+    const pointerEntry = {
+      rootEl,
+      panelEl,
+      wasConnected: false,
+      onOutsidePointerDown: () => {
+        if (isOpen) close({ validate: true });
+      },
+      closeOnDetach: () => {
+        if (isOpen) close({ restoreText: false, validate: false });
+      }
+    };
+
     function open({ searchQuery = null, immediate = false } = {}) {
       if (isDestroyed || inputEl.disabled) return;
       const host = resolveMountHost();
@@ -854,6 +996,20 @@
       currentPortalDialog = host !== rootEl && host.tagName === 'DIALOG' ? host : null;
       attachPortalListeners();
 
+      const reg = getDocPointerReg(doc);
+      for (const entry of [...reg.openSet]) {
+        if (entry !== pointerEntry && entry.wasConnected && !entry.rootEl.isConnected) {
+          reg.openSet.delete(entry);
+          entry.closeOnDetach();
+        }
+      }
+      pointerEntry.wasConnected = Boolean(rootEl.isConnected);
+      reg.openSet.add(pointerEntry);
+      if (!reg.attached) {
+        doc.addEventListener('pointerdown', reg.onPointerDown);
+        reg.attached = true;
+      }
+
       isOpen = true;
       panelEl.hidden = false;
       inputEl.setAttribute('aria-expanded', 'true');
@@ -863,6 +1019,7 @@
       if (isAsync) {
         triggerAsyncSearch(q, { immediate });
       } else {
+        ensureIndexed();
         const effectiveQuery = q === committedLabel && committedValue !== '' ? '' : q;
         runSyncSearch(effectiveQuery);
       }
@@ -872,6 +1029,22 @@
     function close({ restoreText = false, validate = false } = {}) {
       if (!isOpen && !restoreText && !validate) return;
       isOpen = false;
+      const reg = docPointerRegistry.get(doc);
+      if (reg) {
+        reg.openSet.delete(pointerEntry);
+        for (const entry of [...reg.openSet]) {
+          if (entry.wasConnected && !entry.rootEl.isConnected) {
+            reg.openSet.delete(entry);
+            entry.closeOnDetach();
+          } else if (entry.rootEl.isConnected) {
+            entry.wasConnected = true;
+          }
+        }
+        if (reg.openSet.size === 0 && reg.attached) {
+          doc.removeEventListener('pointerdown', reg.onPointerDown);
+          reg.attached = false;
+        }
+      }
       if (isAsync) cancelAsyncPending();
       panelEl.hidden = true;
       inputEl.setAttribute('aria-expanded', 'false');
@@ -893,7 +1066,7 @@
       const prevValue = committedValue;
       committedValue = item.id;
       committedItem = item;
-      itemMap.set(item.id, item);
+      if (itemMap) itemMap.set(item.id, item);
       committedLabel = String(formatSelectedText(item) ?? item.label);
       inputEl.value = committedLabel;
       clearValidityState();
@@ -965,15 +1138,16 @@
       return false;
     }
 
-    function setValue(nextId, { emitChange = false, item = null } = {}) {
+    function setValue(nextId, { emitChange = false, item = null, allowDisabled = false } = {}) {
       const id = nextId === null || nextId === undefined ? '' : String(nextId);
       if (id === '') {
         clear({ emitChange, source: 'programmatic' });
         return true;
       }
-      let target = item ? normalizeItem(item) : itemMap.get(id) || null;
+      let target = item ? normalizeItem(item) : findItemById(id);
       if (target) {
-        itemMap.set(target.id, target);
+        if (target.disabled && !allowDisabled) return false;
+        if (itemMap) itemMap.set(target.id, target);
       } else {
         return false;
       }
@@ -1055,6 +1229,9 @@
           if (activeIndex >= 0 && renderedItems[activeIndex] && !renderedItems[activeIndex].disabled) {
             commitSelection(renderedItems[activeIndex], { source: 'keyboard' });
             close({ restoreText: false });
+          } else if (activeIndex < 0 && allowEmpty && inputEl.value.trim() === '') {
+            if (committedValue !== '') clear({ emitChange: true, source: 'keyboard' });
+            close({ restoreText: false });
           }
           return;
         }
@@ -1088,13 +1265,6 @@
       if (related && (rootEl.contains(related) || panelEl.contains(related))) return;
       if (isOpen) close({ validate: true });
       else validateUncommittedText({ report: false });
-    }
-
-    function onDocPointerDown(event) {
-      if (!isOpen) return;
-      const target = event.target;
-      if (rootEl.contains(target) || panelEl.contains(target)) return;
-      close({ validate: true });
     }
 
     function onClearMousedown(event) {
@@ -1140,11 +1310,10 @@
     toggleBtn.addEventListener('mousedown', onToggleMousedown);
     toggleBtn.addEventListener('click', onToggleClick);
     rootEl.addEventListener('click', onRootClick);
-    doc.addEventListener('pointerdown', onDocPointerDown);
 
     setItems(initialItems);
     if (initialValue !== '' && initialValue !== null && initialValue !== undefined) {
-      setValue(initialValue, { emitChange: false });
+      setValue(initialValue, { emitChange: false, allowDisabled: Boolean(options.allowDisabled) });
     } else {
       syncClearVisibility();
     }
@@ -1157,7 +1326,7 @@
       statusEl,
       getValue: () => committedValue,
       getSelectedItem: () => committedItem,
-      hasValue: id => itemMap.has(String(id ?? '')),
+      hasValue: id => rawHasId(id),
       setValue,
       setItems,
       setDisabled: next => {
@@ -1189,6 +1358,15 @@
       destroy: () => {
         if (isDestroyed) return;
         isDestroyed = true;
+        isOpen = false;
+        const reg = docPointerRegistry.get(doc);
+        if (reg) {
+          reg.openSet.delete(pointerEntry);
+          if (reg.openSet.size === 0 && reg.attached) {
+            doc.removeEventListener('pointerdown', reg.onPointerDown);
+            reg.attached = false;
+          }
+        }
         cancelAsyncPending();
         detachPortalListeners();
         inputEl.removeEventListener('input', onInput);
@@ -1200,11 +1378,16 @@
         toggleBtn.removeEventListener('mousedown', onToggleMousedown);
         toggleBtn.removeEventListener('click', onToggleClick);
         rootEl.removeEventListener('click', onRootClick);
-        doc.removeEventListener('pointerdown', onDocPointerDown);
         instancesByEl.delete(rootEl);
         instancesByEl.delete(inputEl);
         instancesByEl.delete(panelEl);
         instancesByEl.delete(listboxEl);
+        rawItems = [];
+        indexedItems = null;
+        if (itemMap) itemMap.clear();
+        renderedItems = [];
+        optionButtons = [];
+        committedItem = null;
         if (panelEl.parentNode) panelEl.remove();
         if (!existingInput && rootEl.parentNode) rootEl.remove();
       }
@@ -1405,8 +1588,9 @@
         } else if (id !== '' && combobox.hasValue(id)) {
           syncingSelect = true;
           try {
-            combobox.setValue(id, { emitChange: false });
-            syncSelectOptions(id, combobox.getSelectedItem());
+            const accepted = combobox.setValue(id, { emitChange: false });
+            syncSelectOptions(combobox.getValue(), combobox.getSelectedItem());
+            if (!accepted) return;
           } finally {
             syncingSelect = false;
           }
@@ -1451,7 +1635,8 @@
       const val = getNativeValue();
       syncingSelect = true;
       try {
-        combobox.setValue(val, { emitChange: false });
+        const ok = combobox.setValue(val, { emitChange: false });
+        if (!ok) syncSelectOptions(combobox.getValue(), combobox.getSelectedItem());
       } finally {
         syncingSelect = false;
       }
@@ -1513,10 +1698,10 @@
         combobox.setDisabled(Boolean(selectEl.disabled));
         combobox.setRequired(Boolean(selectEl.required));
         const val = getNativeValue();
-        combobox.setValue(val, { emitChange: false });
+        combobox.setValue(val, { emitChange: false, allowDisabled: Boolean(options.allowDisabled) });
         syncSelectOptions(combobox.getValue(), combobox.getSelectedItem());
       },
-      destroy: () => {
+      destroy: ({ restoreOptions = true } = {}) => {
         if (destroyed) return;
         destroyed = true;
         const committedVal = combobox.getValue();
@@ -1529,32 +1714,40 @@
           else selectEl.focus = origFocus;
         }
         selectHooks.delete(selectEl);
-        if (initialChildNodes && !itemsReplaced) {
-          selectEl.replaceChildren(...initialChildNodes);
-          setNativeValue(committedVal);
-        } else if (currentItems.length > smallListThreshold || (isAsync && currentItems.length > 0)) {
-          const frag = doc.createDocumentFragment();
-          if (allowEmpty) {
-            const emptyOpt = doc.createElement('option');
-            emptyOpt.value = '';
-            emptyOpt.textContent = emptyLabel;
-            if (committedVal === '') emptyOpt.selected = true;
-            frag.append(emptyOpt);
+        if (restoreOptions !== false) {
+          if (initialChildNodes && !itemsReplaced) {
+            selectEl.replaceChildren(...initialChildNodes);
+            setNativeValue(committedVal);
+          } else if (currentItems.length > smallListThreshold || (isAsync && currentItems.length > 0)) {
+            const frag = doc.createDocumentFragment();
+            if (allowEmpty) {
+              const emptyOpt = doc.createElement('option');
+              emptyOpt.value = '';
+              emptyOpt.textContent = emptyLabel;
+              if (committedVal === '') emptyOpt.selected = true;
+              frag.append(emptyOpt);
+            }
+            for (let i = 0; i < currentItems.length; i++) {
+              const norm = normalizeItem(currentItems[i]);
+              if (!norm) continue;
+              frag.append(buildOptionElement(doc, norm, norm.id === committedVal));
+            }
+            selectEl.replaceChildren(frag);
+            setNativeValue(committedVal);
           }
-          for (let i = 0; i < currentItems.length; i++) {
-            const norm = normalizeItem(currentItems[i]);
-            if (!norm) continue;
-            frag.append(buildOptionElement(doc, norm, norm.id === committedVal));
-          }
-          selectEl.replaceChildren(frag);
-          setNativeValue(committedVal);
         }
+        currentItems = [];
+        if (initialChildNodes) initialChildNodes.length = 0;
         selectEl.classList.remove('defter-combobox-native');
         if (prevTabIndex === null) selectEl.removeAttribute('tabindex');
         else selectEl.setAttribute('tabindex', prevTabIndex);
         if (prevAriaHidden === null) selectEl.removeAttribute('aria-hidden');
         else selectEl.setAttribute('aria-hidden', prevAriaHidden);
         instancesByEl.delete(selectEl);
+        instancesByEl.delete(combobox.root);
+        instancesByEl.delete(combobox.input);
+        instancesByEl.delete(combobox.panel);
+        instancesByEl.delete(combobox.listbox);
         combobox.destroy();
       }
     };

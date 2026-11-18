@@ -166,6 +166,7 @@
   let overlayHandle = null;
   let standaloneOverlayCleanup = null;
 
+  let cachedDom = null;
   let dialogEl = null;
   let inputEl = null;
   let clearBtn = null;
@@ -213,6 +214,7 @@
         disabledReason: '',
         restoreFocus: false,
         when: null,
+        providerWhen: typeof defaults.providerWhen === 'function' ? defaults.providerWhen : null,
         action: null,
         raw: rawItem
       };
@@ -241,6 +243,7 @@
       : (rawItem.retired ? 'Pasif' : (disabled ? 'Kullanılamaz' : ''));
     const restoreFocus = rawItem.restoreFocus === true;
     const when = typeof rawItem.when === 'function' ? rawItem.when : null;
+    const providerWhen = typeof defaults.providerWhen === 'function' ? defaults.providerWhen : null;
     const action = typeof rawItem.action === 'function'
       ? rawItem.action
       : (typeof rawItem.onSelect === 'function' ? rawItem.onSelect : null);
@@ -257,36 +260,69 @@
       disabledReason,
       restoreFocus,
       when,
+      providerWhen,
       action,
       raw: rawItem
     };
   }
 
+  function rawMatchesCachedItem(raw, cached, defaults) {
+    const id = String(raw.id ?? raw.value ?? '');
+    if (cached.id !== id) return false;
+    const title = String(raw.title ?? raw.label ?? raw.name ?? id);
+    if (cached.title !== title) return false;
+    const subtitle = raw.subtitle
+      ? String(raw.subtitle)
+      : (raw.disambiguationLabel
+        ? String(raw.disambiguationLabel)
+        : (raw.description ? String(raw.description) : ''));
+    if (cached.subtitle !== subtitle) return false;
+    const group = raw.group ? String(raw.group) : (defaults.group || 'commands');
+    if (cached.group !== group) return false;
+    const groupLabel = raw.groupLabel ? String(raw.groupLabel) : (defaults.groupLabel || 'Komutlar');
+    if (cached.groupLabel !== groupLabel) return false;
+    const keywords = Array.isArray(raw.keywords)
+      ? raw.keywords.filter(Boolean).join(' ')
+      : (raw.keywords ? String(raw.keywords) : '');
+    if (cached.keywords !== keywords) return false;
+    const badge = raw.badge ? String(raw.badge) : (raw.unit ? String(raw.unit) : '');
+    if (cached.badge !== badge) return false;
+    const disabled = Boolean(raw.disabled || raw.retired);
+    if (cached.disabled !== disabled) return false;
+    const disabledReason = raw.disabledReason
+      ? String(raw.disabledReason)
+      : (raw.retired ? 'Pasif' : (disabled ? 'Kullanılamaz' : ''));
+    if (cached.item.disabledReason !== disabledReason) return false;
+    const shortcutHint = raw.shortcutHint ? String(raw.shortcutHint) : (raw.shortcut ? String(raw.shortcut) : '');
+    if (cached.item.shortcutHint !== shortcutHint) return false;
+    if (cached.item.restoreFocus !== (raw.restoreFocus === true)) return false;
+    return true;
+  }
+
   function buildIndexRecord(rawItem, defaults, normalizeSearch) {
-    const item = normalizeItem(rawItem, defaults);
-    if (!item) return null;
-    const raw = item.raw;
-    if (raw && typeof raw === 'object') {
-      const cached = itemRecordCache.get(raw);
-      if (
-        cached &&
-        cached.id === item.id &&
-        cached.title === item.title &&
-        cached.subtitle === item.subtitle &&
-        cached.keywords === item.keywords &&
-        cached.badge === item.badge &&
-        cached.group === item.group &&
-        cached.groupLabel === item.groupLabel &&
-        cached.disabled === item.disabled
-      ) {
+    if (rawItem && typeof rawItem === 'object') {
+      const cached = itemRecordCache.get(rawItem);
+      if (cached && rawMatchesCachedItem(rawItem, cached, defaults)) {
+        const when = typeof rawItem.when === 'function' ? rawItem.when : null;
+        const providerWhen = typeof defaults.providerWhen === 'function' ? defaults.providerWhen : null;
+        const action = typeof rawItem.action === 'function'
+          ? rawItem.action
+          : (typeof rawItem.onSelect === 'function' ? rawItem.onSelect : null);
+        if (cached.when === when && cached.action === action && cached.item.providerWhen === providerWhen) {
+          return cached;
+        }
+        const nextItem = { ...cached.item, when, providerWhen, action };
         return {
           ...cached,
-          item,
-          when: item.when,
-          action: item.action
+          item: nextItem,
+          when,
+          action
         };
       }
     }
+    const item = normalizeItem(rawItem, defaults);
+    if (!item) return null;
+    const raw = item.raw;
 
     const idNorm = normalizeSearch(item.id);
     const titleNorm = normalizeSearch(item.title);
@@ -335,7 +371,7 @@
   function getIndexedRecords(rawList, provider) {
     if (!Array.isArray(rawList)) return { records: [], hasWhen: false };
     const { normalizeSearch } = normHelper();
-    const defaults = { group: provider.group, groupLabel: provider.groupLabel };
+    const defaults = { group: provider.group, groupLabel: provider.groupLabel, providerWhen: provider.when || null };
     const records = new Array(rawList.length);
     let len = 0;
     let hasWhen = false;
@@ -373,19 +409,23 @@
     ) {
       return { blocked: true, reason: DEFAULT_BLOCKED_REASON };
     }
-    if (doc.querySelector('[data-busy="true"]')) {
-      return { blocked: true, reason: DEFAULT_BLOCKED_REASON };
-    }
-    if (doc.querySelector('#lock-screen:not([hidden])')) {
+    const lockEl = doc.getElementById('lock-screen');
+    if (lockEl && !lockEl.hidden) {
       return { blocked: true, reason: 'Oturum kilitli.' };
     }
-    if (doc.querySelector('#retry-bar:not([hidden]), #pending-panel:not([hidden]), [data-pending-blocking]')) {
+    const retryEl = doc.getElementById('retry-bar');
+    const pendingEl = doc.getElementById('pending-panel');
+    if ((retryEl && !retryEl.hidden) || (pendingEl && !pendingEl.hidden)) {
       return { blocked: true, reason: 'Önce sonucu belirsiz son isteği doğrulayın.' };
     }
-    if (doc.querySelector('[data-command-palette-blocked]')) {
-      return { blocked: true, reason: DEFAULT_BLOCKED_REASON };
-    }
-    if (doc.querySelector('dialog.defter-modal[open] .defter-confirm-form, dialog[open][data-critical-modal="true"]')) {
+    const blockedEl = doc.querySelector('[data-busy="true"], [data-pending-blocking], [data-command-palette-blocked], dialog.defter-modal[open] .defter-confirm-form, dialog[open][data-critical-modal="true"]');
+    if (blockedEl) {
+      if (blockedEl.hasAttribute('data-busy') || blockedEl.hasAttribute('data-command-palette-blocked')) {
+        return { blocked: true, reason: DEFAULT_BLOCKED_REASON };
+      }
+      if (blockedEl.hasAttribute('data-pending-blocking')) {
+        return { blocked: true, reason: 'Önce sonucu belirsiz son isteği doğrulayın.' };
+      }
       return { blocked: true, reason: 'Önce açık onay penceresini tamamlayın.' };
     }
     if (typeof config.isBlocked === 'function') {
@@ -511,7 +551,7 @@
     return from >= 0 && !renderedItems[from]?.disabled ? from : -1;
   }
 
-  function updateActiveOption(nextIndex) {
+  function updateActiveOption(nextIndex, { scroll = true } = {}) {
     if (activeIndex >= 0 && activeIndex < optionButtons.length) {
       const prevBtn = optionButtons[activeIndex];
       prevBtn.classList.remove('is-active');
@@ -523,7 +563,7 @@
       btn.classList.add('is-active');
       btn.setAttribute('aria-selected', 'true');
       inputEl?.setAttribute('aria-activedescendant', btn.id);
-      if (typeof btn.scrollIntoView === 'function') {
+      if (scroll && typeof btn.scrollIntoView === 'function') {
         try { btn.scrollIntoView({ block: 'nearest' }); } catch {}
       }
     } else {
@@ -534,6 +574,10 @@
 
   function executeItem(item) {
     if (!item || item.disabled) return;
+    if ((item.providerWhen && !item.providerWhen()) || (item.when && !item.when())) {
+      refresh();
+      return;
+    }
     const blockState = evaluateBlockState();
     if (blockState.blocked) {
       if (errorEl) {
@@ -633,6 +677,10 @@
 
   function renderPaletteState() {
     if (!openState || !listEl || !statusEl || !emptyEl || !errorEl || !inputEl) return;
+    if (!dialogEl || !dialogEl.isConnected) {
+      close({ restoreFocus: false, reason: 'detached' });
+      return;
+    }
 
     const combinedItems = [];
     const seenKeys = new Set();
@@ -714,7 +762,8 @@
         : baseText;
       if (lastAsyncResult.loading) statusText += ' · Aranıyor…';
       statusEl.textContent = statusText;
-      updateActiveOption(firstEnabledIndex());
+      const firstIdx = firstEnabledIndex();
+      updateActiveOption(firstIdx, { scroll: !(firstIdx === 0 && listEl.scrollTop === 0) });
     } else {
       inputEl.removeAttribute('aria-activedescendant');
       if (lastAsyncResult.loading) {
@@ -763,27 +812,22 @@
         const rawList = typeof p.getItems === 'function'
           ? extractResultPayload(p.getItems({ query: '', normalizedQuery: '', tokens: [], limit: maxRes })).items
           : p.items;
-        const { records, hasWhen } = getIndexedRecords(rawList, p);
+        if (!Array.isArray(rawList) || !rawList.length) continue;
+        const defaults = { group: p.group, groupLabel: p.groupLabel, providerWhen: p.when || null };
         const sliceCap = p.maxItems !== null
           ? p.maxItems
           : (singleSync ? maxRes : Math.max(1, Number(config.maxPerGroup) || DEFAULT_MAX_PER_GROUP));
-
-        if (!hasWhen) {
-          totalCount += records.length;
-          matchCount += records.length;
-          const take = Math.min(sliceCap, records.length, maxRes - collected.length);
-          for (let i = 0; i < take; i++) {
-            collected.push(records[i].item);
-          }
-        } else {
-          let taken = 0;
-          for (let i = 0; i < records.length; i++) {
-            const rec = records[i];
-            if (rec.when && !rec.when()) continue;
-            totalCount++;
-            matchCount++;
-            if (taken < sliceCap && collected.length < maxRes) {
-              collected.push(rec.item);
+        let taken = 0;
+        for (let i = 0; i < rawList.length; i++) {
+          const r = rawList[i];
+          if (r === null || r === undefined) continue;
+          if (typeof r === 'object' && typeof r.when === 'function' && !r.when()) continue;
+          totalCount++;
+          matchCount++;
+          if (taken < sliceCap && collected.length < maxRes) {
+            const item = normalizeItem(r, defaults);
+            if (item) {
+              collected.push(item);
               taken++;
             }
           }
@@ -845,6 +889,10 @@
 
   function runSearch(rawInput, { immediate = false } = {}) {
     if (!openState) return;
+    if (!dialogEl || !dialogEl.isConnected) {
+      close({ restoreFocus: false, reason: 'detached' });
+      return;
+    }
     cancelAsyncPending();
 
     const { normalizeSearch } = normHelper();
@@ -876,6 +924,10 @@
 
     const invokeSearchProviders = () => {
       if (destroyed || !openState) return;
+      if (!dialogEl || !dialogEl.isConnected) {
+        close({ restoreFocus: false, reason: 'detached' });
+        return;
+      }
       const controller = typeof AbortController === 'function' ? new AbortController() : null;
       activeController = controller;
       const seq = ++asyncSeq;
@@ -899,7 +951,7 @@
             promises.push({ provider: p, promise: out });
           } else {
             const payload = extractResultPayload(out);
-            const defaults = { group: p.group, groupLabel: p.groupLabel };
+            const defaults = { group: p.group, groupLabel: p.groupLabel, providerWhen: p.when || null };
             for (let k = 0; k < payload.items.length; k++) {
               const norm = normalizeItem(payload.items[k], defaults);
               if (norm && (!norm.when || norm.when())) syncItems.push(norm);
@@ -954,6 +1006,10 @@
 
       Promise.allSettled(promises.map(entry => entry.promise)).then(settled => {
         if (destroyed || !openState || seq !== asyncSeq || controller?.signal?.aborted) return;
+        if (!dialogEl || !dialogEl.isConnected) {
+          close({ restoreFocus: false, reason: 'detached' });
+          return;
+        }
         const asyncItems = [...syncItems];
         let asyncTotal = syncExtraTotal;
         let firstError = '';
@@ -963,7 +1019,7 @@
           const p = promises[i].provider;
           if (outcome.status === 'fulfilled') {
             const payload = extractResultPayload(outcome.value);
-            const defaults = { group: p.group, groupLabel: p.groupLabel };
+            const defaults = { group: p.group, groupLabel: p.groupLabel, providerWhen: p.when || null };
             for (let k = 0; k < payload.items.length; k++) {
               const norm = normalizeItem(payload.items[k], defaults);
               if (norm && (!norm.when || norm.when())) asyncItems.push(norm);
@@ -1223,7 +1279,7 @@
       }
     });
 
-    return { dlg, input, clear, closeBtnEl, status, errorBox, list, empty };
+    return { dlg, heading, input, clear, closeBtnEl, status, errorBox, list, empty };
   }
 
   function isShortcutEvent(event) {
@@ -1282,6 +1338,10 @@
     if (options.placeholder !== undefined) config.placeholder = String(options.placeholder || DEFAULT_PLACEHOLDER);
     if (options.title !== undefined) config.title = String(options.title || DEFAULT_TITLE);
     if (openState && inputEl) {
+      if (cachedDom?.heading) {
+        cachedDom.heading.textContent = config.title || DEFAULT_TITLE;
+      }
+      inputEl.setAttribute('aria-label', config.title || DEFAULT_TITLE);
       inputEl.placeholder = config.placeholder;
       refresh();
     }
@@ -1379,7 +1439,10 @@
     }
 
     returnTarget = trigger || doc.activeElement || null;
-    const built = buildDialogDom();
+    if (!cachedDom || cachedDom.dlg.ownerDocument !== doc) {
+      cachedDom = buildDialogDom();
+    }
+    const built = cachedDom;
     dialogEl = built.dlg;
     inputEl = built.input;
     clearBtn = built.clear;
@@ -1388,6 +1451,15 @@
     errorEl = built.errorBox;
     listEl = built.list;
     emptyEl = built.empty;
+
+    built.heading.textContent = config.title || DEFAULT_TITLE;
+    inputEl.placeholder = config.placeholder || DEFAULT_PLACEHOLDER;
+    inputEl.setAttribute('aria-label', config.title || DEFAULT_TITLE);
+    errorEl.textContent = '';
+    errorEl.hidden = true;
+    emptyEl.textContent = '';
+    emptyEl.hidden = true;
+    listEl.scrollTop = 0;
 
     doc.body.append(dialogEl);
 
@@ -1441,6 +1513,9 @@
       }
       dialogEl.removeAttribute('open');
       dialogEl.remove();
+    }
+    if (listEl) {
+      listEl.replaceChildren();
     }
 
     if (overlayHandle) {
@@ -1502,6 +1577,10 @@
 
   function refresh() {
     if (!openState || !inputEl) return false;
+    if (!dialogEl || !dialogEl.isConnected) {
+      close({ restoreFocus: false, reason: 'detached' });
+      return false;
+    }
     runSearch(inputEl.value, { immediate: true });
     return true;
   }
@@ -1510,6 +1589,7 @@
     close({ restoreFocus: false, reason: 'destroy' });
     destroyed = true;
     removeListeners();
+    cachedDom = null;
     providers = [];
     lastSyncResult = { items: [], totalCount: 0, matchCount: 0 };
     lastAsyncResult = { items: [], totalCount: 0, matchCount: 0, loading: false, errorMessage: '' };

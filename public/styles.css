@@ -652,6 +652,7 @@ details[open] > summary { color: var(--ink); font-weight: 650; }
   .topbar, main { padding: 16px 0; }
   .section, .stat, .account-card, .bank-card, .journal-item { box-shadow: none; break-inside: avoid; }
   .table-wrap { overflow: visible; }
+  .overview-screen .table-wrap { content-visibility: visible; }
   body[data-print-scope="statement"] .topbar, body[data-print-scope="statement"] .workspace-banner,
   body[data-print-scope="statement"] #workday-warning, body[data-print-scope="statement"] #notice,
   body[data-print-scope="statement"] main > :not(#account-detail), body[data-print-scope="statement"] #statement-filter,
@@ -1118,6 +1119,7 @@ html:has(.closing-screen) { scroll-padding-bottom: 110px; }
 .overview-block h3 { margin: 0 0 8px; font-size: 15px; }
 .overview-status-strip { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 14px; margin-bottom: 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-soft); font-size: 13px; }
 .overview-svg-chart { width: 100%; height: auto; display: block; margin-top: 8px; }
+.overview-screen .table-wrap { content-visibility: auto; contain-intrinsic-size: auto 500px; }
 
 /* Paket 6B M2: Accessible Searchable Combobox */
 select.defter-combobox-native,
@@ -1481,6 +1483,11 @@ select.defter-combobox-native,
 
 :root[data-theme="dark"] .defter-dialog.defter-command-palette {
   box-shadow: 0 22px 60px rgb(0 0 0 / 56%);
+}
+
+.defter-dialog.defter-command-palette::backdrop {
+  background: rgb(24 22 19 / 64%);
+  backdrop-filter: none;
 }
 
 .defter-command-palette-surface {
