@@ -8,7 +8,7 @@ Kuyumcu işletmeleri için yerel satış, müşteriden alış, stok, kasa/banka/
 
 ## Windows'ta kurulum
 
-Git ve **Node.js 24.x** gerekir (Node 24 yerleşik `node:sqlite` sağlar; ayrı SQLite sunucusu kurulmaz). Windows dışı işletim sistemleri için doğrulanmış destek iddiası yoktur.
+Git ve **Node.js 24.x** gerekir (Node 24 yerleşik `node:sqlite` sağlar; ayrı SQLite sunucusu kurulmaz). Windows ana kullanım platformudur. macOS Apple Silicon üzerinde geliştirici testleri yapılmıştır; bu, gerçek mağaza ve operasyonel kullanım kabulü anlamına gelmez.
 
 ```powershell
 git clone https://github.com/HaruEr/ER-SAT-DIJITAL-DEFTER.git er-sat-defter
@@ -21,6 +21,43 @@ npm.cmd start
 Tarayıcıda `http://127.0.0.1:4317` adresini açın. Alternatif olarak `BASLAT.cmd` kullanılabilir. `public/index.html` dosyasını doğrudan açmayın. Port kullanımda ise aynı PowerShell penceresinde `$env:PORT='4327'` ayarlayıp başlatın; açık başka uygulamaları durdurmayın.
 
 İlk ekranda kendi işletme sahibi adınızı ve **en az 15 karakterlik** parolanızı belirleyin. Hazır yönetici hesabı veya varsayılan parola yoktur.
+
+## macOS (Apple Silicon) geliştirici kurulumu
+
+Mac geliştirme ortamında Git, nvm ve Node.js 24.x kullanılır.
+`.nvmrc` dosyası Node 24 seçimini kolaylaştırır;
+yeni Terminal açıldığında `nvm use` tekrar çalıştırılmalıdır.
+
+```bash
+git clone https://github.com/HaruEr/ER-SAT-DIJITAL-DEFTER.git
+cd ER-SAT-DIJITAL-DEFTER
+nvm use
+
+TEST_TEMP="$(cd .. && pwd)/er-sat-test-temp"
+mkdir -p "$TEST_TEMP/npm-cache"
+export TEMP="$TEST_TEMP"
+export TMP="$TEST_TEMP"
+export TMPDIR="$TEST_TEMP/"
+export npm_config_cache="$TEST_TEMP/npm-cache"
+unset NODE_OPTIONS NODE_PATH JSDOM_MODULE_PATH
+
+npm ci --ignore-scripts
+npm run check:syntax
+npm run check:release
+npm test
+npm run test:ui
+npm run test:supplier-oracle
+npm run test:recovery
+```
+
+Gerçek işletme verilerinden bağımsız tarayıcı denemesi için
+`npm run sandbox` kullanın. Terminal'in ürettiği URL'yi açın;
+üretilen geçici parolayı paylaşmayın. Sandbox her çalıştırmada
+yeni sentetik veri dizini oluşturur.
+
+macOS geliştirici doğrulaması, Windows üretim kabulünün
+yerini almaz. Windows'a özel şifreli restic pilotu
+macOS üzerinde desteklenmiş sayılmaz.
 
 ## Çalışma alanı ve veri güvenliği
 

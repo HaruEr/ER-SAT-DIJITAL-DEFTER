@@ -29,6 +29,62 @@ npm.cmd run check:release
 
 Bu değişkenler yalnız terminal oturumuna aittir. Başarısız komutun `$LASTEXITCODE` değerini kaydedin; sonraki başarılı komut önceki hatayı örtmemelidir. Testlerin geçmesi gerçek mağaza, yazıcı, telefon veya felaket kurtarma kabulü değildir. `npm.cmd run test:coverage` mevcut Node coverage raporunu üretir; ölçülmedikçe yüzde iddia edilmez. `test:recovery` yedek/kurtarma testlerini, `benchmark` sentetik performans betiğini çalıştırır.
 
+## macOS Apple Silicon geliştirme ve test
+
+macOS geliştirici ortamında `.nvmrc` dosyasıyla Node.js 24
+seçilir. Yeni Terminal oturumlarında `nvm use` komutu
+tekrarlanmalıdır; `.nvmrc` kendiliğinden sürüm değiştirmez.
+
+Testleri gerçek işletme verilerinin bulunduğu kurulumdan
+ayrı, temiz bir geliştirme klonunda çalıştırın.
+
+```bash
+cd ~/Developer/ER-SAT-DIJITAL-DEFTER
+nvm use
+
+TEST_TEMP="$(cd .. && pwd)/er-sat-test-temp"
+mkdir -p "$TEST_TEMP/npm-cache"
+
+export TEMP="$TEST_TEMP"
+export TMP="$TEST_TEMP"
+export TMPDIR="$TEST_TEMP/"
+export npm_config_cache="$TEST_TEMP/npm-cache"
+unset NODE_OPTIONS NODE_PATH JSDOM_MODULE_PATH
+
+npm ci --ignore-scripts
+npm run check:syntax
+npm run check:release
+npm test
+npm run test:ui
+npm run test:supplier-oracle
+npm run test:recovery
+```
+
+`TMPDIR` macOS üzerinde `node:os` geçici dizin seçimini
+etkiler. Sentetik seed alt süreçleri için `TEMP`, `TMP` ve
+`TMPDIR` tutarlı biçimde aktarılmalıdır. Bu konuda
+`test/release-install.test.mjs` içinde bir regresyon
+düzeltmesi bulunur.
+
+Tarayıcıda deneme yapmak için:
+
+```bash
+npm run sandbox
+```
+
+Sandbox çıktısındaki yerel URL'yi açın. Sunucu Terminal'i
+açık kalmalıdır. Çıktıda bulunan sentetik parolalar Git'e,
+PR açıklamasına veya test kanıtına eklenmemelidir.
+
+`npm start` normal yerel veri alanını kullanabilir;
+`npm run sandbox` ise her açılışta bağımsız sentetik alan
+oluşturur. İkisini birbirinin yerine kullanmayın.
+
+Apple Silicon geliştirme testlerinin geçmesi gerçek mağaza,
+mobil cihaz, yazıcı, otomatik yedek veya felaket kurtarma
+kabulü değildir. Windows amd64 restic pilotu Mac test
+kapsamına dahil değildir.
+
 ## İsteğe bağlı sentetik deneme
 
 ```powershell
