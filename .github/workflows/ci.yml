@@ -49,7 +49,7 @@ jobs:
       - name: JavaScript syntax
         run: node scripts/check-syntax.mjs
       - name: Backend
-        run: npm test
+        run: node --test --test-concurrency=1 test/*.test.mjs
       - name: UI
         run: npm run test:ui
       - name: Independent financial regression
