@@ -831,6 +831,7 @@ test('14. 10,000 realistic Turkish items cold create+search and enhanceSelect+se
   cbCreate.input.value = 'hedef sahin';
   cbCreate.input.dispatchEvent(inputEvent(window));
   const coldCreateMs = performance.now() - t0;
+  console.log(`[PERF] create+search=${coldCreateMs.toFixed(2)}ms`);
   assert.equal(cbCreate.listbox.querySelectorAll('[role="option"]').length, 1);
   assert.ok(coldCreateMs < 85, `Cold Turkish 10k create+search took ${coldCreateMs.toFixed(2)}ms (>= 85ms)`);
 
@@ -846,6 +847,7 @@ test('14. 10,000 realistic Turkish items cold create+search and enhanceSelect+se
   cbEnhance.input.value = 'isik ozgun';
   cbEnhance.input.dispatchEvent(inputEvent(window));
   const coldEnhanceMs = performance.now() - t1;
+  console.log(`[PERF] enhanceSelect+search=${coldEnhanceMs.toFixed(2)}ms`);
   assert.equal(cbEnhance.listbox.querySelectorAll('[role="option"]').length, 1);
   assert.ok(coldEnhanceMs < 85, `Cold Turkish 10k enhanceSelect+search took ${coldEnhanceMs.toFixed(2)}ms (>= 85ms)`);
 });
