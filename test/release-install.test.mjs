@@ -37,7 +37,7 @@ test('synthetic seed creates distinct directories and never initializes normal d
   const results = [];
   for (let n=0;n<2;n++) {
     const result = spawnSync(process.execPath, ['qa-temp/supplier-uat-seed.mjs'], {
-      encoding:'utf8', windowsHide:true, env:{...process.env,TEMP:parent,TMP:parent,NODE_OPTIONS:'',JSDOM_MODULE_PATH:''}
+      encoding:'utf8', windowsHide:true, env:{...process.env,TEMP:parent,TMP:parent,TMPDIR:parent,NODE_OPTIONS:'',JSDOM_MODULE_PATH:''}
     });
     assert.equal(result.status, 0, result.stderr);
     const output = JSON.parse(result.stdout.trim());

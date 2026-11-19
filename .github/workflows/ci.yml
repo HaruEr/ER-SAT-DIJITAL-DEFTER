@@ -49,7 +49,7 @@ jobs:
       - name: JavaScript syntax
         run: node scripts/check-syntax.mjs
       - name: Backend
-        run: npm test
+        run: node --test --test-concurrency=1 test/*.test.mjs
       - name: UI
         run: npm run test:ui
       - name: Independent financial regression
@@ -66,3 +66,49 @@ jobs:
           npm audit --prefix $vendorAudit --package-lock-only --audit-level=high
       - name: Whitespace
         run: git diff --check
+
+  macos-tests:
+    name: macos-tests
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      NODE_OPTIONS: ''
+      NODE_PATH: ''
+      JSDOM_MODULE_PATH: ''
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout reviewed history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Isolate temporary files and cache
+        run: |
+          test_temp="$RUNNER_TEMP/er-sat-synthetic"
+          mkdir -p "$test_temp/npm-cache"
+          {
+            echo "TEMP=$test_temp"
+            echo "TMP=$test_temp"
+            echo "TMPDIR=$test_temp/"
+            echo "npm_config_cache=$test_temp/npm-cache"
+          } >> "$GITHUB_ENV"
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+      - name: JavaScript syntax
+        run: npm run check:syntax
+      - name: Release safety
+        run: npm run check:release
+      - name: Backend
+        run: npm test
+      - name: UI
+        run: npm run test:ui
+      - name: Independent financial regression
+        run: npm run test:supplier-oracle
+      - name: Recovery
+        run: npm run test:recovery
