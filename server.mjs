@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { Repository, BACKUP_MAX_BYTES } from './repository.mjs';
-import { DomainError, fail, workdaySummary } from './domain.mjs';
+import { DomainError, fail } from './domain.mjs';
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const diagnosticCodes = new Set(['EACCES', 'EPERM', 'ENOENT', 'ENOSPC', 'EIO', 'EMFILE', 'ENFILE', 'ERR_SQLITE_ERROR', 'SQLITE_BUSY', 'SQLITE_LOCKED', 'SQLITE_CORRUPT', 'SQLITE_FULL', 'SQLITE_CANTOPEN', 'SQLITE_IOERR', 'BACKUP_HISTORY_INVALID', 'STORED_HISTORY_INVALID']);
 const operations = new Map(['state', 'summary', 'backup', 'command', 'restore', 'recovery'].map(name => [`/api/${name}`, name]));
@@ -20,6 +20,13 @@ const staticFiles = new Map([
   ['/', ['login.html', 'text/html; charset=utf-8']],
   ['/login.js', ['login.js', 'text/javascript; charset=utf-8']],
   ['/access-client.js', ['access-client.js', 'text/javascript; charset=utf-8']],
+  ['/draft-store.js', ['draft-store.js', 'text/javascript; charset=utf-8']],
+  ['/amount-codec.js', ['amount-codec.js', 'text/javascript; charset=utf-8']],
+  ['/date-format.js', ['date-format.js', 'text/javascript; charset=utf-8']],
+  ['/ui-kit.js', ['ui-kit.js', 'text/javascript; charset=utf-8']],
+  ['/search-norm.js', ['search-norm.js', 'text/javascript; charset=utf-8']],
+  ['/combobox.js', ['combobox.js', 'text/javascript; charset=utf-8']],
+  ['/command-palette.js', ['command-palette.js', 'text/javascript; charset=utf-8']],
   ['/users', ['users.html', 'text/html; charset=utf-8']],
   ['/users.js', ['users.js', 'text/javascript; charset=utf-8']],
   ['/access.css', ['access.css', 'text/css; charset=utf-8']],
@@ -153,7 +160,12 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
       if (req.method === 'GET' && url.pathname === '/api/checkout') return json(200, checkoutState(repository.state({ compact: true })));
       if (req.method === 'GET' && url.pathname === '/api/customers') {
         const state = repository.state({ compact:true });
-        return json(200, url.searchParams.has('id') ? customerDetail(state, url.searchParams.get('id')) : customerChoices(state, url.searchParams.get('q') || ''));
+        if (url.searchParams.has('id')) return json(200, customerDetail(state, url.searchParams.get('id')));
+        const limitParam = url.searchParams.get('limit');
+        if (limitParam !== null && (!/^\d+$/.test(limitParam) || Number(limitParam) < 1)) fail('Geçerli sayfa boyutu seçin.');
+        const limit = limitParam === null ? 20 : Math.min(50, Number(limitParam));
+        const meta = url.searchParams.get('meta') === '1';
+        return json(200, customerChoices(state, url.searchParams.get('q') || '', { limit, meta }));
       }
       const compact = url.searchParams.get('view') === 'compact';
       if (req.method === 'GET' && url.pathname === '/api/state') return json(200, repository.state({ compact }));
@@ -193,8 +205,21 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
         return json(200, { ...receipt, reauthenticate:true });
       }
       if (req.method === 'GET' && url.pathname === '/api/summary') {
-        const state = repository.state();
-        return json(200, workdaySummary(state, url.searchParams.get('date') || state.date));
+        const paginated = url.searchParams.get('paginated') === '1' || url.searchParams.has('page') || url.searchParams.has('pageSize');
+        if (!paginated) return json(200, repository.workdaySummary(url.searchParams.get('date') || undefined));
+        const pageParam = url.searchParams.get('page');
+        const pageSizeParam = url.searchParams.get('pageSize');
+        if (pageParam !== null && (!/^\d+$/.test(pageParam) || Number(pageParam) < 1)) fail('Geçerli sayfa numarası seçin.');
+        if (pageSizeParam !== null && (!/^\d+$/.test(pageSizeParam) || Number(pageSizeParam) < 1)) fail('Geçerli sayfa boyutu seçin.');
+        return json(200, repository.workdaySummary(url.searchParams.get('date') || undefined, {
+          paginated: true,
+          page: pageParam ? Number(pageParam) : 1,
+          pageSize: pageSizeParam ? Math.min(200, Number(pageSizeParam)) : 50,
+          kind: url.searchParams.get('kind') || 'all',
+          unit: url.searchParams.get('unit') || '',
+          q: url.searchParams.get('q') || '',
+          active: url.searchParams.get('active') === '1' || url.searchParams.get('active') === 'true'
+        }));
       }
       if (req.method === 'GET' && url.pathname === '/api/backup') return json(200, repository.backup(), { 'Content-Disposition': `attachment; filename="kuyumcu-${url.searchParams.get('workspace') || 'demo'}-${new Date().toISOString().slice(0, 10)}.json"` });
       if (req.method !== 'POST' || !['/api/command', '/api/restore'].includes(url.pathname)) return json(404, { error: 'İşlem bulunamadı.' });

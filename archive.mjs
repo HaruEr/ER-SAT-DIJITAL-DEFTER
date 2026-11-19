@@ -138,7 +138,7 @@ export async function importLedgerArchive(repository, source, { revision, confir
       FROM (SELECT seq,id,body FROM events ORDER BY seq)`).run(new Date().toISOString(), repository.workspace, current);
     const archiveId = Number(archived.lastInsertRowid);
     if (!Number.isSafeInteger(archiveId)) throw new Error('Archive identifier exceeds supported range.');
-    repository.db.exec('DELETE FROM events; INSERT INTO events(seq,id,body) SELECT seq,id,body FROM incoming_archive.events ORDER BY seq; UPDATE meta SET revision=revision+1 WHERE id=1;');
+    repository.db.exec('DELETE FROM events; DELETE FROM ledger_snapshot; INSERT INTO events(seq,id,body) SELECT seq,id,body FROM incoming_archive.events ORDER BY seq; UPDATE meta SET revision=revision+1 WHERE id=1;');
     beforeCommit?.();
     repository.db.exec('COMMIT');
     transaction = false;

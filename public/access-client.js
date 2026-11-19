@@ -1,13 +1,29 @@
 // Per-tab authorization keeps separate local editor ports and users isolated.
 (() => {
   const key = 'defter-session';
+  const themeKey = 'defter-theme';
+  function applySharedTheme(theme) {
+    const selected = theme === 'dark' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = selected;
+    const button = document.querySelector('#theme-toggle');
+    if (button) {
+      button.textContent = selected === 'dark' ? 'Gündüz modu' : 'Gece modu';
+      button.setAttribute('aria-pressed', String(selected === 'dark'));
+      button.setAttribute('aria-label', selected === 'dark' ? 'Gündüz moduna geç' : 'Gece moduna geç');
+    }
+    try { localStorage.setItem(themeKey, selected); } catch {}
+  }
+  applySharedTheme((() => { try { return localStorage.getItem(themeKey); } catch { return null; } })() || 'light');
   function current() {
     try { return JSON.parse(sessionStorage.getItem(key)); } catch { return null; }
   }
   function clear() {
     sessionStorage.removeItem(key);
     for (const name of Object.keys(sessionStorage)) {
-      if (name.startsWith('defter-pending-') || name.startsWith('defter-sale-retry-')) sessionStorage.removeItem(name);
+      if (name.startsWith('defter-pending-') || name.startsWith('defter-sale-retry-') || name.startsWith('defter-draft:v1:')) sessionStorage.removeItem(name);
+    }
+    if (window.DefterDraftStore && typeof window.DefterDraftStore.clearSession === 'function') {
+      try { window.DefterDraftStore.clearSession(); } catch {}
     }
   }
   function lock() {
@@ -41,11 +57,16 @@
     sessionStorage.setItem('defter-restore-complete','1');
     lock();
   }
-  window.DefterSession = { current, clear, lock, api, store, finishRestore };
+  window.DefterSession = { current, clear, lock, api, store, finishRestore, applyTheme: applySharedTheme };
+  if (location.pathname !== '/owner') {
+    document.querySelector('#theme-toggle')?.addEventListener('click', () => {
+      applySharedTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+    });
+  }
   if (location.pathname === '/') return;
   const session = current();
-  if (!session || session.expiresAt <= Date.now()) { lock(); return; }
   const expected = location.pathname === '/checkout' ? 'employee' : 'owner';
+  if (!session || session.expiresAt <= Date.now() || session.actor?.role !== expected) { lock(); return; }
   async function verify() {
     try {
       const actor = await api('/api/auth/session');
@@ -73,6 +94,9 @@
       link.href = result.url;
       link.download = '';
       link.click();
-    } catch (error) { window.alert(error.message); }
+    } catch (error) {
+      if (window.DefterUI?.toast) window.DefterUI.toast(error.message, { kind: 'warning', durationMs: 5000 });
+      else window.alert(error.message);
+    }
   });
 })();

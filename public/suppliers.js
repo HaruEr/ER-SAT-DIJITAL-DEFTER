@@ -3,6 +3,16 @@ const TASKS = [
   ['return','Ürün İade Et'],['history','Hareketleri İncele'],['statement','Ekstre / Mutabakat']
 ];
 const SUPPLIER_DRAFTS = new Map();
+const getDraftStore = () => (typeof window !== 'undefined' && window.DefterDraftStore) || (typeof globalThis !== 'undefined' && globalThis.DefterDraftStore);
+const getActorId = context => context?.actorId || (typeof window !== 'undefined' && window.DefterSession?.current()?.actor?.id) || (typeof globalThis !== 'undefined' && globalThis.DefterSession?.current()?.actor?.id) || 'owner';
+function supplierDraftKey(context, kind, entityId) {
+  const store = getDraftStore();
+  const actorId = getActorId(context);
+  if (store) {
+    return store.makeKey({ actorId, workspace: context.workspace || 'default', scope: 'supplier', type: kind, entityId: entityId || '' });
+  }
+  return 'supplier:draft:' + JSON.stringify([context.workspace || 'default', entityId || '', kind]);
+}
 const unitLabel=unit=>unit==='SILVER'?'Ag · saf gümüş':unit;
 function receiptSuffix(record, peers=[]){
   if(!record.id)return '';
@@ -11,18 +21,75 @@ function receiptSuffix(record, peers=[]){
   return (record.note?' · '+String(record.note).slice(0,90):'')+' · Fiş '+(id.length>width?'…':'')+id.slice(-width);
 }
 const receiptSelects='select[data-source-field="choice"],select[data-source-field="purchase"],select[data-target-field="purchaseId"],select[name="originalId"],select[data-field="source"]';
+const getSearchNorm = () => (typeof window !== 'undefined' && window.DefterSearchNorm) || (typeof globalThis !== 'undefined' && globalThis.DefterSearchNorm) || null;
+const getCombobox = () => (typeof window !== 'undefined' && window.DefterCombobox) || (typeof globalThis !== 'undefined' && globalThis.DefterCombobox) || null;
+const normalize = value => {
+  const helper = getSearchNorm();
+  if (helper?.normalizeSearch) return helper.normalizeSearch(value);
+  return String(value || '').toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ı/g, 'i').trim();
+};
+const matchesQuery = (parts, q) => {
+  const helper = getSearchNorm();
+  if (helper?.matchesSearch) return helper.matchesSearch(parts, q);
+  const nq = normalize(q);
+  return !nq || normalize(Array.isArray(parts) ? parts.filter(Boolean).join(' ') : parts).includes(nq);
+};
+function enhanceSupplierSelect(selectEl, items, { value, emptyLabel = 'Seçin', allowEmpty = true, allowDisabled = false, placeholder = 'Ara ve seç…', smallListThreshold } = {}) {
+  const cb = getCombobox();
+  if (!cb?.enhanceSelect || !selectEl) return null;
+  return cb.enhanceSelect(selectEl, {
+    items,
+    ...(value !== undefined ? { value } : {}),
+    allowEmpty,
+    allowDisabled,
+    emptyLabel,
+    placeholder,
+    invalidTextBehavior: 'revert',
+    ...(smallListThreshold !== undefined ? { smallListThreshold } : {})
+  });
+}
+function destroyComboboxesIn(rootEl) {
+  const cb = getCombobox();
+  if (!cb?.getInstance || !rootEl) return;
+  for (const sel of rootEl.querySelectorAll('select')) cb.getInstance(sel)?.destroy();
+}
 function selectionSummary(select){
   if(!select)return;const label=select.closest('label');if(!label)return;
-  let summary=label.querySelector('.supplier-selection-summary');if(!summary){summary=select.ownerDocument.createElement('p');summary.className='supplier-selection-summary';summary.setAttribute('aria-live','polite');select.after(summary);}
-  summary.textContent=select.value?select.selectedOptions[0]?.textContent||'':'';summary.hidden=!summary.textContent;
+  const cb=getCombobox()?.getInstance?.(select);
+  const anchor=cb?.root||select;
+  let summary=label.querySelector('.supplier-selection-summary');if(!summary){summary=select.ownerDocument.createElement('p');summary.className='supplier-selection-summary';summary.setAttribute('aria-live','polite');anchor.after(summary);}
+  else if(summary.previousElementSibling!==anchor)anchor.after(summary);
+  summary.textContent=select.value?(select.selectedOptions?.[0]?.textContent||cb?.getSelectedItem?.()?.label||''):'';summary.hidden=!summary.textContent;
 }
-const normalize = value => String(value || '').toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i');
+const canonicalAmount = (context, el, unit, positive = true) => {
+  if (!el) return '';
+  if (context?.canonicalValue) return context.canonicalValue(el, unit, positive);
+  return String(el.value ?? '').trim();
+};
+const clearAmountInputState = el => {
+  if (!el) return;
+  const codec = (typeof window !== 'undefined' && window.DefterAmountCodec) || (typeof globalThis !== 'undefined' && globalThis.DefterAmountCodec) || null;
+  if (codec?.clearInputState) { codec.clearInputState(el); return; }
+  if (el.dataset) {
+    delete el.dataset.amountResolution;
+    delete el.dataset.canonicalAmount;
+    delete el.dataset.formattedPreview;
+  }
+  el.setCustomValidity?.('');
+};
+const editableAmount = (context, value) => {
+  if (value === undefined || value === null) return value;
+  const text = String(value).trim();
+  return context?.canonicalValue && /^\d+\.\d+$/.test(text) ? text.replace('.', ',') : text;
+};
 
 // The wrapper owns authorization, HTTP, pending/retry and authoritative ledger state.
 export function renderSupplierWorkspace(container, context) {
   const {escape:esc,format,day}=context;
   const memory=context.memory||SUPPLIER_DRAFTS,viewKey='supplier:view:'+(context.workspace||'default'),remembered=memory.get(viewKey);
-  let state=context.state,selectedId=remembered?.partyId||null,activeTask=remembered?.kind||null,query='',disposed=false,taskCleanup=null;
+  const hasInitialParty=Object.hasOwn(context,'initialPartyId');
+  const initialPartyId=context.initialPartyId||null,rememberedPartyId=remembered?.partyId||null;
+  let state=context.state,selectedId=hasInitialParty?initialPartyId:rememberedPartyId,activeTask=(!hasInitialParty||initialPartyId===rememberedPartyId)?(remembered?.kind||null):null,query='',disposed=false,taskCleanup=null;
   const pending=()=>Boolean(context.isPending?.());
   const firms=()=>state?.supplierParties;
   const status=message=>{const node=container.querySelector('[data-supplier-status]');if(node)node.textContent=message;};
@@ -34,7 +101,7 @@ export function renderSupplierWorkspace(container, context) {
   }).join('') : '<p class="context-note">Henüz hesap birimi yok.</p>';
   function drawList() {
     const list=container.querySelector('[data-supplier-list]');if(!list)return;
-    const matches=firms().filter(f=>normalize([f.name,f.phone,f.taxId].join(' ')).includes(normalize(query)));
+    const matches=firms().filter(f=>matchesQuery([f.name,f.phone,f.taxId],query));
     list.innerHTML=matches.map(f=>'<article class="account-card" data-firm-card="'+esc(f.id)+'"><h2><button type="button" class="button text" data-open-firm="'+esc(f.id)+'">'+esc(f.name)+'</button></h2>'+
       (f.phone?'<p>'+esc(f.phone)+'</p>':'')+balanceMarkup(f.accounts)+
       (f.lastEvent?'<p class="context-note">Son işlem: '+esc(day(f.lastEvent.date)+' · '+f.lastEvent.label)+'</p>':'<p class="context-note">Henüz işlem yok.</p>')+'</article>').join('')||
@@ -45,12 +112,20 @@ export function renderSupplierWorkspace(container, context) {
     const header='<div class="section-header"><h1>Toptancılar</h1><button type="button" class="button secondary" data-refresh-suppliers>Yenile</button></div><p role="status" aria-live="polite" data-supplier-status></p>';
     if(!Array.isArray(firms())) {container.innerHTML=header+'<p class="info neutral">Firma bilgileri alınamadı. Yeniden deneyin.</p>';return;}
     const firm=firms().find(f=>f.id===selectedId);
-    if(!firm)selectedId=null;
+    if(!firm){
+      const hadSelected=selectedId!==null;
+      selectedId=null;
+      if(hadSelected){
+        activeTask=null;
+        memory.set(viewKey,{partyId:null,kind:null});
+        context.onSelectFirm?.(null,{replace:true});
+      }
+    }
     if(firm) {
-      container.innerHTML=header+'<section class="section supplier-active-header"><div class="section-header"><h2 tabindex="-1" data-firm-heading>'+esc(firm.name)+'</h2><button type="button" class="button secondary" data-back-suppliers>Firma listesine dön</button></div>'+
+      container.innerHTML=header+'<div class="workbench-split" data-split-view="suppliers"><section class="section supplier-active-header"><div class="section-header"><h2 tabindex="-1" data-firm-heading>'+esc(firm.name)+'</h2><button type="button" class="button secondary" data-back-suppliers>Firma listesine dön</button></div>'+
         ([firm.phone,firm.taxId,firm.address].some(Boolean)?'<details class="supplier-contact-details"><summary>İletişim bilgileri</summary><p>'+[firm.phone,firm.taxId,firm.address].filter(Boolean).map(esc).join(' · ')+'</p></details>':'')+'<h3>Güncel hesaplar</h3><div class="supplier-balances">'+balanceMarkup(firm.accounts)+'</div>'+
         '<div class="workbench-actions supplier-identity-actions" aria-label="Firma bilgileri ve belge bağlantıları"><button type="button" class="button secondary" data-edit-supplier>Firma bilgilerini düzenle</button><button type="button" class="button secondary" data-add-supplier-unit'+(pending()?' disabled':'')+'>Hesap birimi ekle</button>'+
-        '<button type="button" class="button secondary" data-supplier-documents>Ödeme / avansı alışa bağla</button></div><div class="workbench-actions supplier-task-actions" aria-label="Firma işlemleri">'+TASKS.map(([kind,label])=>'<button type="button" class="button secondary" data-supplier-task="'+kind+'"'+(pending()&&!['history','statement'].includes(kind)?' disabled':'')+'>'+label+'</button>').join('')+'</div></section><section class="section" data-supplier-task-panel hidden></section>';
+        '<button type="button" class="button secondary" data-supplier-documents>Ödeme / avansı alışa bağla</button></div><div class="workbench-actions supplier-task-actions" aria-label="Firma işlemleri">'+TASKS.map(([kind,label])=>'<button type="button" class="button secondary" data-supplier-task="'+kind+'"'+(pending()&&!['history','statement'].includes(kind)?' disabled':'')+'>'+label+'</button>').join('')+'</div></section><section class="section" data-supplier-task-panel hidden></section></div>';
       if(focus)container.querySelector('[data-firm-heading]').focus();
     } else {
       container.innerHTML=header+'<div class="workbench-actions"><label class="field"><span>Firma ara</span><input type="search" data-supplier-search maxlength="160" value="'+esc(query)+'" autocomplete="off"></label><button type="button" class="button" data-create-firm'+(pending()?' disabled':'')+'>Firma ekle</button></div><div class="account-grid" data-supplier-list></div><section class="section" data-supplier-task-panel hidden></section>';
@@ -62,12 +137,15 @@ export function renderSupplierWorkspace(container, context) {
     if(pending()&&!['history','statement'].includes(kind)){status('Bekleyen işlemin sonucu doğrulanmadan yeni işlem başlatılamaz.');return;}
     activeTask=kind;memory.set(viewKey,{partyId:selectedId,kind});
     clearTask();const panel=container.querySelector('[data-supplier-task-panel]');panel.hidden=false;panel.replaceChildren();
+    container.querySelector('.workbench-split')?.classList.add('has-detail');
     const title=TASKS.find(([key])=>key===kind)?.[1]||({create:'Firma ekle',profile:'Firma bilgileri',reverse:'İşlemi ters kayıtla iptal et',unit:'Hesap birimi ekle',allocation:'Ödeme / avansı alışa bağla',legacyLink:'Eski tahsilatın ödeme kaynakları'}[kind]);
     const heading=container.ownerDocument.createElement('h3');heading.textContent=title;heading.tabIndex=-1;panel.append(heading);
     const handled=context.onTask?.({kind,partyId:selectedId,container:panel,context:{...context,state}});
     if(context.onTask && handled!==false)taskCleanup=handled;
     else if(['create','profile','reverse','unit','purchase','payment'].includes(kind)){
-      const saved=memory.get('supplier:draft:'+JSON.stringify([context.workspace||'default',selectedId||'',kind]));
+      const store=getDraftStore(),key=supplierDraftKey(context,kind,selectedId),legacyKey='supplier:draft:'+JSON.stringify([context.workspace||'default',selectedId||'',kind]);
+      const savedEnvelope=store?store.getDraft(key):null,legacySaved=store?null:(memory.get(key)||memory.get(legacyKey));
+      const saved=savedEnvelope?.data?{...savedEnvelope.data,stamp:{revision:savedEnvelope.meta.revision,date:savedEnvelope.meta.workday||savedEnvelope.meta.date||undefined}}:(savedEnvelope||legacySaved);
       if(saved?.amend){let stopped=false,cleanup=null;const partyId=selectedId;const note=container.ownerDocument.createElement('p');note.textContent='Düzeltme önizlemesi yükleniyor…';panel.append(note);
         context.request('suppliers',undefined,context.workspace,{query:{supplierId:partyId,editOriginalId:saved.amend.originalId,limit:50}}).then(data=>{if(stopped)return;if(data.revision!==state.revision||data.amendment?.originalId!==saved.amend.originalId)throw Error('Düzeltme önizlemesi doğrulanamadı.');note.textContent='Düzeltme için eski etkinin geri alınmış önizlemesi';const previewState={...state,supplierParties:state.supplierParties.map(p=>p.id===partyId?{...p,accounts:p.accounts.map(a=>({...a,balance:data.amendment.balances[a.id]}))}:p)};cleanup=renderSupplierForm(panel,{...context,state:previewState,partyId,kind,editOriginalId:saved.amend.originalId});}).catch(error=>{if(!stopped)note.textContent=error.message;});taskCleanup=key=>{stopped=true;cleanup?.(key);};
       }else taskCleanup=renderSupplierForm(panel,{...context,state,partyId:selectedId,kind});
@@ -75,13 +153,18 @@ export function renderSupplierWorkspace(container, context) {
     else if(['allocation','offset','return','legacyLink'].includes(kind)){let stopped=false,cleanup=null;renderSupplierDocumentTask(panel,{...context,state,partyId:selectedId,kind,isCurrent:()=>!stopped&&panel.isConnected}).then(fn=>{if(stopped)fn?.();else cleanup=fn;});taskCleanup=key=>{stopped=true;cleanup?.(key);};}
     else if(['history','statement'].includes(kind))taskCleanup=renderSupplierRead(panel,{...context,state,partyId:selectedId,kind,onRecordAction(event,action){
       const command=event.editableCommand||event.meta?.editableCommand,task=action==='reverse'?'reverse':({supplierPurchase:'purchase',supplierPayment:'payment',supplierAllocation:'allocation',supplierOffset:'offset',supplierReturn:'return'})[command?.type];
-      const key='supplier:draft:'+JSON.stringify([context.workspace||'default',selectedId,task]);
-      if(memory.has(key)){status('Bu işlem için korunmuş bir taslak var. Önce taslağı tamamlayın.');return;}
+      const store=getDraftStore(),key=supplierDraftKey(context,task,selectedId),legacyKey='supplier:draft:'+JSON.stringify([context.workspace||'default',selectedId,task]);
+      if(store?store.getDraft(key):(memory.has(key)||memory.has(legacyKey))){status('Bu işlem için korunmuş bir taslak var. Önce taslağı tamamlayın.');return;}
       const fields=action==='reverse'?{originalId:event.id,note:''}:{...Object.fromEntries(Object.entries(command).filter(([,value])=>typeof value==='string')),direction:command.received?.length&&!command.given?.length?'collect':'pay',advanceScope:command.advanceScope||'general'};
-      const rows={};if(action!=='reverse')for(const name of ['items','charges','given','credits','received','debts'])rows[name]=command[name]||[];
+      if(action!=='reverse')for(const name of ['referenceTL','fromQuantity','toQuantity'])if(typeof fields[name]==='string')fields[name]=editableAmount(context,fields[name]);
+      const editRow=row=>({...row,...(row.quantity!==undefined?{quantity:editableAmount(context,row.quantity)}:{}),...(row.weight!==undefined?{weight:editableAmount(context,row.weight)}:{}),...(row.referenceTL!==undefined?{referenceTL:editableAmount(context,row.referenceTL)}:{})});
+      const rows={};if(action!=='reverse')for(const name of ['items','charges','given','credits','received','debts'])rows[name]=(command[name]||[]).map(editRow);
       const links=(action!=='reverse'?(command.type==='supplierPurchase'||command.type==='supplierAllocation'?command.allocations:command.type==='supplierOffset'?(command.sourceUses||[]).map(row=>({...row,accountId:command.fromAccountId})):command.debtUses):[])||[];
-      if(task==='return'){for(const line of command.items||[]){fields['returnQty-'+line.lineIndex]=line.quantity;if(line.weight)fields['returnWeight-'+line.lineIndex]=line.weight;}for(const row of command.reductions||[])fields['reduction-'+row.accountId]=row.quantity;}
-      memory.set(key,{fields,rows,arrays:rows,targets:command?.targetUses||[],stamp:{revision:state.revision,date:state.date},recordLabel:day(event.date)+' · '+event.label,...(action==='edit'?{amend:{originalId:event.id,note:''}}:{}),links:links.map(row=>({...row,choice:JSON.stringify([row.sourceId||'',row.accountId]),...(row.purchaseId?{purchase:JSON.stringify([row.purchaseId,row.accountId])}:{})})),debtLinks:(command?.type==='supplierPurchase'?command.debtUses||[]:[]).map(row=>({...row,choice:JSON.stringify([row.sourceId||'',row.accountId])}))});openTask(task);
+      if(task==='return'){for(const line of command.items||[]){fields['returnQty-'+line.lineIndex]=editableAmount(context,line.quantity);if(line.weight)fields['returnWeight-'+line.lineIndex]=editableAmount(context,line.weight);}for(const row of command.reductions||[])fields['reduction-'+row.accountId]=editableAmount(context,row.quantity);}
+      const draftPayload={fields,rows,arrays:rows,targets:(action!=='reverse'?command?.targetUses||[]:[]).map(editRow),stamp:{revision:state.revision,date:state.date},recordLabel:day(event.date)+' · '+event.label,...(action==='edit'?{amend:{originalId:event.id,note:''}}:{}),links:links.map(row=>({...editRow(row),choice:JSON.stringify([row.sourceId||'',row.accountId]),...(row.purchaseId?{purchase:JSON.stringify([row.purchaseId,row.accountId])}:{})})),debtLinks:(action!=='reverse'&&command?.type==='supplierPurchase'?command.debtUses||[]:[]).map(row=>({...editRow(row),choice:JSON.stringify([row.sourceId||'',row.accountId])}))};
+      if(store){const actorId=getActorId(context);store.saveDraft(key,{meta:{actorId,workspace:context.workspace||'default',workday:state.date,revision:state.revision,formId:task,entityId:selectedId||''},data:draftPayload});}
+      else{memory.set(key,draftPayload);memory.set(legacyKey,draftPayload);}
+      openTask(task);
     }});
     else {const note=container.ownerDocument.createElement('p');note.className='info neutral';note.textContent='Bu işlem henüz hazır değil. Geliştirme aşamasında.';panel.append(note);}
     heading.focus();
@@ -89,8 +172,8 @@ export function renderSupplierWorkspace(container, context) {
   }
   function click(event) {
     const button=event.target.closest('button');if(!button||!container.contains(button)||disposed)return;context.onInteraction?.({kind:'action'});
-    if(button.hasAttribute('data-open-firm')){selectedId=button.dataset.openFirm;activeTask=null;memory.set(viewKey,{partyId:selectedId,kind:null});draw(true);}
-    else if(button.hasAttribute('data-back-suppliers')){selectedId=null;activeTask=null;memory.set(viewKey,{partyId:null,kind:null});draw(true);}
+    if(button.hasAttribute('data-open-firm')){selectedId=button.dataset.openFirm;activeTask=null;memory.set(viewKey,{partyId:selectedId,kind:null});context.onSelectFirm?.(selectedId,{replace:false});draw(true);}
+    else if(button.hasAttribute('data-back-suppliers')){selectedId=null;activeTask=null;memory.set(viewKey,{partyId:null,kind:null});context.onSelectFirm?.(null,{replace:false});draw(true);}
     else if(button.hasAttribute('data-refresh-suppliers'))context.refresh();
     else if(button.hasAttribute('data-create-firm'))openTask('create');
     else if(button.hasAttribute('data-edit-supplier'))openTask('profile');
@@ -102,7 +185,17 @@ export function renderSupplierWorkspace(container, context) {
   function input(event){context.onInteraction?.({kind:'input'});if(event.target.matches('[data-supplier-search]')){query=event.target.value;drawList();}}
   const interact=event=>{context.onInteraction?.({kind:'input'});if(event.target.matches(receiptSelects))selectionSummary(event.target);};container.addEventListener('click',click);container.addEventListener('input',input);container.addEventListener('change',interact);container.addEventListener('invalid',interact,true);draw();
   return {
-    update(nextState,{completedDraftKey}={}){if(disposed)return;if(completedDraftKey)clearTask(completedDraftKey);if(activeTask==='reverse'&&completedDraftKey==='supplier:draft:'+JSON.stringify([context.workspace||'default',selectedId,'reverse'])){activeTask='history';memory.set(viewKey,{partyId:selectedId,kind:activeTask});}state=nextState;draw();},
+    update(nextState,{completedDraftKey}={}){if(disposed)return;if(completedDraftKey)clearTask(completedDraftKey);if(activeTask==='reverse'&&(completedDraftKey===supplierDraftKey(context,'reverse',selectedId)||completedDraftKey==='supplier:draft:'+JSON.stringify([context.workspace||'default',selectedId,'reverse']))){activeTask='history';memory.set(viewKey,{partyId:selectedId,kind:activeTask});}state=nextState;draw();},
+    selectParty(partyId,{task=undefined}={}){
+      if(disposed)return;
+      const nextId=partyId||null;
+      const nextTask=task!==undefined?task:(nextId===selectedId?activeTask:null);
+      if(nextId===selectedId&&nextTask===activeTask)return;
+      selectedId=nextId;
+      activeTask=nextTask;
+      memory.set(viewKey,{partyId:selectedId,kind:activeTask});
+      draw(true);
+    },
     destroy(){if(disposed)return;disposed=true;clearTask();container.removeEventListener('click',click);container.removeEventListener('input',input);container.removeEventListener('change',interact);container.removeEventListener('invalid',interact,true);container.replaceChildren();}
   };
 }
@@ -112,11 +205,22 @@ function renderSupplierForm(panel, context) {
   const {escape:esc,state,kind,partyId}=context,doc=panel.ownerDocument;
   const party=state.supplierParties?.find(p=>p.id===partyId),nativeAccounts=party?.accounts||[];
   const catalog=(state.accounts||[]).filter(a=>!a.retired),drafts=context.memory||SUPPLIER_DRAFTS;
-  const key='supplier:draft:'+JSON.stringify([context.workspace||'default',partyId||'',kind]),saved=drafts.get(key);
-  let sourcePicker=null,receiptPicker=null,sending=false,destroyed=false,completed=false,dirty=Boolean(saved),stamp=saved?.stamp||{revision:state.revision,date:state.date};
-  const stale=()=>stamp.revision!==state.revision||stamp.date!==state.date;
+  const store=getDraftStore(),key=supplierDraftKey(context,kind,partyId),legacyKey='supplier:draft:'+JSON.stringify([context.workspace||'default',partyId||'',kind]);
+  const savedEnvelope=store?store.getDraft(key):null,legacySaved=store?null:(drafts.get(key)||drafts.get(legacyKey));
+  const saved=savedEnvelope?.data?{...savedEnvelope.data,stamp:{revision:savedEnvelope.meta.revision,date:savedEnvelope.meta.workday||savedEnvelope.meta.date||undefined}}:(savedEnvelope||legacySaved);
+  let sourcePicker=null,receiptPicker=null,sending=false,destroyed=false,completed=false,dirty=false,stamp=saved?.stamp||{revision:state.revision,date:state.date};
+  const stale=()=>{
+    if(store&&savedEnvelope){
+      const actorId=getActorId(context);
+      const checkValidation=store.validateDraft({meta:{...savedEnvelope.meta,revision:stamp.revision,workday:stamp.date,workspace:context.workspace,actorId},data:values()},state,{isCountForm:false});
+      if(checkValidation.status!=='VALID')return true;
+    }
+    return stamp.revision!==state.revision||stamp.date!==state.date;
+  };
   const field=(name,label,required=false)=>'<label class="field"><span>'+label+'</span><input name="'+name+'" maxlength="300"'+(required?' required':'')+'></label>';
   const form=doc.createElement('form');form.dataset.supplierForm=kind;form.dataset.kind=kind;form.className='supplier-task-form';panel.append(form);
+  const setDirty=v=>{dirty=Boolean(v);form.dataset.draftDirty=String(dirty);};
+  setDirty(Boolean(saved));
   const groups=new Map();
   const status=doc.createElement('p');status.setAttribute('role','status');status.setAttribute('aria-live','polite');
   const info=message=>{context.onInteraction?.({kind:'feedback'});status.textContent=message;};
@@ -131,20 +235,38 @@ function renderSupplierForm(panel, context) {
     if(!nativeAccounts.length)form.insertAdjacentHTML('beforeend','<p class="info neutral">Bu firmanın hesap birimi yok. İşlemden önce hesap birimi ekleyin.</p>');
     if(kind==='payment')form.insertAdjacentHTML('beforeend',select('direction','Ne yapılıyor?',[['pay','Firmaya ödeme / ön ödeme'],['collect','Firmadan tahsilat']]));
     const definitions=kind==='purchase'?
-      [['items','1. Aldığınız ürünler',true],['charges','2. Anlaştığınız alış borcu',false],['given','Ödediğiniz / verdiğiniz',true],['credits','Ödemenin borç / alacak karşılığı',false],['received','Ek olarak aldığınız',true],['debts','Aldığınızın borç / alacak karşılığı',false]]:
+      [['items','1. Aldığınız ürünler',true],['charges','2. Anlaşılan Borç (HAS / Döviz / TL — Otomatik Çevrilmez)',false],['given','Ödediğiniz / verdiğiniz',true],['credits','Ödemenin borç / alacak karşılığı',false],['received','Ek olarak aldığınız',true],['debts','Aldığınızın borç / alacak karşılığı',false]]:
       [['given','Ödediğiniz / verdiğiniz',true],['credits','Ödemenin borç / alacak karşılığı',false],['received','Aldığınız para / ürün',true],['debts','Aldığınızın borç / alacak karşılığı',false]];
+    if(kind==='purchase'){
+      const stepper=doc.createElement('div');stepper.className='workbench-tabs';stepper.setAttribute('role','tablist');stepper.dataset.supplierStepper='';
+      stepper.innerHTML='<button type="button" class="workbench-tab" role="tab" data-supplier-step="all" aria-selected="true">Tümü</button><button type="button" class="workbench-tab" role="tab" data-supplier-step="1" aria-selected="false">1. Alınan Ürünler</button><button type="button" class="workbench-tab" role="tab" data-supplier-step="2" aria-selected="false">2. Anlaşılan Borç</button><button type="button" class="workbench-tab" role="tab" data-supplier-step="3" aria-selected="false">3. Ödeme ve Ek Bilgiler</button>';
+      form.append(stepper);
+    }
     for(const [name,title,physical] of definitions){
       const section=doc.createElement('fieldset');section.dataset.group=name;section.innerHTML='<legend>'+title+'</legend><div data-rows></div><button type="button" class="button secondary compact" data-add-row>Satır ekle</button>';
       form.append(section);
+      const choices=physical?catalog.filter(a=>name==='items'?(a.isPurchasable||a.isSaleable):a.kind==='asset'&&a.id!=='pos'):nativeAccounts;
+      const itemOptions=choices.map(a=>({
+        id:a.id,
+        label:(a.name||unitLabel(a.unit))+(physical?'':' · '+unitLabel(a.unit)),
+        unit:a.unit,
+        code:physical?a.id:'',
+        subtitle:physical?unitLabel(a.unit):(Number.isSafeInteger(a.balance)&&context.format?(a.balance<0?'Borcumuz ':a.balance>0?'Alacağımız ':'Bakiyesi sıfır ')+context.format(Math.abs(a.balance),a.unit):''),
+        meta:physical&&Number.isSafeInteger(state.balances?.[a.id])&&context.format?context.format(state.balances[a.id],a.unit):'',
+        keywords:[a.id,a.name,a.unit,unitLabel(a.unit),...(a.pairedGroups||[]).map(gid=>catalog.find(x=>x.id===gid)?.name||gid)].filter(Boolean)
+      }));
       const rows=()=>[...section.querySelectorAll('[data-row]')];
       const add=(values={})=>{
         if(rows().length>=30){info('Bir grupta en çok 30 satır eklenebilir.');return;}
         const row=doc.createElement('div');row.dataset.row='';row.className='form-grid';
-        const choices=physical?catalog.filter(a=>name==='items'?(a.isPurchasable||a.isSaleable):a.kind==='asset'&&a.id!=='pos'):nativeAccounts;
-        row.innerHTML='<label class="field"><span>'+ (physical?(name==='items'?'Ürün':'Ürün / kasa / banka'):'Firma hesabı') +'</span><select data-field="accountId" required><option value="">Seçin</option>'+choices.map(a=>'<option value="'+esc(a.id)+'">'+esc((a.name||unitLabel(a.unit))+' · '+unitLabel(a.unit))+'</option>').join('')+'</select></label>'+
+        const hasCombobox=Boolean(getCombobox()?.enhanceSelect);
+        const selectMarkup=hasCombobox
+          ?'<option value="">Seçin</option>'
+          :'<option value="">Seçin</option>'+choices.map(a=>'<option value="'+esc(a.id)+'">'+esc((a.name||unitLabel(a.unit))+' · '+unitLabel(a.unit))+'</option>').join('');
+        row.innerHTML='<label class="field"><span>'+ (physical?(name==='items'?'Ürün':'Ürün / kasa / banka'):'Firma hesabı') +'</span><select data-field="accountId" required>'+selectMarkup+'</select></label>'+
           '<label class="field"><span data-quantity-label>Miktar</span><input data-field="quantity" required inputmode="decimal" maxlength="24"></label>'+
           (physical?'<label class="field" data-weight-group hidden><span>Ayar / terazi grubu</span><select data-field="weightAccount"></select></label><label class="field" data-weight-input hidden><span>Gerçek toplam gram</span><input data-field="weight" inputmode="decimal" maxlength="24"></label>':'')+
-          '<details><summary>TL referansı · isteğe bağlı</summary><label class="field"><span>Anlaşılmış TL referansı</span><input data-field="referenceTL" inputmode="decimal" maxlength="24"></label></details><button type="button" class="button text" data-remove-row>Satırı kaldır</button>';
+          '<details><summary>Anlaşılan TL Referansı (Kasadan Çıkmaz) · isteğe bağlı</summary><label class="field"><span>Anlaşılmış TL referansı</span><input data-field="referenceTL" inputmode="decimal" maxlength="24"></label></details><button type="button" class="button text" data-remove-row>Satırı kaldır</button>';
         const accountSelect=row.querySelector('[data-field="accountId"]');
         function configure(){
           const a=choices.find(a=>a.id===accountSelect.value);row.querySelector('[data-quantity-label]').textContent='Miktar'+(a?' · '+unitLabel(a.unit):'');
@@ -154,35 +276,60 @@ function renderSupplierForm(panel, context) {
             weightGroup.disabled=weight.disabled=!ids.length;weightGroup.required=weight.required=!!ids.length;row.querySelector('[data-weight-group]').hidden=row.querySelector('[data-weight-input]').hidden=!ids.length;
           }
         }
-        accountSelect.addEventListener('change',configure);
-        row.querySelector('[data-remove-row]').addEventListener('click',()=>{row.remove();dirty=true;remember();preview();});
-        section.querySelector('[data-rows]').append(row);accountSelect.value=values.accountId||'';configure();
-        for(const [k,v] of Object.entries(values)){const input=row.querySelector('[data-field="'+k+'"]');if(input&&!input.disabled)input.value=v;}
+        accountSelect.addEventListener('change',()=>{clearAmountInputState(row.querySelector('[data-field="quantity"]'));clearAmountInputState(row.querySelector('[data-field="weight"]'));configure();});
+        row.querySelector('[data-remove-row]').addEventListener('click',()=>{destroyComboboxesIn(row);row.remove();setDirty(true);remember();preview();});
+        section.querySelector('[data-rows]').append(row);
+        if(hasCombobox)enhanceSupplierSelect(accountSelect,itemOptions,{value:values.accountId||'',allowDisabled:Boolean(values.accountId),emptyLabel:'Seçin',placeholder:physical?'Ürün veya hesap ara…':'Firma hesabı ara…'});
+        else accountSelect.value=values.accountId||'';
+        configure();
+        for(const [k,v] of Object.entries(values)){if(k==='accountId')continue;const input=row.querySelector('[data-field="'+k+'"]');if(input&&!input.disabled)input.value=v;}
       };
-      section.querySelector('[data-add-row]').addEventListener('click',()=>{add();dirty=true;remember();preview();});
+      section.querySelector('[data-add-row]').addEventListener('click',()=>{add();setDirty(true);remember();preview();});
       groups.set(name,{rows,add,section});
     }
     if(kind==='purchase'){
       for(const [title,names]of [['3. Bu alışta ödeme yapıyoruz',['given','credits']],['Ek olarak para / ürün alıyoruz',['received','debts']]]){const details=doc.createElement('details');details.className='supplier-payment-details';details.innerHTML='<summary>'+title+'</summary><div class="supplier-payment-columns"></div>';form.append(details);for(const name of names)details.querySelector('div').append(groups.get(name).section);}
       const addPayment=doc.createElement('button');addPayment.type='button';addPayment.className='button secondary';addPayment.textContent='Ödeme ekle';addPayment.dataset.addPayment='';
       groups.get('given').section.before(addPayment);
-      addPayment.addEventListener('click',()=>{for(const name of ['given','credits'])if(!groups.get(name).rows().length)groups.get(name).add(name==='credits'?{accountId:preferredCredit()}:{});dirty=true;remember();preview();revealInput(groups.get('given').rows()[0].querySelector('select'));});
+      addPayment.addEventListener('click',()=>{for(const name of ['given','credits'])if(!groups.get(name).rows().length)groups.get(name).add(name==='credits'?{accountId:preferredCredit()}:{});setDirty(true);remember();preview();revealInput(groups.get('given').rows()[0].querySelector('select'));});
     }
     if(kind==='payment'){const extra=doc.createElement('details');extra.dataset.extraPayment='';extra.innerHTML='<summary>Ek olarak ters yönde para / ürün veriyoruz veya alıyoruz</summary>';form.append(extra);}
     if(kind==='payment')form.insertAdjacentHTML('beforeend',select('advanceScope','Ödeme / avansın kapsamı',[['general','Genel firma hesabı'],['reserved','Belirli anlaşmaya ayrılmış']])+'<details data-agreement-details><summary>Anlaşma / sipariş · isteğe bağlı</summary>'+field('agreementId','Anlaşma / sipariş kimliği')+'</details>');
     else form.insertAdjacentHTML('beforeend','<details class="supplier-optional-metadata"><summary>Anlaşma / sipariş · isteğe bağlı</summary>'+field('agreementId','Anlaşma / sipariş kimliği · isteğe bağlı')+'</details>');
-    form.insertAdjacentHTML('beforeend','<details class="supplier-optional-metadata"><summary>Açıklama · isteğe bağlı</summary>'+field('note','Açıklama')+'</details>'+ '<details><summary>İşlem TL referansı · isteğe bağlı</summary>'+field('referenceTL','Anlaşılmış toplam TL referansı')+'</details>'+ '<div data-supplier-preview class="info neutral" aria-live="polite"></div>');
+    form.insertAdjacentHTML('beforeend','<details class="supplier-optional-metadata"><summary>Açıklama · isteğe bağlı</summary>'+field('note','Açıklama')+'</details>'+ '<details><summary>Anlaşılan Toplam TL Referansı (Kasadan Çıkmaz) · isteğe bağlı</summary>'+field('referenceTL','Anlaşılmış toplam TL referansı')+'</details>'+ '<div data-supplier-preview class="info neutral" aria-live="polite"></div>');
+    if(kind==='purchase'){
+      const applyStep=step=>{
+        form.querySelectorAll('[data-supplier-step]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.supplierStep===step)));
+        const itemsEl=groups.get('items')?.section, chargesEl=groups.get('charges')?.section;
+        if(itemsEl)itemsEl.hidden=step!=='all'&&step!=='1';
+        if(chargesEl)chargesEl.hidden=step!=='all'&&step!=='2';
+        for(const el of form.querySelectorAll('.supplier-payment-details, .supplier-optional-metadata, [data-supplier-sources="purchase"]'))el.hidden=step!=='all'&&step!=='3';
+      };
+      form.querySelectorAll('[data-supplier-step]').forEach(btn=>btn.addEventListener('click',()=>applyStep(btn.dataset.supplierStep)));
+      form.addEventListener('submit',()=>applyStep('all'),true);
+    }
   }
   if(saved?.amend)form.insertAdjacentHTML('beforeend','<p>'+esc(saved.recordLabel)+' · Düzeltme</p>'+field('amendNote','Düzeltme gerekçesi',true));
   const review=doc.createElement('button');review.type='button';review.className='button secondary';review.dataset.reviewCurrent='';review.textContent='Güncel bilgilerle kontrol ettim';review.hidden=!stale();form.append(review);
-  review.addEventListener('click',()=>{stamp={revision:state.revision,date:state.date};review.hidden=true;remember();preview();info('Güncel hesap ve ürün seçimlerini kontrol edip kaydedin.');});
-  const save=doc.createElement('button');save.type='submit';save.className='button';save.textContent=({create:'Firmayı ekle',profile:'Firma bilgilerini kaydet',reverse:'Ters kaydı kaydet',unit:'Hesap birimini ekle',purchase:'Ürün alışını kaydet',payment:'Ödemeyi / tahsilatı kaydet'})[kind];form.append(save,status);
+  const save=doc.createElement('button');save.type='submit';save.className='button';save.textContent=({create:'Firmayı ekle',profile:'Firma bilgilerini kaydet',reverse:'Ters kaydı kaydet',unit:'Hesap birimini ekle',purchase:'Ürün alışını kaydet',payment:'Ödemeyi / tahsilatı kaydet'})[kind];save.disabled=stale();form.append(save,status);
+  review.addEventListener('click',()=>{stamp={revision:state.revision,date:state.date};review.hidden=true;save.disabled=stale();setDirty(true);delete status.dataset.draftStale;remember();preview();info('Güncel hesap ve ürün seçimlerini kontrol edip kaydedin.');});
   function values(){const fields={};for(const input of form.querySelectorAll('[name]'))fields[input.name]=input.value;const rows={};for(const [name,group]of groups)rows[name]=group.rows().map(row=>Object.fromEntries([...row.querySelectorAll('[data-field]')].filter(x=>!x.disabled).map(x=>[x.dataset.field,x.value])));return {fields,rows,stamp,...(saved?.amend?{amend:saved.amend,recordLabel:saved.recordLabel}:{}),...(kind==='reverse'?{recordLabel:saved?.recordLabel}:{}),links:sourcePicker?.snapshot()||[],debtLinks:receiptPicker?.snapshot()||[]};}
-  function remember(){if(!completed&&dirty)drafts.set(key,values());}
+  function remember(){
+    if(!completed&&dirty&&form.dataset.draftDirty!=='false'){
+      const val=values();
+      if(store){
+        const actorId=getActorId(context);
+        store.saveDraft(key,{meta:{actorId,workspace:context.workspace||'default',workday:stamp.date,revision:stamp.revision,formId:kind,entityId:partyId||''},data:val});
+      }else{
+        drafts.set(key,val);drafts.set(legacyKey,val);
+      }
+    }
+  }
   function scope(){if(kind!=='payment')return;const reserved=form.elements.direction.value==='pay'&&form.elements.advanceScope.value==='reserved';form.elements.agreementId.required=reserved;const details=form.querySelector('[data-agreement-details]');details.querySelector('summary').textContent=reserved?'Anlaşma / sipariş · zorunlu':'Anlaşma / sipariş · isteğe bağlı';if(reserved||form.elements.agreementId.value)details.open=true;}
   function revealInput(input){
     if(!input)return;for(let node=input.parentElement;node&&node!==form;node=node.parentElement)if(node.tagName==='DETAILS')node.open=true;
-    input.focus();input.scrollIntoView?.({block:'center'});
+    const target=getCombobox()?.getInstance?.(input)?.input||input;
+    target.focus();target.scrollIntoView?.({block:'center'});
   }
   function preferredCredit(){
     const charges=groups.get('charges')?.rows()||[];
@@ -212,7 +359,7 @@ function renderSupplierForm(panel, context) {
       const amounts=rows.map(row=>{const a=catalog.find(a=>a.id===row.querySelector('select').value),input=row.querySelector('[data-field="quantity"]');if(!a||!input.value.trim())return '';const n=context.parseAmount?.(input,a.unit,true);return Number.isSafeInteger(n)&&n>0?context.format(n,a.unit):input.value+' '+unitLabel(a.unit);}).filter(Boolean).join(' + ');
       const message=orphan?'Borç / alacak karşılığı girdiniz. Buna karşılık gerçekten verdiğiniz veya aldığınız para / ürünü ekleyin.':(amounts?amounts+' ':'')+(physical==='given'?'ödeme girdiniz. Toptancıyla bu ödemenin ':'tahsilat girdiniz. Toptancıyla bu tahsilatın ')+(units.length?'kaç '+units.map(unitLabel).join(' / ')+' ':'hangi birimde ne kadar ')+(physical==='given'?'borç kapatacağı veya alacak oluşturacağı':'alacağı azaltacağı veya borç oluşturacağı')+' konusunda anlaştığınız miktarı belirtin.';
       help.hidden=false;help.textContent=message;
-      if(reveal){const group=orphan?source:target;if(!group.rows().length)group.add(orphan?{}:{accountId:preferredCredit()});const row=group.rows().find(row=>!row.querySelector('select').value||!row.querySelector('[data-field="quantity"]').value.trim())||group.rows()[0];const input=row.querySelector('select').value?row.querySelector('[data-field="quantity"]'):row.querySelector('select');input.setAttribute('aria-describedby',help.id);revealInput(input);dirty=true;remember();status.textContent='';}
+      if(reveal){const group=orphan?source:target;if(!group.rows().length)group.add(orphan?{}:{accountId:preferredCredit()});const row=group.rows().find(row=>!row.querySelector('select').value||!row.querySelector('[data-field="quantity"]').value.trim())||group.rows()[0];const input=row.querySelector('select').value?row.querySelector('[data-field="quantity"]'):row.querySelector('select');input.setAttribute('aria-describedby',help.id);revealInput(input);setDirty(true);remember();status.textContent='';}
       return message;
     }
     return '';
@@ -221,7 +368,7 @@ function renderSupplierForm(panel, context) {
     for(const [physical,native]of [['given','credits'],['received','debts']]){
       const target=groups.get(native);if(!target)continue;
       let button=target.section.querySelector('[data-copy-payment]');
-      if(!button){button=doc.createElement('button');button.type='button';button.className='button secondary compact';button.dataset.copyPayment=physical;button.textContent='Aynı birimdeki miktarı kullan';target.section.append(button);button.addEventListener('click',()=>{const match=copyCandidate(physical,native);if(!match)return;match.input.value=match.value;match.input.setCustomValidity('');dirty=true;remember();preview();revealInput(match.input);});}
+      if(!button){button=doc.createElement('button');button.type='button';button.className='button secondary compact';button.dataset.copyPayment=physical;button.textContent='Aynı birimdeki miktarı kullan';target.section.append(button);button.addEventListener('click',()=>{const match=copyCandidate(physical,native);if(!match)return;clearAmountInputState(match.input);match.input.value=match.value;match.input.setCustomValidity('');setDirty(true);remember();preview();revealInput(match.input);});}
       button.disabled=!copyCandidate(physical,native);button.hidden=button.disabled;
     }
   }
@@ -250,7 +397,19 @@ function renderSupplierForm(panel, context) {
       if(invalid){target.textContent='Eksik veya geçersiz miktarlar var. Mali önizleme hesaplanmadı.';return;}
     }
     for(const [name,group]of groups){
-      const lines=current.rows[name].map(row=>{const a=[...catalog,...nativeAccounts].find(a=>a.id===row.accountId);return a&&row.quantity?esc((a.name||unitLabel(a.unit))+' · '+row.quantity+' '+unitLabel(a.unit)+(row.weight?' · '+row.weight+' gr':'')+(row.referenceTL?' · TL referansı '+row.referenceTL:'')):'';}).filter(Boolean);
+      const lines=group.rows().map(rowEl=>{
+        const aId=rowEl.querySelector('[data-field="accountId"]')?.value;
+        const a=[...catalog,...nativeAccounts].find(x=>x.id===aId);
+        const qEl=rowEl.querySelector('[data-field="quantity"]'),wEl=rowEl.querySelector('[data-field="weight"]'),rEl=rowEl.querySelector('[data-field="referenceTL"]');
+        if(!a||!qEl?.value.trim())return '';
+        const qAmt=context.parseAmount?.(qEl,a.unit,true);
+        const wAmt=wEl&&!wEl.disabled&&wEl.value.trim()?context.parseAmount?.(wEl,'GRAM',true):null;
+        const rAmt=rEl&&!rEl.disabled&&rEl.value.trim()?context.parseAmount?.(rEl,'TL',false):null;
+        const qStr=qAmt!==null&&qAmt!==undefined?context.format(qAmt,a.unit):qEl.value+' '+unitLabel(a.unit);
+        const wStr=wAmt!==null&&wAmt!==undefined?' · '+context.format(wAmt,'GRAM'):(wEl?.value.trim()?' · '+wEl.value+' gr':'');
+        const rStr=rAmt!==null&&rAmt!==undefined?' · TL referansı '+context.format(rAmt,'TL'):(rEl?.value.trim()?' · TL referansı '+rEl.value:'');
+        return esc((a.name||unitLabel(a.unit))+' · '+qStr+wStr+rStr);
+      }).filter(Boolean);
       if(lines.length)parts.push('<h4>'+esc(group.section.querySelector('legend').textContent)+'</h4><ul>'+lines.map(x=>'<li>'+x+'</li>').join('')+'</ul>');
     }
     if(context.parseAmount){
@@ -275,19 +434,19 @@ function renderSupplierForm(panel, context) {
   for(const select of form.querySelectorAll(receiptSelects))selectionSummary(select);
   for(const details of form.querySelectorAll('details'))if([...details.querySelectorAll('input,textarea')].some(input=>!input.disabled&&input.type!=='checkbox'&&input.value.trim()))details.open=true;
   if(kind==='unit'){const configureUnit=()=>{const other=form.elements.unit.value==='other';form.elements.currencyCode.closest('label').hidden=!other;form.elements.currencyCode.required=other;};form.elements.unit.addEventListener('change',configureUnit);configureUnit();}
-  if(kind==='payment'){form.elements.advanceScope.addEventListener('change',scope);form.elements.direction.addEventListener('change',()=>{for(const group of groups.values())for(const row of group.rows())row.remove();const names=form.elements.direction.value==='collect'?['received','debts']:['given','credits'];for(const name of names)groups.get(name).add();scope();remember();preview();info('İşlem yönü değiştirildi; önceki karşılık satırları temizlendi.');});scope();}
+  if(kind==='payment'){form.elements.advanceScope.addEventListener('change',scope);form.elements.direction.addEventListener('change',()=>{for(const group of groups.values())for(const row of group.rows()){destroyComboboxesIn(row);row.remove();}const names=form.elements.direction.value==='collect'?['received','debts']:['given','credits'];for(const name of names)groups.get(name).add();scope();remember();preview();info('İşlem yönü değiştirildi; önceki karşılık satırları temizlendi.');});scope();}
   paymentLayout();
-  if(kind==='payment')form.elements.direction.addEventListener('change',()=>{form.elements.agreementId.value='';form.elements.advanceScope.value='general';sourcePicker?.reset();paymentLayout();scope();dirty=true;remember();preview();});
+  if(kind==='payment')form.elements.direction.addEventListener('change',()=>{form.elements.agreementId.value='';form.elements.advanceScope.value='general';sourcePicker?.reset();paymentLayout();scope();setDirty(true);remember();preview();});
   if(['purchase','payment'].includes(kind)&&context.request)sourcePicker=attachSupplierSources(form,context,saved?.links||[]);
   if(kind==='purchase'&&context.request)receiptPicker=attachSupplierSources(form,{...context,kind:'payment',sourcePurpose:'receipt'},saved?.debtLinks||[]);
-  form.addEventListener('input',event=>{event.target.setCustomValidity?.('');status.textContent='';completed=false;dirty=true;remember();preview();});form.addEventListener('change',event=>{event.target.setCustomValidity?.('');status.textContent='';completed=false;dirty=true;remember();preview();});preview();
+  form.addEventListener('input',event=>{event.target.setCustomValidity?.('');status.textContent='';completed=false;setDirty(true);remember();preview();});form.addEventListener('change',event=>{event.target.setCustomValidity?.('');status.textContent='';completed=false;setDirty(true);remember();preview();});preview();
   form.addEventListener('invalid',event=>{revealInput(event.target);if(event.target.closest('[data-group="credits"],[data-group="debts"]'))paymentIssue(true);},true);
   form.addEventListener('supplier-sources-ready',preview);
   save.addEventListener('click',event=>{if(!form.querySelector('[data-group="items"] :invalid,[data-group="charges"] :invalid')&&paymentIssue(true))event.preventDefault();});
-  if(stale())info('Defter veya iş günü değişti. Güncel hesapları ve kaynakları kontrol edin.');
+  if(stale()){status.dataset.draftStale='true';info('Defter veya iş günü değişti. Güncel hesapları ve kaynakları kontrol edin.');}
   form.addEventListener('submit',async event=>{
     event.preventDefault();if(sending||context.isPending?.())return;
-    dirty=true;remember();if(stale()){info('Defter veya iş günü değişti. Güncel bilgileri kontrol edin.');return;}
+    setDirty(true);remember();if(stale()){status.dataset.draftStale='true';info('Defter veya iş günü değişti. Güncel bilgileri kontrol edin.');return;}
     if(paymentIssue(true))return;
     if(context.parseAmount)for(const group of groups.values())for(const row of group.rows()){const a=[...catalog,...nativeAccounts].find(a=>a.id===row.querySelector('[data-field="accountId"]').value);if(a)context.parseAmount(row.querySelector('[data-field="quantity"]'),a.unit,true);for(const[field,unit]of [['weight','GRAM'],['referenceTL','TL']]){const input=row.querySelector('[data-field="'+field+'"]');if(input&&!input.disabled&&input.value.trim())context.parseAmount(input,unit,field!=='referenceTL');}}
     if(!form.reportValidity())return;
@@ -298,21 +457,21 @@ function renderSupplierForm(panel, context) {
     else if(kind==='unit'){command.supplierId=partyId;command.unit=data.fields.unit==='other'?data.fields.currencyCode.trim().toUpperCase():data.fields.unit;if(!/^[A-Z]{3}$/.test(command.unit)&&command.unit!=='TL'&&command.unit!=='SILVER'||command.unit==='TRY'){info('Döviz için üç harfli kod, Türk lirası için TL seçin.');return;}}
     else {
       if(!nativeAccounts.length){info('Önce firma hesabı için birim ekleyin.');return;}command.supplierId=partyId;
-      for(const[name,rows]of Object.entries(data.rows))if(rows.length)command[name]=rows.map(row=>Object.fromEntries(Object.entries(row).filter(([,v])=>v.trim()!=='')));
+      for(const[name,group]of groups){const rows=group.rows();if(rows.length)command[name]=rows.map(rowEl=>{const a=[...catalog,...nativeAccounts].find(x=>x.id===rowEl.querySelector('[data-field="accountId"]')?.value);const out={};for(const el of rowEl.querySelectorAll('[data-field]')){const f=el.dataset.field;if(el.disabled||!el.value.trim())continue;out[f]=f==='quantity'&&a?canonicalAmount(context,el,a.unit,true):f==='weight'?canonicalAmount(context,el,'GRAM',true):f==='referenceTL'?canonicalAmount(context,el,'TL',false):el.value.trim();}return out;});}
       if(kind==='purchase'&&(!command.items?.length||!command.charges?.length)){info('Alınan ürün ve anlaşılmış alış borcu gerekli.');return;}
       if(kind==='payment'&&(!command.given?.length&&!command.received?.length||!command.credits?.length&&!command.debts?.length)){info('Gerçek karşılık ve anlaşılmış firma hesabı etkisi gerekli.');return;}
-      if(data.fields.referenceTL?.trim()){if(context.parseAmount&&context.parseAmount(form.elements.referenceTL,'TL',false)===null){info('Geçerli TL referansı girin.');return;}command.referenceTL=data.fields.referenceTL.trim();}
+      if(data.fields.referenceTL?.trim()){if(context.parseAmount&&context.parseAmount(form.elements.referenceTL,'TL',false)===null){info('Geçerli TL referansı girin.');return;}command.referenceTL=canonicalAmount(context,form.elements.referenceTL,'TL',false);}
       for(const k of ['note','agreementId'])if(data.fields[k]?.trim())command[k]=data.fields[k].trim();
       const links=sourcePicker?.read();if(links?.error){info(links.error);return;}if(links?.rows.length)command[kind==='purchase'?'allocations':'debtUses']=links.rows;
       const receipts=receiptPicker?.read();if(receipts?.error){info(receipts.error);return;}if(receipts?.rows.length)command.debtUses=receipts.rows;
       if(kind==='payment')command.advanceScope=data.fields.direction==='collect'?'general':data.fields.advanceScope;
     }
     sending=true;save.disabled=true;
-    try{if(await context.submit(saved?.amend?{type:'supplierAmend',date:state.date,originalId:saved.amend.originalId,note:data.fields.amendNote.trim(),replacement:command}:command,'Toptancı işlemi kaydedildi.',{supplierDraftKey:key})){completed=true;drafts.delete(key);if(form.isConnected){const message=doc.createElement('p');message.setAttribute('role','status');message.textContent='Kayıt tamamlandı.';form.replaceWith(message);}}}
+    try{if(await context.submit(saved?.amend?{type:'supplierAmend',date:state.date,originalId:saved.amend.originalId,note:data.fields.amendNote.trim(),replacement:command}:command,'Toptancı işlemi kaydedildi.',{supplierDraftKey:key})){completed=true;setDirty(false);if(store)store.clearDraft(key);drafts.delete(key);drafts.delete(legacyKey);if(form.isConnected){const message=doc.createElement('p');message.setAttribute('role','status');message.textContent='Kayıt tamamlandı.';form.replaceWith(message);}}}
     catch(error){if(form.isConnected)info(error.message||'İşlem kaydedilemedi. Taslak korunuyor.');}
-    finally{sending=false;if(form.isConnected)save.disabled=false;}
+    finally{sending=false;if(form.isConnected)save.disabled=stale();}
   });
-  return completedDraftKey=>{if(destroyed)return;destroyed=true;if(completedDraftKey===key)completed=true;if(!sending)remember();sourcePicker?.destroy();receiptPicker?.destroy();};
+  return completedDraftKey=>{if(destroyed)return;destroyed=true;if(completedDraftKey===key||completedDraftKey===legacyKey)completed=true;if(!sending)remember();sourcePicker?.destroy();receiptPicker?.destroy();destroyComboboxesIn(form);};
 }
 
 
@@ -320,8 +479,10 @@ function renderSupplierRead(panel, context) {
   const {escape:esc,format,day,state,partyId,kind}=context;
   let disposed=false,generation=0,snapshot=null,printing=false;
   const doc=panel.ownerDocument,scope={supplierId:partyId,startDate:'',endDate:'',limit:50,documents:'omit'},revision=state.revision;
-  panel.insertAdjacentHTML('beforeend','<form data-supplier-period class="form-grid"><label class="field"><span>Başlangıç tarihi</span><input type="date" name="startDate"></label><label class="field"><span>Bitiş tarihi</span><input type="date" name="endDate"></label><button class="button secondary">Dönemi göster</button></form><p role="status" data-supplier-read-status></p><div data-supplier-read-result></div><button type="button" class="button secondary" data-supplier-more hidden>Daha eski hareketleri göster</button><button type="button" class="button" data-supplier-print disabled>Yazdır</button><button type="button" class="button secondary" data-supplier-pdf disabled>PDF indir</button><button type="button" class="button secondary" data-supplier-csv disabled>CSV indir</button>');
-  const form=panel.querySelector('[data-supplier-period]'),status=panel.querySelector('[data-supplier-read-status]'),result=panel.querySelector('[data-supplier-read-result]'),more=panel.querySelector('[data-supplier-more]'),print=panel.querySelector('[data-supplier-print]'),csv=panel.querySelector('[data-supplier-csv]'),pdf=panel.querySelector('[data-supplier-pdf]');
+  panel.insertAdjacentHTML('beforeend','<form data-supplier-period class="form-grid"><label class="field"><span>Başlangıç tarihi</span><input type="date" name="startDate"></label><label class="field"><span>Bitiş tarihi</span><input type="date" name="endDate"></label>'+(kind==='history'?'<label class="field"><span>Hareketlerde ara</span><input type="search" data-supplier-history-search placeholder="İşlem, ürün veya açıklama…" maxlength="160"></label>':'')+'<button class="button secondary">Dönemi göster</button></form><p role="status" data-supplier-read-status></p><div data-supplier-read-result></div><button type="button" class="button secondary" data-supplier-more hidden>Daha eski hareketleri göster</button><button type="button" class="button" data-supplier-print disabled>Yazdır</button><button type="button" class="button secondary" data-supplier-pdf disabled>PDF indir</button><button type="button" class="button secondary" data-supplier-csv disabled>CSV indir</button>');
+  const form=panel.querySelector('[data-supplier-period]'),historySearch=form.querySelector('[data-supplier-history-search]'),status=panel.querySelector('[data-supplier-read-status]'),result=panel.querySelector('[data-supplier-read-result]'),more=panel.querySelector('[data-supplier-more]'),print=panel.querySelector('[data-supplier-print]'),csv=panel.querySelector('[data-supplier-csv]'),pdf=panel.querySelector('[data-supplier-pdf]');
+  const filterEvents=events=>{const q=historySearch?.value||'';return !normalize(q)?events:events.filter(e=>matchesQuery([e.label,day(e.date),e.meta?.note,e.id,...(e.meta?.lines||[]).map(l=>(state.accounts||[]).find(a=>a.id===l.accountId)?.name||'')],q));};
+  historySearch?.addEventListener('input',()=>{if(snapshot)result.innerHTML=eventsMarkup(filterEvents(snapshot.events),true);});
   const current=ticket=>!disposed&&panel.isConnected&&ticket===generation;
   const signature=page=>JSON.stringify([page.revision,page.supplier?.id,page.accounts,page.statements,page.startDate,page.endDate,page.total]);
   const signed=(n,unit)=>Number.isSafeInteger(n)?(n<0?'−':n>0?'+':'')+format(Math.abs(n),unit):'Belirtilmedi';
@@ -346,7 +507,7 @@ function renderSupplierRead(panel, context) {
     }).join('')||'<p>Seçilen dönemde hareket yok.</p>';
   }
   function totalsMarkup(page){
-    return '<h3>Birim bazlı dönem ekstresi</h3><div class="table-wrap"><table><thead><tr>'+['Birim','Dönem başı','Borç artışı','Borç azalışı','Alacak artışı','Alacak azalışı','Dönem sonu'].map(x=>'<th>'+x+'</th>').join('')+'</tr></thead><tbody>'+page.statements.map(row=>'<tr><th>'+esc(unitLabel(row.unit))+'</th>'+['opening','debtIncrease','debtDecrease','creditIncrease','creditDecrease','closing'].map(k=>'<td>'+esc(signed(row[k],row.unit))+'</td>').join('')+'</tr>').join('')+'</tbody></table></div><p>Her birim bağımsızdır. Dönem bakiyesi güncel bakiye yerine geçmez.</p>';
+    return '<h3>Birim bazlı dönem ekstresi</h3><div class="table-wrap"><table><thead><tr>'+['Birim','Dönem başı','Borç artışı','Borç azalışı','Alacak artışı','Alacak azalışı','Dönem sonu'].map(x=>'<th scope="col">'+x+'</th>').join('')+'</tr></thead><tbody>'+page.statements.map(row=>'<tr><th scope="row">'+esc(unitLabel(row.unit))+'</th>'+['opening','debtIncrease','debtDecrease','creditIncrease','creditDecrease','closing'].map(k=>'<td>'+esc(signed(row[k],row.unit))+'</td>').join('')+'</tr>').join('')+'</tbody></table></div><p>Her birim bağımsızdır. Dönem bakiyesi güncel bakiye yerine geçmez.</p>';
   }
   function reconciliation(){
     const form=panel.querySelector('[data-reconcile-form]');if(!form)return '';
@@ -446,11 +607,45 @@ function attachSupplierSources(form, context, saved=[]) {
   function refreshOptions(){if(!loaded)return;updateCurrentSources();sourceStatus();for(const row of rows()){const select=row.querySelector('select');options(select,select.value);configure(row);}}
   function refreshCurrent(event){if(section.contains(event.target)||!event.target.closest('[data-group="credits"]')&&!['agreementId','advanceScope'].includes(event.target.name))return;refreshOptions();}
   form.addEventListener('input',refreshCurrent);form.addEventListener('change',refreshCurrent);
-  function options(select,old){select.innerHTML='<option value="">Ödeme / avans seçin</option>'+choices.map(({source,line})=>'<option value="'+esc(JSON.stringify([source.id,line.accountId]))+'">'+esc(day(source.date)+' · '+(source.kind==='current'?'Bu işlemde verdiğimiz karşılık':source.kind==='supplierReturn'?'İade alacağı':'Ödeme / avans')+' · '+unitLabel(line.unit)+' · Kullanılabilir '+format(line.remaining,line.unit)+(source.agreementId?' · '+source.agreementId:'')+receiptSuffix(source,choices.map(c=>c.source)))+'</option>').join('');select.value=old||'';}
+  function buildChoiceItems(){
+    const srcs=choices.map(c=>c.source);
+    return choices.map(({source,line})=>({
+      id:JSON.stringify([source.id,line.accountId]),
+      label:day(source.date)+' · '+(source.kind==='current'?'Bu işlemde verdiğimiz karşılık':source.kind==='supplierReturn'?'İade alacağı':'Ödeme / avans')+' · '+unitLabel(line.unit)+' · Kullanılabilir '+format(line.remaining,line.unit)+(source.agreementId?' · '+source.agreementId:'')+receiptSuffix(source,srcs),
+      unit:line.unit,
+      keywords:[source.id,line.accountId,source.agreementId,source.note].filter(Boolean)
+    }));
+  }
+  function options(select,old){
+    const cb=getCombobox()?.getInstance?.(select);
+    if(cb){
+      cb.setItems(buildChoiceItems());
+      if(old&&cb.hasValue(old))cb.setValue(old,{emitChange:false});
+      else cb.clear({emitChange:false});
+      return;
+    }
+    select.innerHTML='<option value="">Ödeme / avans seçin</option>'+choices.map(({source,line})=>'<option value="'+esc(JSON.stringify([source.id,line.accountId]))+'">'+esc(day(source.date)+' · '+(source.kind==='current'?'Bu işlemde verdiğimiz karşılık':source.kind==='supplierReturn'?'İade alacağı':'Ödeme / avans')+' · '+unitLabel(line.unit)+' · Kullanılabilir '+format(line.remaining,line.unit)+(source.agreementId?' · '+source.agreementId:'')+receiptSuffix(source,choices.map(c=>c.source)))+'</option>').join('');select.value=old||'';
+  }
   function configure(row){
     const selected=choices.find(c=>JSON.stringify([c.source.id,c.line.accountId])===row.querySelector('select').value),approval=row.querySelector('[data-source-field="overrideReserved"]'),reason=row.querySelector('[data-source-field="reason"]');
     const targetSelect=row.querySelector('[data-source-field="purchase"]');
-    if(targetSelect){const old=targetSelect.value;targetSelect.innerHTML='<option value="">Alış / açık belge seçin</option>'+targets.filter(t=>t.line.accountId===selected?.line.accountId).map(t=>'<option value="'+esc(JSON.stringify([t.purchase.id,t.line.accountId]))+'">'+esc(day(t.purchase.date)+' · '+(t.purchase.kind==='supplierReturn'?'İade sonrası kalan borç':'Açık alış / borç')+' · '+format(t.line.remaining,t.line.unit)+(t.purchase.agreementId?' · '+t.purchase.agreementId:'')+receiptSuffix(t.purchase,targets.map(t=>t.purchase)))+'</option>').join('');targetSelect.value=old;}
+    if(targetSelect){
+      const old=targetSelect.value,filtered=targets.filter(t=>t.line.accountId===selected?.line.accountId),pubs=targets.map(t=>t.purchase);
+      const cb=getCombobox()?.getInstance?.(targetSelect);
+      if(cb){
+        const targetItems=filtered.map(t=>({
+          id:JSON.stringify([t.purchase.id,t.line.accountId]),
+          label:day(t.purchase.date)+' · '+(t.purchase.kind==='supplierReturn'?'İade sonrası kalan borç':'Açık alış / borç')+' · '+format(t.line.remaining,t.line.unit)+(t.purchase.agreementId?' · '+t.purchase.agreementId:'')+receiptSuffix(t.purchase,pubs),
+          unit:t.line.unit,
+          keywords:[t.purchase.id,t.line.accountId,t.purchase.agreementId,t.purchase.note].filter(Boolean)
+        }));
+        cb.setItems(targetItems);
+        if(old&&cb.hasValue(old))cb.setValue(old,{emitChange:false});
+        else cb.clear({emitChange:false});
+      }else{
+        targetSelect.innerHTML='<option value="">Alış / açık belge seçin</option>'+filtered.map(t=>'<option value="'+esc(JSON.stringify([t.purchase.id,t.line.accountId]))+'">'+esc(day(t.purchase.date)+' · '+(t.purchase.kind==='supplierReturn'?'İade sonrası kalan borç':'Açık alış / borç')+' · '+format(t.line.remaining,t.line.unit)+(t.purchase.agreementId?' · '+t.purchase.agreementId:'')+receiptSuffix(t.purchase,pubs))+'</option>').join('');targetSelect.value=old;
+      }
+    }
     const target=targets.find(t=>JSON.stringify([t.purchase.id,t.line.accountId])===targetSelect?.value);
     const currentAgreement=kind==='allocation'?(target?.purchase.agreementId||''):(form.elements.agreementId?.value.trim()||''),reserved=selected?.source.advanceScope==='reserved'&&(selected.source.agreementId||'')!==currentAgreement;
     row.querySelector('[data-source-override]').hidden=!reserved;approval.required=reserved;reason.required=reserved;reason.disabled=!reserved;if(!reserved){approval.checked=false;reason.value='';}
@@ -461,11 +656,21 @@ function attachSupplierSources(form, context, saved=[]) {
     const row=doc.createElement('div');row.className='form-grid';
     row.innerHTML='<label class="field"><span>Kaynak ödeme / avans</span><select data-source-field="choice" required></select></label><label class="field"><span>Kullanılacak miktar · kaynağın biriminde</span><input data-source-field="quantity" inputmode="decimal" maxlength="24" required></label><div data-source-override hidden><label><input type="checkbox" data-source-field="overrideReserved">Bu kullanım için başka anlaşmaya ayrılmış tutarı kullanmayı onaylıyorum.</label><label class="field"><span>Bu kullanımın gerekçesi</span><input data-source-field="reason" maxlength="300"></label></div><details><summary>Teknik kayıt bilgileri</summary><p data-source-id></p></details><button type="button" class="button text" data-remove-source>Kaynağı kaldır</button>';
     if(kind==='allocation')row.querySelector('[data-source-override]').insertAdjacentHTML('beforebegin','<label class="field"><span>Bağlanacak alış / açık belge</span><select data-source-field="purchase" required></select></label>');
-    host.append(row);options(row.querySelector('select'),values.choice);
+    host.append(row);
+    const choiceSelect=row.querySelector('[data-source-field="choice"]'),purchaseSelect=row.querySelector('[data-source-field="purchase"]');
+    enhanceSupplierSelect(choiceSelect,[],{emptyLabel:'Ödeme / avans seçin',placeholder:'Ödeme / avans ara…'});
+    if(purchaseSelect)enhanceSupplierSelect(purchaseSelect,[],{emptyLabel:'Alış / açık belge seçin',placeholder:'Alış / açık belge ara…'});
+    options(choiceSelect,values.choice);
     for(const input of row.querySelectorAll('[data-source-field]')){const value=values[input.dataset.sourceField];if(input.type==='checkbox')input.checked=!!value;else if(input.tagName!=='SELECT')input.value=value||'';}
-    row.querySelector('select').addEventListener('change',()=>configure(row));
-    row.querySelector('[data-source-field="purchase"]')?.addEventListener('change',()=>configure(row));
-    row.querySelector('[data-remove-source]').addEventListener('click',()=>{row.remove();form.dispatchEvent(new doc.defaultView.Event('input',{bubbles:true}));});configure(row);if(kind==='allocation'&&values.purchase){row.querySelector('[data-source-field="purchase"]').value=values.purchase;configure(row);}
+    choiceSelect.addEventListener('change',()=>configure(row));
+    purchaseSelect?.addEventListener('change',()=>configure(row));
+    row.querySelector('[data-remove-source]').addEventListener('click',()=>{destroyComboboxesIn(row);row.remove();form.dispatchEvent(new doc.defaultView.Event('input',{bubbles:true}));});configure(row);
+    if(kind==='allocation'&&values.purchase){
+      const pcb=getCombobox()?.getInstance?.(purchaseSelect);
+      if(pcb){if(pcb.hasValue(values.purchase))pcb.setValue(values.purchase,{emitChange:false});}
+      else purchaseSelect.value=values.purchase;
+      configure(row);
+    }
   }
   async function load(){
     const ticket=++generation;loaded=false;const prior=host.children.length?snapshot():saved;status.textContent='Kaynaklar yükleniyor…';
@@ -475,7 +680,7 @@ function attachSupplierSources(form, context, saved=[]) {
       if(response.revision!==state.revision||response.supplier?.id!==partyId||!response.documents)throw Error('Kaynaklar doğrulanamadı. Defteri yenileyin.');
       if(context.editOriginalId){if(response.amendment?.originalId!==context.editOriginalId)throw Error('Düzeltme kaynakları doğrulanamadı.');response.documents=response.amendment.documents;}
       targets=(response.documents.purchases||[]).flatMap(purchase=>purchase.charges.filter(line=>line.remaining>0).map(line=>({purchase,line})));
-      persistedChoices=response.documents.sources.flatMap(source=>source.credits.filter(line=>line.remaining>0&&!source.blockedAccounts?.includes(line.accountId)).map(line=>({source,line})));updateCurrentSources();loaded=true;if(response.documents.unresolvedReceipts?.length&&!section.querySelector('[data-supplier-legacy]'))section.insertAdjacentHTML('beforeend','<p>Kaynağı belirtilmemiş eski tahsilatlar var. İlgili eski avanslar kullanılmadan önce kaynakları eşleştirin.</p><button type="button" class="button secondary" data-supplier-legacy>Eski tahsilat kaynaklarını eşleştir</button>');host.replaceChildren();for(const values of prior)add(values);
+      persistedChoices=response.documents.sources.flatMap(source=>source.credits.filter(line=>line.remaining>0&&!source.blockedAccounts?.includes(line.accountId)).map(line=>({source,line})));updateCurrentSources();loaded=true;if(response.documents.unresolvedReceipts?.length&&!section.querySelector('[data-supplier-legacy]'))section.insertAdjacentHTML('beforeend','<p>Kaynağı belirtilmemiş eski tahsilatlar var. İlgili eski avanslar kullanılmadan önce kaynakları eşleştirin.</p><button type="button" class="button secondary" data-supplier-legacy>Eski tahsilat kaynaklarını eşleştir</button>');destroyComboboxesIn(host);host.replaceChildren();for(const values of prior)add(values);
       sourceStatus();form.dispatchEvent(new doc.defaultView.Event('supplier-sources-ready'));
     }catch(error){if(!disposed&&form.isConnected&&ticket===generation)status.textContent=error.message;}
   }
@@ -483,7 +688,7 @@ function attachSupplierSources(form, context, saved=[]) {
   section.querySelector('[data-reload-sources]').addEventListener('click',load);
   form.elements.agreementId?.addEventListener('input',()=>rows().forEach(configure));
   load();
-  return {snapshot,refresh:refreshOptions,reset(){saved=[];host.replaceChildren();load();},read(){
+  return {snapshot,refresh:refreshOptions,reset(){saved=[];destroyComboboxesIn(host);host.replaceChildren();load();},read(){
     updateCurrentSources();
     if(rows().length&&!loaded)return {error:'Ödeme / avans kaynakları doğrulanamadı.'};
     const result=[],sourceTotals=new Map(),targetTotals=new Map();
@@ -491,18 +696,22 @@ function attachSupplierSources(form, context, saved=[]) {
       configure(row);const data=Object.fromEntries([...row.querySelectorAll('[data-source-field]')].map(input=>[input.dataset.sourceField,input.type==='checkbox'?input.checked:input.value]));
       if([...row.querySelectorAll('[required]')].some(input=>input.type==='checkbox'?!input.checked:!input.value.trim()))return {error:'Kaynak seçimini, gerekli miktarı ve farklı anlaşma onayı / gerekçesini tamamlayın.'};
       const match=choices.find(c=>JSON.stringify([c.source.id,c.line.accountId])===data.choice),target=targets.find(t=>JSON.stringify([t.purchase.id,t.line.accountId])===data.purchase);if(kind==='allocation'&&(!target||target.line.accountId!==match?.line.accountId))return {error:'Aynı birimde geçerli alış / açık belge seçin.'};if(!match)return {error:'Geçerli ödeme / avans seçin.'};
-      if(context.parseAmount){const quantity=context.parseAmount(row.querySelector('[data-source-field="quantity"]'),match.line.unit,true);if(quantity===null||!Number.isSafeInteger(quantity)||quantity<=0)return {error:'Geçerli pozitif kaynak miktarı girin.'};const sourceKey=JSON.stringify([match.source.id,match.line.accountId]),targetKey=target?JSON.stringify([target.purchase.id,target.line.accountId]):'';sourceTotals.set(sourceKey,(sourceTotals.get(sourceKey)||0)+quantity);if(target)targetTotals.set(targetKey,(targetTotals.get(targetKey)||0)+quantity);if(sourceTotals.get(sourceKey)>match.line.remaining||target&&targetTotals.get(targetKey)>target.line.remaining)return {error:'Toplam kullanım kaynakta veya belgede kalan tutarı aşamaz.'};}
-      result.push({... (match.source.id?{sourceId:match.source.id}:{}),...(target?{purchaseId:target.purchase.id}:{}),accountId:match.line.accountId,quantity:data.quantity,...(data.overrideReserved?{overrideReserved:true,reason:data.reason}:{})});
+      const quantityEl=row.querySelector('[data-source-field="quantity"]');
+      if(context.parseAmount){const quantity=context.parseAmount(quantityEl,match.line.unit,true);if(quantity===null||!Number.isSafeInteger(quantity)||quantity<=0)return {error:'Geçerli pozitif kaynak miktarı girin.'};const sourceKey=JSON.stringify([match.source.id,match.line.accountId]),targetKey=target?JSON.stringify([target.purchase.id,target.line.accountId]):'';sourceTotals.set(sourceKey,(sourceTotals.get(sourceKey)||0)+quantity);if(target)targetTotals.set(targetKey,(targetTotals.get(targetKey)||0)+quantity);if(sourceTotals.get(sourceKey)>match.line.remaining||target&&targetTotals.get(targetKey)>target.line.remaining)return {error:'Toplam kullanım kaynakta veya belgede kalan tutarı aşamaz.'};}
+      result.push({... (match.source.id?{sourceId:match.source.id}:{}),...(target?{purchaseId:target.purchase.id}:{}),accountId:match.line.accountId,quantity:canonicalAmount(context,quantityEl,match.line.unit,true),...(data.overrideReserved?{overrideReserved:true,reason:data.reason}:{})});
     }
     return {rows:result};
-  },destroy(){disposed=true;generation++;form.removeEventListener('input',refreshCurrent);form.removeEventListener('change',refreshCurrent);}};
+  },destroy(){disposed=true;generation++;destroyComboboxesIn(host);form.removeEventListener('input',refreshCurrent);form.removeEventListener('change',refreshCurrent);}};
 }
 
 
 async function renderSupplierDocumentTask(panel, context) {
   // Synchronous cleanup handle is installed by the caller; this worker uses a detached guard.
   const {escape:esc,format,day,state,partyId,kind}=context,doc=panel.ownerDocument;
-  const revision=state.revision,memory=context.memory||SUPPLIER_DRAFTS,key='supplier:draft:'+JSON.stringify([context.workspace||'default',partyId,kind]),saved=memory.get(key);
+  const revision=state.revision,memory=context.memory||SUPPLIER_DRAFTS;
+  const store=getDraftStore(),key=supplierDraftKey(context,kind,partyId),legacyKey='supplier:draft:'+JSON.stringify([context.workspace||'default',partyId,kind]);
+  const savedEnvelope=store?store.getDraft(key):null,legacySaved=store?null:(memory.get(key)||memory.get(legacyKey));
+  const saved=savedEnvelope?.data?{...savedEnvelope.data,stamp:{revision:savedEnvelope.meta.revision,date:savedEnvelope.meta.workday||savedEnvelope.meta.date||undefined}}:(savedEnvelope||legacySaved);
   const status=doc.createElement('p');status.setAttribute('role','status');status.textContent='Açık belgeler yükleniyor…';panel.append(status);
   let data;
   try{data=await context.request('suppliers',undefined,context.workspace,{query:{supplierId:partyId,limit:50,...(saved?.amend?{editOriginalId:saved.amend.originalId}:{})}});if(!panel.isConnected||context.isCurrent?.()===false)return ()=>{};if(data.revision!==revision||data.supplier?.id!==partyId||!data.documents)throw Error('Açık belgeler doğrulanamadı. Yeniden açın.');}
@@ -510,8 +719,17 @@ async function renderSupplierDocumentTask(panel, context) {
   if(saved?.amend){if(data.amendment?.originalId!==saved.amend.originalId){status.textContent='Düzeltme önizlemesi doğrulanamadı.';return ()=>{};}context={...context,editOriginalId:saved.amend.originalId};status.textContent='Düzeltme için eski etkinin geri alınmış önizlemesi';}
   const accounts=saved?.amend?data.accounts.map(a=>({...a,balance:data.amendment.balances[a.id]})):data.accounts,catalog=(state.accounts||[]).filter(a=>!a.retired),documents=saved?.amend?data.amendment.documents:data.documents;
   const form=doc.createElement('form');form.dataset.supplierDocumentForm=kind;form.dataset.kind=kind;form.className='supplier-task-form';panel.append(form);
-  let sending=false,completed=false,dirty=!!saved,stamp=saved?.stamp||{revision,date:state.date},sourcePicker=null;
-  const stale=()=>stamp.revision!==revision||stamp.date!==state.date;
+  let sending=false,completed=false,dirty=false,stamp=saved?.stamp||{revision,date:state.date},sourcePicker=null;
+  const setDirty=v=>{dirty=Boolean(v);form.dataset.draftDirty=String(dirty);};
+  setDirty(Boolean(saved));
+  const stale=()=>{
+    if(store&&savedEnvelope){
+      const actorId=getActorId(context);
+      const checkValidation=store.validateDraft({meta:{...savedEnvelope.meta,revision:stamp.revision,workday:stamp.date,workspace:context.workspace,actorId},data:capture()},state,{isCountForm:false});
+      if(checkValidation.status!=='VALID')return true;
+    }
+    return stamp.revision!==revision||stamp.date!==state.date;
+  };
   const field=(name,label,required=false)=>'<label class="field"><span>'+label+'</span><input name="'+name+'" inputmode="decimal" maxlength="300"'+(required?' required':'')+'></label>';
   const select=(name,label,options)=>'<label class="field"><span>'+label+'</span><select name="'+name+'" required><option value="">Seçin</option>'+options.map(([value,label])=>'<option value="'+esc(value)+'">'+esc(label)+'</option>').join('')+'</select></label>';
   const nativeOptions=list=>list.map(a=>[a.id,unitLabel(a.unit)+' · '+(a.balance<0?'Borcumuz ':a.balance>0?'Alacağımız ':'Bakiyesi sıfır ')+format(Math.abs(a.balance),a.unit)]);
@@ -519,18 +737,34 @@ async function renderSupplierDocumentTask(panel, context) {
   function lineGroup(name,title,physical=false){
     const fieldset=doc.createElement('fieldset');fieldset.dataset.documentGroup=name;fieldset.innerHTML='<legend>'+title+'</legend><div data-lines></div><button type="button" class="button secondary" data-add-document-line>Satır ekle</button>';form.append(fieldset);
     const host=fieldset.querySelector('[data-lines]'),rows=()=>[...host.children];
+    const choices=physical?catalog.filter(a=>a.kind==='asset'&&a.id!=='pos'):accounts;
+    const itemOptions=choices.map(a=>({
+      id:a.id,
+      label:(a.name||unitLabel(a.unit))+(physical?'':' · '+unitLabel(a.unit)),
+      unit:a.unit,
+      code:physical?a.id:'',
+      subtitle:physical?unitLabel(a.unit):(Number.isSafeInteger(a.balance)?(a.balance<0?'Borcumuz ':a.balance>0?'Alacağımız ':'Bakiyesi sıfır ')+format(Math.abs(a.balance),a.unit):''),
+      keywords:[a.id,a.name,a.unit,unitLabel(a.unit),...(a.pairedGroups||[]).map(gid=>catalog.find(x=>x.id===gid)?.name||gid)].filter(Boolean)
+    }));
     const add=(value={})=>{
       if(rows().length>=30)return;
-      const row=doc.createElement('div');row.className='form-grid';const choices=physical?catalog.filter(a=>a.kind==='asset'&&a.id!=='pos'):accounts;
-      row.innerHTML='<label class="field"><span>'+ (physical?'Alınan ürün / kasa / banka':'Firma hesabı') +'</span><select data-field="accountId" required><option value="">Seçin</option>'+choices.map(a=>'<option value="'+esc(a.id)+'">'+esc((a.name||unitLabel(a.unit))+' · '+unitLabel(a.unit))+'</option>').join('')+'</select></label><label class="field"><span>Miktar</span><input data-field="quantity" required inputmode="decimal" maxlength="24"></label>'+
+      const row=doc.createElement('div');row.className='form-grid';
+      const hasCombobox=Boolean(getCombobox()?.enhanceSelect);
+      const selectMarkup=hasCombobox
+        ?'<option value="">Seçin</option>'
+        :'<option value="">Seçin</option>'+choices.map(a=>'<option value="'+esc(a.id)+'">'+esc((a.name||unitLabel(a.unit))+' · '+unitLabel(a.unit))+'</option>').join('');
+      row.innerHTML='<label class="field"><span>'+ (physical?'Alınan ürün / kasa / banka':'Firma hesabı') +'</span><select data-field="accountId" required>'+selectMarkup+'</select></label><label class="field"><span>Miktar</span><input data-field="quantity" required inputmode="decimal" maxlength="24"></label>'+
         (physical?'<label class="field" data-weight-label hidden><span>Ayar / terazi</span><select data-field="weightAccount"></select></label><label class="field" data-weight-value hidden><span>Gerçek toplam gram</span><input data-field="weight" inputmode="decimal" maxlength="24"></label>':'')+
         '<details><summary>TL referansı · isteğe bağlı</summary><label class="field"><span>Anlaşılmış TL referansı</span><input data-field="referenceTL" inputmode="decimal" maxlength="24"></label></details><button type="button" class="button text" data-remove-document-line>Satırı kaldır</button>';
       const account=row.querySelector('select');
       const configure=()=>{if(!physical)return;const a=choices.find(a=>a.id===account.value),ids=a?.pairedGroups||[],group=row.querySelector('[data-field="weightAccount"]'),weight=row.querySelector('[data-field="weight"]');group.innerHTML=ids.map(id=>'<option value="'+esc(id)+'">'+esc(catalog.find(a=>a.id===id)?.name||id)+'</option>').join('');group.disabled=weight.disabled=!ids.length;group.required=weight.required=!!ids.length;row.querySelector('[data-weight-label]').hidden=row.querySelector('[data-weight-value]').hidden=!ids.length;};
-      host.append(row);account.value=value.accountId||'';configure();for(const[k,v]of Object.entries(value)){const input=row.querySelector('[data-field="'+k+'"]');if(input&&!input.disabled)input.value=v;}
-      account.addEventListener('change',configure);row.querySelector('[data-remove-document-line]').addEventListener('click',()=>{row.remove();dirty=true;remember();});
+      host.append(row);
+      if(hasCombobox)enhanceSupplierSelect(account,itemOptions,{value:value.accountId||'',allowDisabled:Boolean(value.accountId),emptyLabel:'Seçin',placeholder:physical?'Ürün veya hesap ara…':'Firma hesabı ara…'});
+      else account.value=value.accountId||'';
+      configure();for(const[k,v]of Object.entries(value)){if(k==='accountId')continue;const input=row.querySelector('[data-field="'+k+'"]');if(input&&!input.disabled)input.value=v;}
+      account.addEventListener('change',()=>{clearAmountInputState(row.querySelector('[data-field="quantity"]'));clearAmountInputState(row.querySelector('[data-field="weight"]'));configure();});row.querySelector('[data-remove-document-line]').addEventListener('click',()=>{destroyComboboxesIn(row);row.remove();setDirty(true);remember();});
     };
-    fieldset.querySelector('[data-add-document-line]').addEventListener('click',()=>{add();dirty=true;remember();});groups.set(name,{rows,add});
+    fieldset.querySelector('[data-add-document-line]').addEventListener('click',()=>{add();setDirty(true);remember();});groups.set(name,{rows,add});
   }
   const refundable=documents.purchases.filter(p=>['purchase','supplierPurchase'].includes(p.kind)&&p.lines.some(line=>line.remainingQuantity>0));
   if(kind==='allocation')form.innerHTML='<p>Ödeme ile alış aynı birimde bağlanır. Bu işlem kasa, stok veya cari bakiyeyi yeniden değiştirmez.</p>';
@@ -544,15 +778,24 @@ async function renderSupplierDocumentTask(panel, context) {
   let targetHost;
   if(kind==='offset'){
     const targetDetails=doc.createElement('details');targetDetails.innerHTML='<summary>Mahsubu açık alış / borç belgelerine bağla · isteğe bağlı</summary><div data-offset-targets></div><button type="button" class="button secondary" data-add-offset-target>Belge ekle</button>';form.append(targetDetails);targetHost=targetDetails.querySelector('[data-offset-targets]');
-    targetDetails.querySelector('button').addEventListener('click',()=>{addTarget();dirty=true;remember();});
+    targetDetails.querySelector('button').addEventListener('click',()=>{addTarget();setDirty(true);remember();});
   }
   function addTarget(values={}){
     if(targetHost.children.length>=30)return;
     const row=doc.createElement('div');row.className='form-grid';
     const candidates=documents.purchases.filter(p=>p.charges.some(c=>c.accountId===form.elements.toAccountId.value&&c.remaining>0));
-    row.innerHTML='<label class="field"><span>Açık belge</span><select data-target-field="purchaseId" required><option value="">Seçin</option>'+candidates.map(p=>'<option value="'+esc(p.id)+'">'+esc(day(p.date)+' · '+(p.kind==='supplierReturn'?'İade sonrası kalan borç':'Alış / açık borç')+' · '+format(p.charges.find(c=>c.accountId===form.elements.toAccountId.value).remaining,accounts.find(a=>a.id===form.elements.toAccountId.value)?.unit)+receiptSuffix(p,candidates))+'</option>').join('')+'</select></label><label class="field"><span>Bu belgeye bağlanacak miktar</span><input data-target-field="quantity" required inputmode="decimal" maxlength="24"></label><label><input type="checkbox" data-target-field="overrideReserved">Bu belgeyi farklı anlaşmayla bağlamayı onaylıyorum.</label><label class="field"><span>Farklı anlaşma gerekçesi</span><input data-target-field="reason" maxlength="300"></label><button type="button" class="button text">Kaldır</button>';
-    targetHost.append(row);for(const input of row.querySelectorAll('[data-target-field]'))if(input.type==='checkbox')input.checked=!!values[input.dataset.targetField];else input.value=values[input.dataset.targetField]||'';
-    row.querySelector('button').addEventListener('click',()=>{row.remove();dirty=true;remember();});
+    const hasCombobox=Boolean(getCombobox()?.enhanceSelect);
+    const targetItems=candidates.map(p=>({
+      id:p.id,
+      label:day(p.date)+' · '+(p.kind==='supplierReturn'?'İade sonrası kalan borç':'Alış / açık borç')+' · '+format(p.charges.find(c=>c.accountId===form.elements.toAccountId.value).remaining,accounts.find(a=>a.id===form.elements.toAccountId.value)?.unit)+receiptSuffix(p,candidates),
+      keywords:[p.id,p.agreementId,p.note].filter(Boolean)
+    }));
+    row.innerHTML='<label class="field"><span>Açık belge</span><select data-target-field="purchaseId" required><option value="">Seçin</option>'+(hasCombobox?'':targetItems.map(item=>'<option value="'+esc(item.id)+'">'+esc(item.label)+'</option>').join(''))+'</select></label><label class="field"><span>Bu belgeye bağlanacak miktar</span><input data-target-field="quantity" required inputmode="decimal" maxlength="24"></label><label><input type="checkbox" data-target-field="overrideReserved">Bu belgeyi farklı anlaşmayla bağlamayı onaylıyorum.</label><label class="field"><span>Farklı anlaşma gerekçesi</span><input data-target-field="reason" maxlength="300"></label><button type="button" class="button text" data-remove-offset-target>Kaldır</button>';
+    targetHost.append(row);
+    const targetSel=row.querySelector('[data-target-field="purchaseId"]');
+    if(hasCombobox)enhanceSupplierSelect(targetSel,targetItems,{value:values.purchaseId||'',emptyLabel:'Seçin',placeholder:'Açık belge ara…'});
+    for(const input of row.querySelectorAll('[data-target-field]'))if(input.type==='checkbox')input.checked=!!values[input.dataset.targetField];else if(!hasCombobox||input!==targetSel)input.value=values[input.dataset.targetField]||'';
+    row.querySelector('[data-remove-offset-target]').addEventListener('click',()=>{destroyComboboxesIn(row);row.remove();setDirty(true);remember();});
   }
   function returnProducts(values={}){
     const purchase=refundable.find(p=>p.id===form.elements.originalId.value),products=form.querySelector('[data-return-products]'),reductions=form.querySelector('[data-return-reductions]');
@@ -563,16 +806,44 @@ async function renderSupplierDocumentTask(panel, context) {
   form.insertAdjacentHTML('beforeend',['allocation','legacyLink'].includes(kind)?'<details class="supplier-optional-metadata"><summary>Açıklama · isteğe bağlı</summary>'+field('note','İşlem açıklaması')+'</details>':field('note','İşlem açıklaması',true));
   if(saved?.amend)form.insertAdjacentHTML('beforeend','<p>'+esc(saved.recordLabel)+' · Düzeltme</p>'+field('amendNote','Düzeltme gerekçesi',true));
   const review=doc.createElement('button');review.type='button';review.className='button secondary';review.dataset.reviewCurrent='';review.textContent='Güncel belgelerle kontrol ettim';review.hidden=!stale();form.append(review);
-  review.addEventListener('click',()=>{stamp={revision,date:state.date};review.hidden=true;dirty=true;remember();status.textContent='Güncel belge miktarlarını kontrol edip kaydedin.';});
+  review.addEventListener('click',()=>{stamp={revision,date:state.date};review.hidden=true;save.disabled=stale();setDirty(true);delete status.dataset.draftStale;remember();status.textContent='Güncel belge miktarlarını kontrol edip kaydedin.';});
   if(kind==='return')form.insertAdjacentHTML('beforeend','<div data-return-preview class="info neutral" aria-live="polite"></div>');
-  const save=doc.createElement('button');save.className='button';save.textContent={allocation:'Tahsisi kaydet',offset:'Hesap mahsubunu kaydet',return:'Alış iadesini kaydet',legacyLink:'Eski tahsilat kaynaklarını kaydet'}[kind];form.append(save);
+  if(kind==='allocation'||kind==='offset')form.insertAdjacentHTML('beforeend','<div data-document-preview class="info neutral" aria-live="polite"></div>');
+  const docPreview=form.querySelector('[data-document-preview]');
+  function updateDocPreview(){
+    if(!docPreview)return;
+    const links=sourcePicker?.snapshot()||[];
+    if(kind==='allocation'){
+      const count=links.filter(l=>l.choice&&l.quantity?.trim()).length;
+      docPreview.textContent=count?`${count} adet kaynak-alış eşleştirmesi kaydedilecek. Kasa, stok ve cari bakiyeler değişmez.`:'Eşleştirilecek kaynak ve hedef alış belgesi seçin.';
+    }
+    if(kind==='offset'){
+      const fromAcc=accounts.find(a=>a.id===form.elements.fromAccountId?.value),toAcc=accounts.find(a=>a.id===form.elements.toAccountId?.value);
+      const fq=form.elements.fromQuantity?.value.trim()||'—',tq=form.elements.toQuantity?.value.trim()||'—';
+      docPreview.textContent=`Önizleme: ${fromAcc?unitLabel(fromAcc.unit):'Alacak'} (${fq}) → ${toAcc?unitLabel(toAcc.unit):'Borç'} (${tq}) · ${links.filter(l=>l.choice&&l.quantity?.trim()).length} kaynak bağlı.`;
+    }
+  }
+  const save=doc.createElement('button');save.type='submit';save.className='button';save.textContent={allocation:'Tahsisi kaydet',offset:'Hesap mahsubunu kaydet',return:'Alış iadesini kaydet',legacyLink:'Eski tahsilat kaynaklarını kaydet'}[kind];save.disabled=stale();form.append(save);
   function capture(){
     const fields=Object.fromEntries([...form.querySelectorAll('[name]')].map(input=>[input.name,input.value]));
     const arrays={};for(const[name,group]of groups)arrays[name]=group.rows().map(row=>Object.fromEntries([...row.querySelectorAll('[data-field]')].filter(x=>!x.disabled).map(x=>[x.dataset.field,x.value])));
     const targets=targetHost?[...targetHost.children].map(row=>Object.fromEntries([...row.querySelectorAll('[data-target-field]')].map(input=>[input.dataset.targetField,input.type==='checkbox'?input.checked:input.value]))):[];
     return {fields,arrays,targets,links:sourcePicker?.snapshot()||[],stamp,...(saved?.amend?{amend:saved.amend,recordLabel:saved.recordLabel}:{})};
   }
-  function remember(){if(dirty&&!completed)memory.set(key,capture());returnPreview();}
+  function remember(){
+    if(dirty&&!completed&&form.dataset.draftDirty!=='false'){
+      const val=capture();
+      if(store){
+        const actorId=getActorId(context);
+        store.saveDraft(key,{meta:{actorId,workspace:context.workspace||'default',workday:stamp.date,revision:stamp.revision,formId:kind,entityId:partyId||''},data:val});
+      }else{
+        memory.set(key,val);
+        memory.set(legacyKey,val);
+      }
+    }
+    returnPreview();
+    updateDocPreview();
+  }
   function returnPreview(){
     const target=form.querySelector('[data-return-preview]');if(!target)return;
     const purchase=refundable.find(p=>p.id===form.elements.originalId.value);
@@ -602,30 +873,44 @@ async function renderSupplierDocumentTask(panel, context) {
     target.innerHTML='<h4>'+esc(heading)+'</h4>'+list('Firmaya çıkan',outgoing,'İade ürünü miktarı girilmedi.')+list('Firmadan giren',incoming,'Alınan karşılık satırı girilmedi.')+list('Firma bakiyesi: önce → sonra',balances,'Cari alacak satırı girilmedi; bakiye önizlemesi yok.')+list('Alış belgesi ile anlaşılan cari alacak',differences,'Belgeden düşüm girilmedi; cari alacak satırı girilmedi.')+(!outgoing.length||!credits.size&&!incoming.length?'<p>İade kaydı için ürün ve anlaşılan karşılığı tamamlayın.</p>':'');
   }
   if(saved){for(const[name,value]of Object.entries(saved.fields||{}))if(form.elements[name])form.elements[name].value=value;}
+  if(form.elements.originalId?.tagName==='SELECT')enhanceSupplierSelect(form.elements.originalId,undefined,{emptyLabel:'Seçin',placeholder:'Belge ara…'});
+  if(form.elements.fromAccountId?.tagName==='SELECT')enhanceSupplierSelect(form.elements.fromAccountId,undefined,{emptyLabel:'Seçin',placeholder:'Alacak birimi ara…'});
+  if(form.elements.toAccountId?.tagName==='SELECT')enhanceSupplierSelect(form.elements.toAccountId,undefined,{emptyLabel:'Seçin',placeholder:'Borç birimi ara…'});
   if(kind==='legacyLink'){
     const host=form.querySelector('[data-legacy-rows]'),rows=()=>[...host.children];
     const receipt=()=>documents.unresolvedReceipts.find(r=>r.id===form.elements.originalId.value);
     const add=(value={})=>{
       if(rows().length>=30)return;
       const choices=(receipt()?.sources||[]).flatMap(source=>source.credits.map(line=>({source,line}))),row=doc.createElement('div');row.className='form-grid';
-      row.innerHTML='<label class="field"><span>Önceki kaynak ödeme</span><select data-field="source" required><option value="">Seçin</option>'+choices.map(({source,line})=>'<option value="'+esc(JSON.stringify([source.id,line.accountId]))+'">'+esc(day(source.date)+' · '+unitLabel(line.unit)+' · '+format(line.remaining,line.unit)+receiptSuffix(source,receipt()?.sources||[]))+'</option>').join('')+'</select></label><label class="field"><span>Eşleştirilecek miktar</span><input data-field="quantity" required inputmode="decimal" maxlength="24"></label><button type="button" class="button text">Kaldır</button>';
-      host.append(row);row.querySelector('select').value=value.source||'';row.querySelector('input').value=value.quantity||'';row.querySelector('button').addEventListener('click',()=>{row.remove();dirty=true;remember();});
+      const srcItems=choices.map(({source,line})=>({
+        id:JSON.stringify([source.id,line.accountId]),
+        label:day(source.date)+' · '+unitLabel(line.unit)+' · '+format(line.remaining,line.unit)+receiptSuffix(source,receipt()?.sources||[]),
+        unit:line.unit,
+        keywords:[source.id,line.accountId,source.note].filter(Boolean)
+      }));
+      const hasCombobox=Boolean(getCombobox()?.enhanceSelect);
+      row.innerHTML='<label class="field"><span>Önceki kaynak ödeme</span><select data-field="source" required><option value="">Seçin</option>'+(hasCombobox?'':choices.map(({source,line})=>'<option value="'+esc(JSON.stringify([source.id,line.accountId]))+'">'+esc(day(source.date)+' · '+unitLabel(line.unit)+' · '+format(line.remaining,line.unit)+receiptSuffix(source,receipt()?.sources||[]))+'</option>').join(''))+'</select></label><label class="field"><span>Eşleştirilecek miktar</span><input data-field="quantity" required inputmode="decimal" maxlength="24"></label><button type="button" class="button text" data-remove-legacy-source>Kaldır</button>';
+      host.append(row);
+      const srcSelect=row.querySelector('select');
+      if(hasCombobox)enhanceSupplierSelect(srcSelect,srcItems,{value:value.source||'',emptyLabel:'Seçin',placeholder:'Kaynak ödeme ara…'});
+      else srcSelect.value=value.source||'';
+      row.querySelector('[data-field="quantity"]').value=value.quantity||'';row.querySelector('[data-remove-legacy-source]').addEventListener('click',()=>{destroyComboboxesIn(row);row.remove();setDirty(true);remember();});
     };
-    groups.set('legacyUses',{rows,add});form.querySelector('[data-add-legacy-source]').addEventListener('click',()=>{add();dirty=true;remember();});
+    groups.set('legacyUses',{rows,add});form.querySelector('[data-add-legacy-source]').addEventListener('click',()=>{add();setDirty(true);remember();});
     const show=()=>{form.querySelector('[data-legacy-amounts]').textContent=receipt()?'Eşleştirilecek: '+receipt().debts.map(row=>format(row.quantity,row.unit)).join(' / '):'Eski tahsilat seçin.';};
-    form.elements.originalId.addEventListener('change',()=>{host.replaceChildren();show();dirty=true;remember();});show();
+    form.elements.originalId.addEventListener('change',()=>{destroyComboboxesIn(host);host.replaceChildren();show();setDirty(true);remember();});show();
   }
-  if(kind==='return'){returnProducts(saved?.fields);form.elements.originalId.addEventListener('change',()=>{returnProducts();dirty=true;remember();});}
-  if(kind==='offset'){for(const row of saved?.targets||[])addTarget(row);form.elements.toAccountId.addEventListener('change',()=>{targetHost.replaceChildren();dirty=true;remember();});}
+  if(kind==='return'){returnProducts(saved?.fields);form.elements.originalId.addEventListener('change',()=>{returnProducts();setDirty(true);remember();});}
+  if(kind==='offset'){for(const row of saved?.targets||[])addTarget(row);form.elements.toAccountId.addEventListener('change',()=>{destroyComboboxesIn(targetHost);targetHost.replaceChildren();setDirty(true);remember();});}
   for(const[name,rows]of Object.entries(saved?.arrays||{}))for(const row of rows)groups.get(name)?.add(row);
   for(const select of form.querySelectorAll(receiptSelects))selectionSummary(select);
   for(const details of form.querySelectorAll('details'))if([...details.querySelectorAll('input,textarea')].some(input=>!input.disabled&&input.type!=='checkbox'&&input.value.trim()))details.open=true;
   if(['allocation','offset'].includes(kind))sourcePicker=attachSupplierSources(form,context,saved?.links||[]);
-  form.addEventListener('input',event=>{event.target.setCustomValidity?.('');dirty=true;remember();});form.addEventListener('change',event=>{event.target.setCustomValidity?.('');dirty=true;remember();});
+  form.addEventListener('input',event=>{event.target.setCustomValidity?.('');setDirty(true);remember();});form.addEventListener('change',event=>{event.target.setCustomValidity?.('');setDirty(true);remember();});
   returnPreview();
-  if(stale())status.textContent='Defter veya iş günü değişti. Güncel belgeleri kontrol edin.';else status.textContent=saved?.amend?'Düzeltme için eski etkinin geri alınmış önizlemesi':'Güncel açık belgeler hazır.';
+  if(stale()){status.dataset.draftStale='true';status.textContent='Defter veya iş günü değişti. Güncel belgeleri kontrol edin.';}else status.textContent=saved?.amend?'Düzeltme için eski etkinin geri alınmış önizlemesi':'Güncel açık belgeler hazır.';
   form.addEventListener('submit',async event=>{
-    event.preventDefault();if(sending||context.isPending?.())return;dirty=true;remember();if(stale()){status.textContent='Güncel belgeleri kontrol edin.';return;}
+    event.preventDefault();if(sending||context.isPending?.())return;setDirty(true);remember();if(stale()){status.dataset.draftStale='true';status.textContent='Güncel belgeleri kontrol edin.';return;}
     const selectedSources=sourcePicker?.read();if(selectedSources?.error){status.textContent=selectedSources.error;return;}if(!form.reportValidity())return;
     if(context.parseAmount)for(const[name,group]of groups){if(name==='legacyUses')continue;for(const row of group.rows()){
       const account=[...catalog,...accounts].find(a=>a.id===row.querySelector('[data-field="accountId"]').value);if(!account){status.textContent='Geçerli hesap seçin.';return;}
@@ -642,6 +927,7 @@ async function renderSupplierDocumentTask(panel, context) {
       for(let i=0;i<uses.length;i++){
         const use=uses[i],choice=choices.find(c=>c.source.id===use.sourceId&&c.line.accountId===use.accountId),element=groups.get('legacyUses').rows()[i].querySelector('[data-field="quantity"]'),amount=context.parseAmount(element,choice.line.unit,true),sourceKey=JSON.stringify([use.sourceId,use.accountId]);
         if(amount===null||!Number.isSafeInteger(amount)||amount<=0){status.textContent='Geçerli kaynak miktarı girin.';return;}
+        use.quantity=canonicalAmount(context,element,choice.line.unit,true);
         totals.set(use.accountId,(totals.get(use.accountId)||0)+amount);sourceTotals.set(sourceKey,(sourceTotals.get(sourceKey)||0)+amount);
         if(sourceTotals.get(sourceKey)>choice.line.remaining){status.textContent='Eşleştirilen miktar kaynakta kalan tutarı aşamaz.';return;}
       }
@@ -651,14 +937,15 @@ async function renderSupplierDocumentTask(panel, context) {
     if(kind==='allocation'){if(!selectedSources.rows.length){status.textContent='En az bir kaynak ve alış seçin.';return;}command.allocations=selectedSources.rows;}
     if(kind==='offset'){
       if(!selectedSources.rows.length||selectedSources.rows.some(row=>row.accountId!==input.fields.fromAccountId)){status.textContent='Kaynaklar seçilen alacak biriminden olmalı.';return;}
-      if(context.parseAmount){const from=accounts.find(a=>a.id===input.fields.fromAccountId),to=accounts.find(a=>a.id===input.fields.toAccountId),fromAmount=context.parseAmount(form.elements.fromQuantity,from?.unit,true),toAmount=context.parseAmount(form.elements.toQuantity,to?.unit,true);if(!from||!to||from.id===to.id||!Number.isSafeInteger(fromAmount)||fromAmount<=0||fromAmount>from.balance||!Number.isSafeInteger(toAmount)||toAmount<=0||toAmount>-to.balance){status.textContent='Mahsup miktarları mevcut alacak ve borç sınırları içinde olmalı.';return;}
+      const from=accounts.find(a=>a.id===input.fields.fromAccountId),to=accounts.find(a=>a.id===input.fields.toAccountId);
+      if(context.parseAmount){const fromAmount=context.parseAmount(form.elements.fromQuantity,from?.unit,true),toAmount=context.parseAmount(form.elements.toQuantity,to?.unit,true);if(!from||!to||from.id===to.id||!Number.isSafeInteger(fromAmount)||fromAmount<=0||fromAmount>from.balance||!Number.isSafeInteger(toAmount)||toAmount<=0||toAmount>-to.balance){status.textContent='Mahsup miktarları mevcut alacak ve borç sınırları içinde olmalı.';return;}
         let sourceTotal=0;for(const row of form.querySelectorAll('[data-source-rows] > div'))sourceTotal+=context.parseAmount(row.querySelector('[data-source-field="quantity"]'),from.unit,true)||0;if(sourceTotal!==fromAmount){status.textContent='Kaynakların toplamı kullanılacak alacağa eşit olmalı.';return;}
         let targetTotal=0;const used=new Map();for(const row of targetHost.children){const id=row.querySelector('select').value,purchase=documents.purchases.find(p=>p.id===id),charge=purchase?.charges.find(c=>c.accountId===to.id),quantity=context.parseAmount(row.querySelector('[data-target-field="quantity"]'),to.unit,true);if(!charge||!Number.isSafeInteger(quantity)||quantity<=0){status.textContent='Geçerli hedef belge ve miktar seçin.';return;}used.set(id,(used.get(id)||0)+quantity);targetTotal+=quantity;if(used.get(id)>charge.remaining){status.textContent='Hedef belge kullanım toplamı açık borcu aşamaz.';return;}}if(targetTotal>toAmount){status.textContent='Belgelere bağlanan toplam hedef mahsup miktarını aşamaz.';return;}
       }
-      Object.assign(command,{fromAccountId:input.fields.fromAccountId,fromQuantity:input.fields.fromQuantity,toAccountId:input.fields.toAccountId,toQuantity:input.fields.toQuantity,note:input.fields.note,
+      Object.assign(command,{fromAccountId:input.fields.fromAccountId,fromQuantity:canonicalAmount(context,form.elements.fromQuantity,from?.unit,true),toAccountId:input.fields.toAccountId,toQuantity:canonicalAmount(context,form.elements.toQuantity,to?.unit,true),note:input.fields.note,
         sourceUses:selectedSources.rows.map(({accountId,...row})=>row)});
       if(input.fields.agreementId)command.agreementId=input.fields.agreementId;
-      if(input.targets.length)command.targetUses=input.targets.map(row=>({purchaseId:row.purchaseId,quantity:row.quantity,...(row.overrideReserved?{overrideReserved:true,reason:row.reason}:{})}));
+      if(targetHost?.children.length)command.targetUses=[...targetHost.children].map(row=>{const overrideReserved=row.querySelector('[data-target-field="overrideReserved"]')?.checked;return {purchaseId:row.querySelector('[data-target-field="purchaseId"]').value,quantity:canonicalAmount(context,row.querySelector('[data-target-field="quantity"]'),to?.unit,true),...(overrideReserved?{overrideReserved:true,reason:row.querySelector('[data-target-field="reason"]').value}:{})};});
     }
     if(kind==='return'){
       const purchase=refundable.find(p=>p.id===input.fields.originalId);if(!purchase){status.textContent='İade edilecek alış seçin.';return;}
@@ -666,17 +953,18 @@ async function renderSupplierDocumentTask(panel, context) {
         for(const line of purchase.lines){const input=form.elements['returnQty-'+line.lineIndex];if(!input?.value.trim())continue;const quantity=context.parseAmount(input,catalog.find(a=>a.id===line.accountId)?.unit,true);if(quantity===null||!Number.isSafeInteger(quantity)||quantity<=0||quantity>line.remainingQuantity){status.textContent='İade miktarı alışın kalan ürün miktarını aşamaz.';return;}if(line.weightAccount){const weight=context.parseAmount(form.elements['returnWeight-'+line.lineIndex],'GRAM',true);if(weight===null||!Number.isSafeInteger(weight)||weight<=0||weight>line.remainingWeight){status.textContent='İade gramı alışın kalan gerçek gramını aşamaz.';return;}}}
         for(const charge of purchase.charges){const input=form.elements['reduction-'+charge.accountId];if(!input?.value.trim())continue;const quantity=context.parseAmount(input,charge.unit,true);if(quantity===null||!Number.isSafeInteger(quantity)||quantity<=0||quantity>charge.remaining){status.textContent='Belgeden düşülen tutar açık borcu aşamaz.';return;}}
       }
-      command.originalId=purchase.id;command.items=purchase.lines.filter(line=>input.fields['returnQty-'+line.lineIndex]?.trim()).map(line=>({lineIndex:line.lineIndex,quantity:input.fields['returnQty-'+line.lineIndex],...(line.weightAccount?{weight:input.fields['returnWeight-'+line.lineIndex]}:{})}));
+      command.originalId=purchase.id;command.items=purchase.lines.filter(line=>input.fields['returnQty-'+line.lineIndex]?.trim()).map(line=>{const unit=catalog.find(a=>a.id===line.accountId)?.unit||line.unit;return {lineIndex:line.lineIndex,quantity:canonicalAmount(context,form.elements['returnQty-'+line.lineIndex],unit,true),...(line.weightAccount?{weight:canonicalAmount(context,form.elements['returnWeight-'+line.lineIndex],'GRAM',true)}:{})};});
       if(!command.items.length){status.textContent='İade edilecek ürün miktarını girin.';return;}
-      command.reductions=purchase.charges.filter(c=>input.fields['reduction-'+c.accountId]?.trim()).map(c=>({accountId:c.accountId,quantity:input.fields['reduction-'+c.accountId]}));
-      command.credits=input.arrays.credits.map(row=>Object.fromEntries(Object.entries(row).filter(([,v])=>v.trim())));command.received=input.arrays.received.map(row=>Object.fromEntries(Object.entries(row).filter(([,v])=>v.trim())));command.note=input.fields.note;if(input.fields.referenceTL?.trim()){if(context.parseAmount){const amount=context.parseAmount(form.elements.referenceTL,'TL',false);if(!Number.isSafeInteger(amount)||amount<0){status.textContent='Geçerli TL referansı girin.';return;}}command.referenceTL=input.fields.referenceTL.trim();}
+      command.reductions=purchase.charges.filter(c=>input.fields['reduction-'+c.accountId]?.trim()).map(c=>({accountId:c.accountId,quantity:canonicalAmount(context,form.elements['reduction-'+c.accountId],c.unit,true)}));
+      const readDocGroup=(groupName,accountList)=>groups.get(groupName).rows().map(rowEl=>{const a=accountList.find(x=>x.id===rowEl.querySelector('[data-field="accountId"]')?.value);const out={};for(const el of rowEl.querySelectorAll('[data-field]')){const f=el.dataset.field;if(el.disabled||!el.value.trim())continue;out[f]=f==='quantity'&&a?canonicalAmount(context,el,a.unit,true):f==='weight'?canonicalAmount(context,el,'GRAM',true):f==='referenceTL'?canonicalAmount(context,el,'TL',false):el.value.trim();}return out;});
+      command.credits=readDocGroup('credits',accounts);command.received=readDocGroup('received',catalog);command.note=input.fields.note;if(input.fields.referenceTL?.trim()){if(context.parseAmount){const amount=context.parseAmount(form.elements.referenceTL,'TL',false);if(!Number.isSafeInteger(amount)||amount<0){status.textContent='Geçerli TL referansı girin.';return;}}command.referenceTL=canonicalAmount(context,form.elements.referenceTL,'TL',false);}
       if(!command.credits.length&&!command.received.length){status.textContent='Anlaşılan cari alacağı veya gerçek alınan karşılığı girin.';return;}
     }
     sending=true;save.disabled=true;
-    try{if(await context.submit(saved?.amend?{type:'supplierAmend',date:state.date,originalId:saved.amend.originalId,note:input.fields.amendNote.trim(),replacement:command}:command,'Toptancı belgesi kaydedildi.',{supplierDraftKey:key})){completed=true;memory.delete(key);if(form.isConnected){form.replaceChildren();status.textContent='Kayıt tamamlandı.';}}}
+    try{if(await context.submit(saved?.amend?{type:'supplierAmend',date:state.date,originalId:saved.amend.originalId,note:input.fields.amendNote.trim(),replacement:command}:command,'Toptancı belgesi kaydedildi.',{supplierDraftKey:key})){completed=true;setDirty(false);if(store)store.clearDraft(key);memory.delete(key);memory.delete(legacyKey);if(form.isConnected){form.replaceChildren();status.textContent='Kayıt tamamlandı.';}}}
     catch(error){if(form.isConnected)status.textContent=error.message;}
-    finally{sending=false;if(save.isConnected)save.disabled=false;}
+    finally{sending=false;if(save.isConnected)save.disabled=stale();}
   });
-  return completedDraftKey=>{if(completedDraftKey===key)completed=true;if(!sending)remember();sourcePicker?.destroy();};
+  return completedDraftKey=>{if(completedDraftKey===key||completedDraftKey===legacyKey)completed=true;if(!sending)remember();sourcePicker?.destroy();destroyComboboxesIn(form);};
 }
 

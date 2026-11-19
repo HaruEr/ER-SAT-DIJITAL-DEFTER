@@ -79,3 +79,80 @@ test('a backup write failure reports closing success and backup failure separate
     rmSync(dataDirectory, { recursive: true, force: true });
   }
 });
+
+test('HTTP: all HTML-referenced static assets, dynamic imports, and /draft-store.js serve 200 with CSP and nosniff', async () => {
+  const dataDirectory = mkdtempSync(path.join(os.tmpdir(), 'kuyumcu-static-assets-'));
+  const { server } = createApp({ dataDirectory });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const assertAssetHeaders = (response, expectedContentType, label) => {
+    assert.equal(response.status, 200, `${label} must return 200 OK`);
+    assert.equal(response.headers.get('content-type'), expectedContentType, `${label} Content-Type mismatch`);
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff', `${label} missing nosniff`);
+    assert.equal(response.headers.get('cache-control'), 'no-store', `${label} missing Cache-Control: no-store`);
+    const csp = response.headers.get('content-security-policy') || '';
+    assert.match(csp, /\bscript-src 'self'/, `${label} CSP missing script-src 'self'`);
+    assert.match(csp, /\bstyle-src 'self'/, `${label} CSP missing style-src 'self'`);
+  };
+  try {
+    const htmlPages = ['/', '/owner', '/checkout', '/users'];
+    const jsAssets = new Set(['/draft-store.js']);
+    const cssAssets = new Set();
+
+    for (const pagePath of htmlPages) {
+      const response = await globalThis.fetch(`${base}${pagePath}`);
+      assertAssetHeaders(response, 'text/html; charset=utf-8', pagePath);
+      const html = await response.text();
+      const pageScripts = [];
+      for (const match of html.matchAll(/<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi)) {
+        const assetPath = new URL(match[1], `${base}${pagePath}`).pathname;
+        jsAssets.add(assetPath);
+        pageScripts.push(assetPath);
+      }
+      for (const match of html.matchAll(/<link\b[^>]*>/gi)) {
+        const tag = match[0];
+        if (!/\brel=["']stylesheet["']/i.test(tag)) continue;
+        const hrefMatch = tag.match(/\bhref=["']([^"']+)["']/i);
+        if (hrefMatch) cssAssets.add(new URL(hrefMatch[1], `${base}${pagePath}`).pathname);
+      }
+      if (pagePath === '/owner' || pagePath === '/checkout') {
+        assert.ok(pageScripts.includes('/draft-store.js'), `${pagePath} must reference /draft-store.js`);
+      }
+    }
+
+    for (const dynamicImport of ['./suppliers.js', './supplier-pdf.js', './vendor/pdfmake/pdfmake.min.js', './vendor/pdfmake/vfs_fonts.js']) {
+      jsAssets.add(new URL(dynamicImport, `${base}/`).pathname);
+    }
+
+    assert.ok(jsAssets.size > 0, 'Must discover JS static assets');
+    assert.ok(cssAssets.size > 0, 'Must discover CSS static assets');
+
+    for (const assetPath of jsAssets) {
+      const response = await globalThis.fetch(`${base}${assetPath}`);
+      assertAssetHeaders(response, 'text/javascript; charset=utf-8', assetPath);
+      const body = await response.text();
+      assert.ok(body.length > 0, `${assetPath} body must not be empty`);
+      if (assetPath === '/draft-store.js') {
+        assert.match(body, /DefterDraftStore/, '/draft-store.js must expose DefterDraftStore');
+      }
+    }
+
+    for (const assetPath of cssAssets) {
+      const response = await globalThis.fetch(`${base}${assetPath}`);
+      assertAssetHeaders(response, 'text/css; charset=utf-8', assetPath);
+      const body = await response.text();
+      assert.ok(body.length > 0, `${assetPath} body must not be empty`);
+    }
+
+    const repoResponse = await globalThis.fetch(`${base}/repository.mjs`);
+    await repoResponse.body?.cancel();
+    assert.equal(repoResponse.status, 404, '/repository.mjs must return 404');
+
+    const dbResponse = await globalThis.fetch(`${base}/data/demo.sqlite`);
+    await dbResponse.body?.cancel();
+    assert.equal(dbResponse.status, 404, '/data/demo.sqlite must return 404');
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    rmSync(dataDirectory, { recursive: true, force: true });
+  }
+});

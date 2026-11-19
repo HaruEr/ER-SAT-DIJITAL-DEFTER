@@ -48,7 +48,7 @@ check('D04 measurement controls describe expected value and difference without c
  const input=form.querySelector('[data-measure]');assert.ok(d.querySelector('caption'));
  const refs=input.getAttribute('aria-describedby').split(' ');assert.ok(refs.every(id=>d.getElementById(id)));assert.ok(refs.includes('daily-expected-'+input.dataset.measure));
  const controls=[...form.querySelectorAll('.count-table input')];for(let i=0;i<controls.length;i+=2){assert.ok(controls[i].name.startsWith('count-'));assert.equal(controls[i+1].name,'reason-'+controls[i].dataset.measure);}
- assert.ok(form.querySelector('.count-approval #f-nextDate'));assert.ok(form.querySelector('.count-approval button[type=submit]'));
+ assert.ok(form.querySelector('.count-approval #f-nextDate'));assert.ok(form.querySelector('.sticky-action-bar button[type=submit]'));
 });
 check('D04 blank, zero, signed difference, reason requirement and invalid precision remain distinct',async f=>{
  await f.open('closing');const d=f.document,c=d.querySelector('#daily-count-nakit'),r=d.querySelector('#daily-reason-nakit'),diff=d.querySelector('#daily-diff-nakit');

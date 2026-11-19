@@ -1,4 +1,4 @@
-import { fail, financialUnit, quantity, text } from './domain.mjs';
+import { fail, financialUnit, getAccountIndex, quantity, text } from './domain.mjs';
 
 const supplierTypes = new Set(['supplierFirm','supplierFirmUpdate','supplierUnit','supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierReturn','supplierReverse','supplierAmend','supplierLegacyReceiptLink']);
 export function isSupplierCommand(command) {
@@ -7,12 +7,19 @@ export function isSupplierCommand(command) {
 
 export function supplierFirms(state) {
   const firms = (state.supplierFirms || []).map(firm => ({...firm}));
-  const legacy = state.accounts.filter(a => a.kind === 'receivable' && a.partyType === 'supplier' && !a.parentAccountId && !a.supplierId && !firms.some(f=>f.id===a.id));
+  const firmIds = new Set(firms.map(f => f.id));
+  const legacy = state.accounts.filter(a => a.kind === 'receivable' && a.partyType === 'supplier' && !a.parentAccountId && !a.supplierId && !firmIds.has(a.id));
   return firms.concat(legacy.map(({id,name,phone,taxId,address}) => ({id,name,phone:phone || '',taxId:taxId || '',address:address || '',legacy:true})));
 }
 
 export function resolveSupplierFirm(state, id) {
-  return supplierFirms(state).find(firm => firm.id === id) || fail('Toptancı firma bulunamadı.');
+  const native = (state.supplierFirms || []).find(firm => firm.id === id);
+  if (native) return { ...native };
+  const a = getAccountIndex(state.accounts).byId.get(id);
+  if (a && a.kind === 'receivable' && a.partyType === 'supplier' && !a.parentAccountId && !a.supplierId) {
+    return { id: a.id, name: a.name, phone: a.phone || '', taxId: a.taxId || '', address: a.address || '', legacy: true };
+  }
+  fail('Toptancı firma bulunamadı.');
 }
 
 export function supplierAccountIds(state, id) {
@@ -23,9 +30,10 @@ export function supplierAccountIds(state, id) {
 
 function totals(state, ids, input) {
   const map = new Map();
+  const byId = getAccountIndex(state.accounts).byId;
   for (const row of input || []) {
     if (!ids.has(row.accountId) || !row.quantity) continue;
-    const prior = map.get(row.accountId) || {accountId:row.accountId,unit:state.accounts.find(a=>a.id===row.accountId).unit,quantity:0};
+    const prior = map.get(row.accountId) || {accountId:row.accountId,unit:byId.get(row.accountId).unit,quantity:0};
     prior.quantity += row.quantity;
     if (!Number.isSafeInteger(prior.quantity)) fail('Belge toplamı miktar sınırını aşıyor.');
     map.set(row.accountId,prior);
@@ -43,44 +51,89 @@ function assertSourceResolved(source, accountId) {
   if(source.blockedAccounts?.includes(accountId))fail('Bu birimde eski tahsilatın ödeme kaynağı belirsiz. Önce eski tahsilatı açıkça eşleyin.');
 }
 
+const supplierJournalIndices = new WeakMap();
+function getSupplierJournalIndex(journal) {
+  let idx = supplierJournalIndices.get(journal);
+  if (!idx || idx.len > journal.length) {
+    idx = { len: 0, reversed: new Set(), order: new Map(), bySupplier: new Map(), byAccount: new Map() };
+    supplierJournalIndices.set(journal, idx);
+  }
+  for (let i = idx.len; i < journal.length; i++) {
+    const e = journal[i];
+    idx.order.set(e.id, i);
+    if (['reverse', 'supplierReverse'].includes(e.type)) idx.reversed.add(e.meta.originalId);
+    if (e.meta?.supplierId) {
+      let list = idx.bySupplier.get(e.meta.supplierId);
+      if (!list) { list = []; idx.bySupplier.set(e.meta.supplierId, list); }
+      list.push(e);
+    }
+    if ((e.type === 'purchase' && e.meta?.source === 'supplier') || ['collection', 'account', 'sale'].includes(e.type)) {
+      for (const row of e.entries) {
+        if (!row.accountId.startsWith('cari-') && !row.accountId.startsWith('supplier-unit-')) continue;
+        let list = idx.byAccount.get(row.accountId);
+        if (!list) { list = []; idx.byAccount.set(row.accountId, list); }
+        if (list.at(-1) !== e) list.push(e);
+      }
+    }
+  }
+  idx.len = journal.length;
+  return idx;
+}
+
 // Read-only document capacities. They are not another balance ledger: allocations
 // consume these documentary capacities but never write stock, cash or cari entries.
 export function supplierDocuments(state, supplierId) {
   const ids = new Set(supplierAccountIds(state,supplierId));
-  const reversed = new Set(state.journal.filter(e=>['reverse','supplierReverse'].includes(e.type)).map(e=>e.meta.originalId));
-  const active = state.journal.filter(e=>!reversed.has(e.id));
+  const jIdx = getSupplierJournalIndex(state.journal);
+  const reversed = jIdx.reversed;
+  const candidateSet = new Set(jIdx.bySupplier.get(supplierId) || []);
+  for (const accId of ids) {
+    for (const e of jIdx.byAccount.get(accId) || []) candidateSet.add(e);
+  }
+  const active = [...candidateSet].filter(e => !reversed.has(e.id)).sort((a, b) => jIdx.order.get(a.id) - jIdx.order.get(b.id));
   const purchases=[],sources=[],allocations=[];
+  const purchasesById = new Map(), sourcesById = new Map();
   const display=e=>({... (typeof e.label==='string'&&e.label?{label:e.label.slice(0,120)}:{}),...(typeof e.meta?.note==='string'&&e.meta.note?{note:e.meta.note.slice(0,300)}:{})});
   for (const e of active) {
     const own=e.meta.supplierId===supplierId;
     const legacyPurchase=e.type==='purchase' && e.meta.source==='supplier' && e.entries.some(r=>ids.has(r.accountId));
     if ((own && (['supplierPurchase','supplierReturn'].includes(e.type)||e.type==='supplierPayment'&&e.meta.receiptChargeLines?.length)) || legacyPurchase) {
       const chargeRows=own ? [...(e.meta.chargeLines||[]),...(e.meta.receiptChargeLines||[])] : e.meta.debtLines?.length ? e.meta.debtLines : e.entries.filter(r=>ids.has(r.accountId)&&r.delta<0).map(r=>({accountId:r.accountId,quantity:-r.delta}));
-      purchases.push({id:e.id,date:e.date,...display(e),legacy:!own,kind:e.type,...(e.meta.originalId&&{originalId:e.meta.originalId}),...(e.meta.agreementId&&{agreementId:e.meta.agreementId}),lines:(e.meta.lines||[]).map((r,lineIndex)=>({...structuredClone(r),lineIndex,remainingQuantity:r.quantity,remainingWeight:r.weight||0})),
-        charges:totals(state,ids,chargeRows).map(r=>({...r,allocated:0,reduced:0,remaining:r.quantity}))});
+      const pObj = {id:e.id,date:e.date,...display(e),legacy:!own,kind:e.type,...(e.meta.originalId&&{originalId:e.meta.originalId}),...(e.meta.agreementId&&{agreementId:e.meta.agreementId}),lines:(e.meta.lines||[]).map((r,lineIndex)=>({...r,lineIndex,remainingQuantity:r.quantity,remainingWeight:r.weight||0})),
+        charges:totals(state,ids,chargeRows).map(r=>({...r,allocated:0,reduced:0,remaining:r.quantity}))};
+      purchases.push(pObj);
+      purchasesById.set(pObj.id, pObj);
     }
     const eligible=own && ['supplierPurchase','supplierPayment','supplierReturn','supplierOffset'].includes(e.type) || legacyPurchase || ['collection','account','sale'].includes(e.type);
     const creditRows=own && e.type==='supplierOffset' ? [e.meta.to] : own && e.type==='supplierReturn' ? e.meta.availableCreditLines : own || legacyPurchase ? e.meta.creditLines : e.type==='collection' ? collectionNativeNet(e,ids).filter(r=>r.quantity>0) : e.entries.filter(r=>ids.has(r.accountId)&&r.delta>0).map(r=>({accountId:r.accountId,quantity:r.delta}));
     const credits=eligible ? totals(state,ids,creditRows) : [];
-    if(credits.length)sources.push({id:e.id,date:e.date,...display(e),legacy:!own,kind:e.type,...(e.meta.agreementId&&{agreementId:e.meta.agreementId}),advanceScope:e.meta.advanceScope||'general',credits:credits.map(r=>({...r,allocated:0,consumed:0,remaining:r.quantity}))});
+    if(credits.length) {
+      const sObj = {id:e.id,date:e.date,...display(e),legacy:!own,kind:e.type,...(e.meta.agreementId&&{agreementId:e.meta.agreementId}),advanceScope:e.meta.advanceScope||'general',credits:credits.map(r=>({...r,allocated:0,consumed:0,remaining:r.quantity}))};
+      sources.push(sObj);
+      sourcesById.set(sObj.id, sObj);
+    }
     if(own)for(const row of e.meta.allocations||[])allocations.push({eventId:e.id,...row});
   }
-  for(const e of active.filter(e=>e.meta.supplierId===supplierId))for(const row of [...(e.meta.sourceUses||[]),...(e.meta.debtUses||[]),...(e.type==='supplierLegacyReceiptLink'?e.meta.uses:[])]) {
-    const source=sources.find(s=>s.id===row.sourceId)?.credits.find(r=>r.accountId===row.accountId);
-    if(!source)fail('Mahsup alacak kaynağı bulunamadı.');
-    source.consumed+=row.quantity;source.remaining-=row.quantity;
-    if(source.remaining<0)fail('Mahsup alacak kaynağının kalanını aşıyor.');
+  for(const e of active) {
+    if (e.meta.supplierId !== supplierId) continue;
+    for(const row of [...(e.meta.sourceUses||[]),...(e.meta.debtUses||[]),...(e.type==='supplierLegacyReceiptLink'?e.meta.uses:[])]) {
+      const source=sourcesById.get(row.sourceId)?.credits.find(r=>r.accountId===row.accountId);
+      if(!source)fail('Mahsup alacak kaynağı bulunamadı.');
+      source.consumed+=row.quantity;source.remaining-=row.quantity;
+      if(source.remaining<0)fail('Mahsup alacak kaynağının kalanını aşıyor.');
+    }
   }
   for(const row of allocations) {
-    const source=sources.find(s=>s.id===row.sourceId)?.credits.find(r=>r.accountId===row.accountId);
-    const purchase=purchases.find(p=>p.id===row.purchaseId)?.charges.find(r=>r.accountId===row.accountId);
+    const source=sourcesById.get(row.sourceId)?.credits.find(r=>r.accountId===row.accountId);
+    const purchase=purchasesById.get(row.purchaseId)?.charges.find(r=>r.accountId===row.accountId);
     if(!source||!purchase)fail('Tahsis belgesinin kaynağı veya alış bağlantısı bulunamadı.');
     source.allocated+=row.quantity;source.remaining-=row.quantity;
     purchase.allocated+=row.quantity;purchase.remaining-=row.quantity;
     if(source.remaining<0||purchase.remaining<0)fail('Tahsis belge kapasitesini aşıyor.');
   }
-  for(const e of active.filter(e=>e.type==='supplierReturn'&&e.meta.supplierId===supplierId)) {
-    const original=purchases.find(p=>p.id===e.meta.originalId);
+  for(const e of active) {
+    if (e.type!=='supplierReturn'||e.meta.supplierId!==supplierId) continue;
+    const original=purchasesById.get(e.meta.originalId);
     for(const row of e.meta.lines) {
       const line=original?.lines[row.lineIndex];
       if(!line)fail('İadenin ürün belgesi bulunamadı.');
@@ -88,14 +141,14 @@ export function supplierDocuments(state, supplierId) {
       if(line.remainingQuantity<0||line.remainingWeight<0)fail('İade alış satırının kalanını aşıyor.');
     }
     for(const row of e.meta.reductions) {
-    const charge=purchases.find(p=>p.id===e.meta.originalId)?.charges.find(r=>r.accountId===row.accountId);
-    if(!charge)fail('İadenin borç belgesi bulunamadı.');
-    charge.reduced+=row.quantity;charge.remaining-=row.quantity;
-    if(charge.remaining<0)fail('İade belgenin kalan açık miktarını aşıyor.');
+      const charge=original?.charges.find(r=>r.accountId===row.accountId);
+      if(!charge)fail('İadenin borç belgesi bulunamadı.');
+      charge.reduced+=row.quantity;charge.remaining-=row.quantity;
+      if(charge.remaining<0)fail('İade belgenin kalan açık miktarını aşıyor.');
     }
   }
   const linkedReceipts=new Set(active.filter(e=>e.type==='supplierLegacyReceiptLink'&&e.meta.supplierId===supplierId).map(e=>e.meta.originalId));
-  const order=new Map(state.journal.map((e,index)=>[e.id,index]));
+  const order=jIdx.order;
   const unresolvedReceipts=active.filter(e=>e.type==='collection'&&!linkedReceipts.has(e.id)).flatMap(e=>{
     const debts=totals(state,ids,collectionNativeNet(e,ids).filter(r=>r.quantity<0).map(r=>({...r,quantity:-r.quantity})));
     if(!debts.length)return [];
@@ -136,13 +189,17 @@ export function assertSupplierUndoAllowed(state, originalId) {
   if(state.journal.some(e=>e.id!==originalId&&!reversed.has(e.id)&&(e.meta.allocations?.some(r=>r.sourceId===originalId||r.purchaseId===originalId)||e.meta.sourceUses?.some(r=>r.sourceId===originalId)||e.meta.debtUses?.some(r=>r.sourceId===originalId)||(e.type==='supplierLegacyReceiptLink'&&(e.meta.originalId===originalId||e.meta.uses.some(r=>r.sourceId===originalId)))||(e.type==='supplierReturn'&&e.meta.originalId===originalId)))) {
     fail('Bu belgeye bağlı etkin ödeme tahsisi var. Önce bağlı tahsisi geri alın.');
   }
-  const original=state.journal.find(e=>e.id===originalId);
+  const originPosition=new Map();
+  for(const [index,e] of state.journal.entries()) originPosition.set(e.id,originPosition.get(e.meta?.amendsOriginalId)??index);
+  const originalIndex=originPosition.get(originalId);
+  const original=originalIndex===undefined?undefined:state.journal.find(e=>e.id===originalId);
   if(original?.type==='supplierLegacyReceiptLink') {
-    const sources=new Set(original.meta.uses.map(r=>r.sourceId));
-    if(state.journal.some(e=>e.id!==originalId&&!reversed.has(e.id)&&[...(e.meta.allocations||[]),...(e.meta.sourceUses||[]),...(e.meta.debtUses||[])].some(r=>sources.has(r.sourceId))))fail('Eşlenen eski kaynak sonradan kullanılmış. Önce bağlı kullanımları geri alın.');
+    const linkedAccounts=new Set(original.meta.uses.map(r=>r.accountId));
+    const legacySources=new Set(state.journal.filter(e=>!reversed.has(e.id)&&e.meta?.supplierId!==original.meta.supplierId&&((e.type==='purchase'&&e.meta?.source==='supplier')||['collection','account','sale'].includes(e.type))).map(e=>e.id));
+    if(state.journal.some((e,index)=>index>originalIndex&&!reversed.has(e.id)&&e.meta?.supplierId===original.meta.supplierId&&[...(e.meta.allocations||[]),...(e.meta.sourceUses||[]),...(e.meta.debtUses||[])].some(r=>linkedAccounts.has(r.accountId)&&legacySources.has(r.sourceId))))fail('Eşlenen eski kaynak sonradan kullanılmış. Önce bağlı kullanımları geri alın.');
   }
   const targets=new Set((original?.meta.allocations||[]).map(r=>r.purchaseId));
-  if(state.journal.some(e=>e.type==='supplierReturn'&&!reversed.has(e.id)&&targets.has(e.meta.originalId)))fail('Bu tahsisin alışına bağlı iade var. Önce iadeyi geri alın.');
+  if(targets.size&&state.journal.some(e=>originPosition.get(e.id)>originalIndex&&e.type==='supplierReturn'&&!reversed.has(e.id)&&targets.has(e.meta.originalId)))fail('Bu tahsisin alışına bağlı iade var. Önce iadeyi geri alın.');
 }
 
 function fields(value, allowed) {
@@ -337,7 +394,7 @@ export function prepareSupplier(state, event, helpers) {
     if (state.accounts.some(a => ids.has(a.id) && a.unit === unit)) fail('Firmanın bu birimde hesabı zaten var.');
     const a = {id:'supplier-unit-'+event.id,name:firm.name,unit,physical:false,kind:'receivable',partyType:'supplier',supplierId:firm.id,
       phone:firm.phone,taxId:firm.taxId,address:firm.address,owner:'işletme',location:'cari hesap'};
-    return {entries:[{accountId:a.id,delta:0}],meta:{supplierId:firm.id,accountId:a.id},label:'Toptancı birim hesabı açılışı',accounts:[...state.accounts,a]};
+    return {entries:[{accountId:a.id,delta:0}],meta:{supplierId:firm.id,accountId:a.id},label:'Toptancı birim hesabı açılışı',addAccount:a};
   }
   const purchase = c.type === 'supplierPurchase';
   fields(c,[...common,'supplierId','given','received','credits','debts','debtUses','note','referenceTL','agreementId',...(purchase ? ['items','charges','allocations'] : ['advanceScope'])]);

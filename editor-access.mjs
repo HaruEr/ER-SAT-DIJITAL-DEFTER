@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { fail, isWorkerCustomerCreation } from './domain.mjs';
+import './public/search-norm.js';
+
+const { normalizeSearch, matchesSearch } = globalThis.DefterSearchNorm;
 
 export function deny() {
   fail('Bu işlem için yönetici oturumu gerekli.', { status: 403 });
@@ -58,12 +61,43 @@ export function checkoutState(state) {
   };
 }
 
-export function customerChoices(state, search) {
-  const query = search.trim().toLocaleLowerCase('tr');
-  if (query.length < 2 || query.length > 100) return [];
-  return state.accounts.filter(a => a.kind === 'receivable' && !a.retired && a.partyType !== 'supplier'
-    && (a.id === search || a.name.toLocaleLowerCase('tr').includes(query))).slice(0, 12)
-    .map(({ id, name, unit }) => ({ id, name, unit }));
+export function customerChoices(state, search = '', { limit = 20, meta = false } = {}) {
+  const parsedLimit = Number(limit);
+  const safeLimit = Number.isInteger(parsedLimit) && parsedLimit >= 1 ? Math.min(50, parsedLimit) : 20;
+  const raw = String(search ?? '').trim();
+  const normQuery = normalizeSearch(raw);
+  if (normQuery.length < 2 || raw.length > 100) {
+    return meta ? { items: [], total: 0, limit: safeLimit, truncated: false } : [];
+  }
+  const items = [];
+  let total = 0;
+  const accounts = state?.accounts || [];
+  for (let i = 0; i < accounts.length; i++) {
+    const a = accounts[i];
+    if (a.kind !== 'receivable' || a.retired || a.partyType === 'supplier' || a.parentAccountId) continue;
+    const phone = a.phone ? String(a.phone) : '';
+    const phoneDigits = phone ? phone.replace(/\D+/g, '') : '';
+    const taxId = a.taxId ? String(a.taxId) : '';
+    const matched = a.id === raw || matchesSearch([a.id, a.name, phone, phoneDigits, taxId], raw);
+    if (!matched) continue;
+    total++;
+    if (items.length < safeLimit) {
+      const disambiguationLabel = [
+        a.unit,
+        phone,
+        taxId ? `TC/VKN ${taxId}` : ''
+      ].filter(Boolean).join(' · ') || a.id;
+      items.push({
+        id: a.id,
+        name: a.name,
+        unit: a.unit,
+        phone,
+        taxId,
+        disambiguationLabel
+      });
+    }
+  }
+  return meta ? { items, total, limit: safeLimit, truncated: total > items.length } : items;
 }
 
 export function customerDetail(state, id) {

@@ -19,9 +19,10 @@ async function fixture(){
     else if(parsed.pathname==='/api/command'){const envelope=JSON.parse(options.body);commands.push(envelope);result=repo.execute(envelope,{compact:true});}
     else throw new Error('Unexpected route');return {ok:true,status:200,json:async()=>result};
   }catch(e){return {ok:false,status:e.status||500,json:async()=>({error:e.message})};}};
-  w.eval(readFileSync(new URL('../public/app.js',import.meta.url),'utf8')+'\nwindow.__returnView=setView;window.__returnReceipt=statementReceipt;');await tick();w.__returnView('journal');await tick();
+  const openReturns=()=>{for(const d of w.document.querySelectorAll('details[data-sale-return]')){if(!d.open){d.open=true;d.dispatchEvent(new w.Event('toggle'));}}};
+  w.eval(readFileSync(new URL('../public/app.js',import.meta.url),'utf8')+'\nwindow.__returnView=setView;window.__returnReceipt=statementReceipt;');await tick();w.__returnView('journal');await tick();openReturns();
   const set=(selector,value)=>{const el=w.document.querySelector(selector);assert.ok(el,selector);el.value=value;el.dispatchEvent(new w.Event(el.tagName==='SELECT'?'change':'input',{bubbles:true}));};
-  return {w,doc:w.document,repo,commands,set,close(){w.close();repo.close();}};
+  return {w,doc:w.document,repo,commands,set,openReturns,close(){w.close();repo.close();}};
 }
 let failed=0;
 for(const [name,run] of [
@@ -77,14 +78,14 @@ for(const [name,run] of [
     f.set('[data-return-value="0"]','150');f.set('[data-return-note]','Anlaşılmış iade');
     form.dispatchEvent(new f.w.Event('submit',{bubbles:true,cancelable:true}));await tick();
     assert.equal(f.commands.length,0);assert.match(form.querySelector('[data-return-review]').textContent,/150,00 TL/);
-    form.querySelector('[data-confirm-return]').click();await tick();
+    form.querySelector('[data-confirm-return]').click();await tick();f.openReturns();
     assert.equal(f.commands.length,1);assert.equal(f.commands[0].command.type,'saleReturn');
     assert.equal(f.commands[0].command.refunds[0].accountId,'nakit');assert.equal(f.repo.state().balances.gramToplam,9000);assert.equal(f.repo.state().balances.nakit,105000);
     assert.equal(f.doc.querySelector('[data-return-quantity="0"]').value,'0');
   }],
   ['remaining quantity comes from server history and a new return cannot exceed it',async f=>{
     f.repo.execute({id:'prior-return',revision:f.repo.state().revision,command:{type:'saleReturn',date:'2026-10-28',originalId:'source-sale',items:[{lineIndex:0,quantity:'1',value:'100'}],refunds:[{accountId:'nakit',quantity:'100',valueTL:'100'}],note:'Önceki iade'}});
-    f.doc.querySelector('#refresh').click();await tick();
+    f.doc.querySelector('#refresh').click();await tick();f.openReturns();
     assert.match(f.doc.querySelector('.sale-return-form').textContent,/1,000 gr/);
     f.set('[data-return-quantity="0"]','2');f.set('[data-return-note]','Fazla iade');
     f.doc.querySelector('.sale-return-form').dispatchEvent(new f.w.Event('submit',{bubbles:true,cancelable:true}));await tick();
@@ -100,7 +101,7 @@ for(const [name,run] of [
   }],
   ['paired returns require actual measured grams rather than an inferred average',async f=>{
     f.repo.execute({id:'paired-sale',revision:f.repo.state().revision,command:{type:'sale',date:'2026-10-28',items:[{accountId:'bilezikAdet',quantity:'2',weightAccount:'bilezik22',weight:'20',value:'200'}],cash:'200',pos:'0',bank:'0',scrapQuantity:'0',scrapValue:'0',note:'Farklı ağırlıklı iki ürün'}});
-    f.doc.querySelector('#refresh').click();await tick();
+    f.doc.querySelector('#refresh').click();await tick();f.openReturns();
     const form=f.doc.querySelector('#return-form-paired-sale');assert.ok(form);
     const q=form.querySelector('[data-return-quantity]');q.value='1';q.dispatchEvent(new f.w.Event('input',{bubbles:true}));
     const weight=form.querySelector('[data-return-weight]');assert.equal(weight.value,'');assert.equal(weight.required,true);

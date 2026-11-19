@@ -1,11 +1,11 @@
-.access-page { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; background: var(--bg,#f7f5ef); }
-.access-card { width: min(100%, 30rem); background: var(--surface,#fff); border: 1px solid var(--line,#d9d3c5); border-radius: 12px; padding: clamp(22px,5vw,42px); }
+.access-page { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; background: var(--paper, #f6f3ec); color: var(--ink, #28241c); }
+.access-card { width: min(100%, 30rem); background: var(--surface, #fffefa); border: 1px solid var(--line, #ded6c5); border-radius: var(--radius, 12px); padding: clamp(22px,5vw,42px); box-shadow: var(--shadow, 0 3px 16px rgb(50 39 12 / 5%)); }
 .access-card.wide { width: min(100%, 46rem); }
 .access-card h1 { font-size: clamp(1.7rem,4vw,2.4rem); margin: .5em 0; }
 .access-card h2 { margin: 1em 0 .5em; }
 .access-card form, .access-card fieldset { display: grid; gap: 14px; margin-top: 16px; }
 .access-card label { display: grid; gap: 5px; font-weight: 600; }
-.access-card input,.access-card select { min-width: 0; width: 100%; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); color: var(--ink); }
+.access-card input,.access-card select { min-width: 0; width: 100%; min-height: 46px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm, 8px); background: var(--surface); color: var(--ink); }
 .access-card input:read-only { background: var(--surface-soft); }
 .access-card .eyebrow { margin: 0; color: var(--gold-text); }
 .access-card #date, .access-card #available { color: var(--muted); }
@@ -15,9 +15,9 @@
 .access-card [hidden] { display: none; }
 .access-bar { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; justify-content: space-between; }
 .access-columns { display:grid; gap:14px; grid-template-columns: repeat(auto-fit,minmax(min(100%,13rem),1fr)); }
-.access-card p[role="alert"] { color:#8b302b; }
-.access-card button { min-height: 44px; }
-.access-card fieldset { padding: 14px; border: 1px solid var(--line,#d9d3c5); border-radius: 6px; }
+.access-card p[role="alert"] { color: var(--red, #a33427); font-weight: 600; }
+.access-card button { min-height: 46px; border-radius: var(--radius-sm, 8px); }
+.access-card fieldset { padding: 14px; border: 1px solid var(--line, #ded6c5); border-radius: var(--radius-sm, 8px); }
 .checkout-page { display:block; padding:clamp(12px,2vw,28px); }
 .checkout-card { width:min(100%,1320px); margin:0 auto; padding:clamp(18px,2.5vw,36px); }
 .checkout-card h1 { font-size:clamp(1.55rem,2.5vw,2rem); margin:.2em 0; }
@@ -70,3 +70,50 @@
 }
 .checkout-category-buttons { display:flex; gap:8px; flex-wrap:wrap; }
 .checkout-category-buttons .button { min-width:72px; }
+.checkout-customer-actions { margin-top: 10px; }
+.checkout-flow-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; margin: 16px 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm, 8px); background: var(--surface-soft); }
+.checkout-flow-info { display: grid; gap: 2px; min-width: 0; }
+.checkout-flow-note { color: var(--muted); font-size: .875rem; overflow-wrap: anywhere; }
+.checkout-flow-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.checkout-flow-actions [aria-pressed="true"] { border-color: var(--gold); background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.checkout-trade-layout { display: grid; grid-template-columns: 1fr; gap: 20px; align-items: start; }
+.checkout-main { min-width: 0; }
+.checkout-live-summary { min-width: 0; display: grid; gap: 14px; padding: 16px; border: 1px solid var(--line-strong); border-radius: var(--radius, 12px); background: var(--surface-soft); }
+.checkout-live-summary h2 { margin: 0; font-size: 1.15rem; }
+.checkout-summary-card { padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-sm, 8px); background: var(--surface); }
+.checkout-summary-card h3 { margin: 0 0 8px; font-size: .95rem; }
+.checkout-summary-card p { margin: 4px 0; font-size: .9rem; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 10px; }
+.checkout-summary-lines { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: .9rem; font-variant-numeric: tabular-nums; }
+.checkout-summary-lines li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.checkout-summary-lines li:last-child { padding-bottom: 0; border-bottom: 0; }
+.checkout-summary-actions { display: grid; grid-template-columns: 1fr; gap: 10px; }
+.checkout-summary-actions .button { width: 100%; }
+@media (min-width: 1100px) {
+  .checkout-trade-layout { grid-template-columns: minmax(0, 1.35fr) minmax(300px, .9fr); gap: 24px 28px; }
+  .checkout-live-summary { position: sticky; top: 18px; }
+}
+.checkout-trade-quick [data-step-panel="1"],
+.checkout-trade-quick [data-step-panel="2"] { display: block; }
+.checkout-trade-quick [data-step-panel="3"],
+.checkout-trade-quick [data-quick-secondary="true"],
+.checkout-trade-quick [data-category="product"],
+.checkout-trade-quick [data-category="scrap"] { display: none; }
+.checkout-quick-extras { margin-top: 10px; }
+.checkout-trade-stepper [data-step-panel]:not(.is-active) { display:none; }
+.checkout-total.is-balanced { border-color:var(--positive); background:var(--positive-soft); }
+.checkout-total.is-partial { border-color:var(--gold); background:var(--warning-soft); }
+.checkout-total.is-error { border-color:var(--red); background:var(--negative-soft); }
+.defter-drawer #customer-form { display: grid; gap: 14px; }
+.defter-drawer #customer-form label { display: grid; gap: 5px; font-weight: 600; }
+.defter-drawer #customer-form input,
+.defter-drawer #customer-form select { min-width: 0; width: 100%; min-height: 46px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm, 8px); background: var(--surface); color: var(--ink); }
+.defter-drawer #customer-form button { min-height: 46px; border-radius: var(--radius-sm, 8px); }
+.defter-drawer #customer-form [hidden] { display: none; }
+.defter-drawer #customer-drawer-notice { margin: 0; }
+.access-card > a {
+  display: inline-flex;
+  align-items: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 8px 0;
+}

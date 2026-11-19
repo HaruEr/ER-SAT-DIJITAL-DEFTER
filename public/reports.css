@@ -7,12 +7,13 @@
   --action: var(--gold); --action-hover: #d9b959; --on-action: #282112; --focus: #795c1b;
   --positive: #6c5318; --positive-soft: #f4edd8; --red: #a33427; --negative-soft: #fff0ed;
   --header: #26221a; --header-ink: #f4efe3; --header-muted: #c8bfae; --header-line: #aa9a7d;
-  --table-head: #eee8da; --chart-sale: #c9a646; --chart-purchase: #8c6820; --chart-expense: #a33427;
+  --table-head: #eee8da; --chart-sale: #96741b; --chart-purchase: #5f4715; --chart-expense: #a33427;
   color: var(--ink); background: var(--paper);
 }
 @media (prefers-color-scheme: dark) {
   :root { color-scheme: dark; --ink: #f4efe3; --muted: #c9c0b0; --paper: #181613; --surface: #24211b; --surface-soft: #302b22; --line: #534b3b; --line-strong: #aa9a7d; --gold-text: #e6cb82; --action: var(--gold-bright); --action-hover: #edd8aa; --focus: var(--gold-bright); --positive: #e6cb82; --positive-soft: #38301d; --red: #ffb4a5; --negative-soft: #3b2725; --header: #1c1914; --table-head: #342e23; --chart-sale: #e4c66b; --chart-purchase: #c6a253; --chart-expense: #e89382; }
 }
+html[data-theme="dark"] { color-scheme: dark; --ink: #f4efe3; --muted: #c9c0b0; --paper: #181613; --surface: #24211b; --surface-soft: #302b22; --line: #534b3b; --line-strong: #aa9a7d; --gold-text: #e6cb82; --action: var(--gold-bright); --action-hover: #edd8aa; --focus: var(--gold-bright); --positive: #e6cb82; --positive-soft: #38301d; --red: #ffb4a5; --negative-soft: #3b2725; --header: #1c1914; --table-head: #342e23; --chart-sale: #e4c66b; --chart-purchase: #c6a253; --chart-expense: #e89382; }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 body { margin: 0; min-width: 0; background: var(--paper); color: var(--ink); font-size: 16px; line-height: 1.6; }
@@ -214,3 +215,32 @@ input,select,button,a,[tabindex] { scroll-margin-block: 16px 110px; }
 .trade-chart:has(.long-amount) { grid-template-columns: minmax(0, 1fr); }
 .chart-row.long-amount strong { font-size: clamp(16px, 4.5vw, 24px); white-space: nowrap; overflow-x: auto; }
 @media(max-width:360px){.trade-chart{grid-template-columns:minmax(0,1fr)}}
+@media (max-width: 900px), (pointer: coarse) {
+  button,
+  .button,
+  a {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+@media print {
+  :root, html[data-theme="dark"] {
+    color-scheme: light;
+    --ink: #111;
+    --muted: #444;
+    --paper: #fff;
+    --surface: #fff;
+    --surface-soft: #f5f5f5;
+    --line: #c8c8c8;
+    --line-strong: #666;
+    --gold-text: #333;
+    --positive: #333;
+    --positive-soft: #fff;
+    --red: #7e2921;
+    --negative-soft: #fff;
+    --table-head: #eee;
+    --chart-sale: #96741b;
+    --chart-purchase: #5f4715;
+    --chart-expense: #a33427;
+  }
+}

@@ -2,7 +2,7 @@
 
 ## Mimari
 
-`server.mjs` yerel HTTP/kimlik sınırını, `identity.mjs` ayrı kimlik deposunu, `editor-access.mjs` rol projeksiyonlarını sağlar. `repository.mjs` SQLite olay defteri, revision, replay, yedek ve atomik kayıt katmanıdır. `domain.mjs`, `retail-exchange.mjs`, `sale-pricing.mjs`, `inventory.mjs` ve `supplier-ledger.mjs` iş kurallarını uygular. `ledger-view.mjs` ve `supplier-view.mjs` rapor/projeksiyonları üretir. Frontend `public/` altında derleme gerektirmeyen JavaScript/CSS/HTML'dir. PDF motoru ve font yerel `public/vendor/pdfmake/` içindedir.
+`server.mjs` yerel HTTP/kimlik sınırını, `identity.mjs` ayrı kimlik deposunu, `editor-access.mjs` rol projeksiyonlarını sağlar. `repository.mjs` SQLite olay defteri, revision, replay, yedek ve atomik kayıt katmanıdır. `domain.mjs`, `retail-exchange.mjs`, `sale-pricing.mjs`, `inventory.mjs` ve `supplier-ledger.mjs` iş kurallarını uygular. `ledger-view.mjs` ve `supplier-view.mjs` rapor/projeksiyonları üretir. Frontend `public/` altında derleme gerektirmeyen JavaScript/CSS/HTML'dir (`ui-kit.js`, `amount-codec.js`, `date-format.js`, `draft-store.js`, `search-norm.js`, `combobox.js`, `command-palette.js` dahil). PDF motoru ve font yerel `public/vendor/pdfmake/` içindedir.
 
 `test/` Node test runner; `qa-temp/` adı tarihsel olmasına rağmen buradaki izlenen `.mjs` dosyaları dağıtılan test kaynaklarıdır. Silinmemelidir. `test-support/` ortak yardımcıları içerir. `test:ui` için lockfile'daki JSDOM gereklidir; başka bilgisayarın global modülüne ihtiyaç yoktur.
 
@@ -63,3 +63,13 @@ Ana uygulamanın JSON/akışlı yedek, arşiv ve geri yükleme kaynakları dahil
 ## Değişiklik doğrulama
 
 UI, API ve domain katmanlarının birbiriyle uyumunu test edin. Eski olay fixture'ları sentetiktir; finansal şema değişikliğinde replay/restore ve bağımsız oracle sonuçlarını karşılaştırın. Yeni birim veya hesap davranışını otomatik dönüşümle tamamlamayın. Test çalışırken aynı kaynak dosyalarını değiştirmeyin. Kaynak SHA256'ları, test kesiti ve fiilî komut/exit bilgileri kabul raporunda eşleşmelidir.
+
+İsteğe bağlı ölçek ve tarayıcı kıyaslama betikleri:
+- `node scripts/benchmark.mjs` ve `node scripts/benchmark-paket6a.mjs` (büyük veri/snapshot kıyaslaması)
+- `node qa-temp/paket6b-e2e-browser.mjs` ve `node qa-temp/paket6b-efficiency-benchmark.mjs` (gerçek Chrome CDP E2E)
+
+## Sürüm uyumluluğu ve SILVER sınırı
+
+- **Geriye Uyumlu Olmayan Olay Sınırı:** `bf63dae` sonrası kaydedilen serisiz `SILVER retailExchange` (`schemaVersion: 13`) olayları, eski `7719eaf` veya `b245e9c` sürümlerinde replay edilemez (`DomainError: Bağlı toptancı veya saf gümüş için güncel olay sürümü gerekli.`). Benzer şekilde `amend` rezerve sınırı (`F-M3-003`) ve iade sonrası toptancı tahsis ters kaydı (`CHAL-M33-P2`) eski sürümlerde reddedilir.
+- **Eski Sürümde Güvenli Hata ve Kurtarma:** Eski sürüm bu olayları gördüğünde veritabanını sessizce dönüştürmez; güvenli hata ve rapor portalında `503` üretir, ancak `recoveryInfo()` (`canRestore: true`) korunur.
+- **Sürüm Yükseltme ve Düşürme Kuralı:** Sürüm yükseltmeden önce mutlaka `.json` / `.ndjson` yedek alın. Sürüm düşürme gerekiyorsa yeni olaylar sonrası alınan yedeği eski sürüme zorlamayın; eski sürüm öncesi yedeği `/api/recovery` ile yükleyin veya desteklenen güncel (`6c9621d+`) sürüme ileri dönün. Eski ve yeni yedek dosyalarını tarih/sürüm etiketiyle ayrı tutun.

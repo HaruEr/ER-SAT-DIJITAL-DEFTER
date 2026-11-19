@@ -197,7 +197,7 @@ check('POS settlement names the selected bank rather than silently using the def
 });
 
 for (const view of ['stocks','accounts']) {
-  check(`${view}: statement opens before the list, takes focus and returns to the selected filtered card`, async f => {
+  check(`${view}: statement opens in split view beside the list, takes focus and returns to the selected filtered card`, async f => {
     await f.open(view);
     const prefix=view==='stocks'?'stock':'account',list=f.document.querySelector(`#${prefix}-list`);
     const search=f.document.querySelector(`#${prefix}-search`);
@@ -206,9 +206,13 @@ for (const view of ['stocks','accounts']) {
     const selected=list.querySelector('[data-account-detail]');assert.ok(selected);selected.click();await tick();
     const panel=f.document.querySelector('#account-detail');
     assert.equal(f.document.activeElement,panel,'focus must enter the opened statement');
-    assert.ok(panel.compareDocumentPosition(list.closest('section')) & f.window.Node.DOCUMENT_POSITION_FOLLOWING);
+    const split=list.closest('.workbench-split');
+    assert.ok(split && split.classList.contains('has-detail'));
+    assert.equal(panel.parentElement,split);
+    assert.ok(list.closest('section').compareDocumentPosition(panel) & f.window.Node.DOCUMENT_POSITION_FOLLOWING);
     assert.ok(panel.querySelector('#statement-result table'));
     panel.querySelector('#statement-back').click();
+    assert.equal(split.classList.contains('has-detail'),false);
     assert.equal(panel.hidden,true);assert.equal(f.document.activeElement,selected);
     assert.equal(search.value,view==='stocks'?'bilezik':view==='accounts'?'ipek':'sentetik');
     assert.equal(f.calls.filter(c=>c.method==='POST').length,0,'statement browsing never writes');

@@ -52,7 +52,7 @@ export function eventVersion(command, state) {
   if (command.type === 'saleReturn' && Object.hasOwn(command, 'outgoing')) return 9;
   return financialVersion(command, state);
 }
-function financialVersion(command, state) {
+export function financialVersion(command, state) {
   if (supplierUnitFeature(command, state)) return 7;
   return priorEventVersion(command, state);
 }
@@ -65,7 +65,14 @@ function supplierUnitFeature(command, state) {
     ...Object.keys(command.counts || {}), ...['received', 'given', 'credits', 'debts', 'payments', 'refunds'].flatMap(key => Array.isArray(command[key]) ? command[key].map(row => row?.accountId) : [])];
   // A root keeps its historical trade semantics when a child is added later.
   // Only profile edits need family mode without actually referencing a child.
-  return state?.accounts.some(a => ids.includes(a.id) && (a.unit === 'SILVER' || a.parentAccountId || (command.type === 'accountUpdate' && state.accounts.some(child => child.parentAccountId === a.id)))) || false;
+  const idx = state ? getAccountIndex(state.accounts) : null;
+  if (!idx) return false;
+  for (const id of ids) {
+    if (!id) continue;
+    if (idx.silverOrChildIds.has(id)) return true;
+    if (command.type === 'accountUpdate' && idx.parentsWithChildren.has(id)) return true;
+  }
+  return false;
 }
 function priorEventVersion(command, state) {
   if (command.type === 'amend' && command.replacement && ['sale', 'purchase', 'collection'].includes(command.replacement.type) && (Object.hasOwn(command.replacement, 'received') || Object.hasOwn(command.replacement, 'given'))) return 6;
@@ -76,7 +83,8 @@ function legacyEventVersion(command, state) {
   // An omitted optional field has the same meaning before and after JSON storage.
   const defined = key => Object.hasOwn(command, key) && command[key] !== undefined;
   const partyIds = [command.customerAccount, command.counterpartyAccount, ...(Array.isArray(command.credits) ? command.credits.map(row => row?.accountId) : []), ...(Array.isArray(command.debts) ? command.debts.map(row => row?.accountId) : [])];
-  const typedTrade = ['sale','purchase'].includes(command.type) && state?.accounts.some(a => a.partyType && partyIds.includes(a.id));
+  const idx = state ? getAccountIndex(state.accounts) : null;
+  const typedTrade = Boolean(idx && ['sale','purchase'].includes(command.type) && partyIds.some(id => id && idx.typedPartyIds.has(id)));
   if (['accountUpdate','fundUpdate','stockAccount','stockUpdate','amend'].includes(command.type) ||
       (command.type === 'opening' && Object.hasOwn(command, 'banks')) ||
       (command.type === 'account' && ['partyType','phone','taxId','address'].some(defined)) ||
@@ -139,7 +147,7 @@ export function quantity(value, unit, { signed = false, zero = true } = {}) {
   const [whole, fraction = ''] = normalized.replace('-', '').split('.');
   const result = (Number(whole) * spec.scale + Number(fraction.padEnd(spec.digits, '0'))) * (normalized.startsWith('-') ? -1 : 1);
   if (!Number.isSafeInteger(result) || Math.abs(result) > 1e12 || (!zero && result === 0)) fail('Miktar sıfır olamaz veya izin verilen sınırı aşıyor.');
-  return result;
+  return result === 0 ? 0 : result;
 }
 export function decimal(value, unit) { const spec = unitSpec(unit); return (value / spec.scale).toFixed(spec.digits); }
 export function validDate(value) {
@@ -147,7 +155,65 @@ export function validDate(value) {
   return value;
 }
 export function emptyState() { return { initialized: false, date: null, accounts: structuredClone(INITIAL_ACCOUNTS), balances: {}, journal: [], closings: [], stocktakes: [], nominalUnconfirmed: true }; }
-function account(s, id) { return s.accounts.find(a => a.id === id) || fail('Hesap bulunamadı.'); }
+const accountIndices = new WeakMap();
+function buildAccountIndex(accounts) {
+  const byId = new Map();
+  const unitNameTr = new Set();
+  const unitNameTrTR = new Set();
+  const assetUnitNameTr = new Set();
+  const upperNames = new Set();
+  const parentsWithChildren = new Set();
+  const physicalAccounts = [];
+  const pairedTargets = new Set();
+  const silverOrChildIds = new Set();
+  const typedPartyIds = new Set();
+  for (const a of accounts) {
+    byId.set(a.id, a);
+    const lowerTr = a.name.toLocaleLowerCase('tr');
+    const lowerTrTR = a.name.toLocaleLowerCase('tr-TR');
+    unitNameTr.add(`${a.unit}\0${lowerTr}`);
+    unitNameTrTR.add(`${a.unit}\0${lowerTrTR}`);
+    if (a.kind === 'asset') assetUnitNameTr.add(`${a.unit}\0${lowerTr}`);
+    upperNames.add(a.name.toLocaleUpperCase('tr-TR'));
+    if (a.parentAccountId) {
+      parentsWithChildren.add(a.parentAccountId);
+      silverOrChildIds.add(a.id);
+    }
+    if (a.unit === 'SILVER') silverOrChildIds.add(a.id);
+    if (a.partyType) typedPartyIds.add(a.id);
+    if (a.physical) physicalAccounts.push(a);
+    if (a.pairedGroups?.length) for (const g of a.pairedGroups) pairedTargets.add(g);
+  }
+  const idx = { byId, unitNameTr, unitNameTrTR, assetUnitNameTr, upperNames, parentsWithChildren, physicalAccounts, pairedTargets, silverOrChildIds, typedPartyIds, len: accounts.length };
+  accountIndices.set(accounts, idx);
+  return idx;
+}
+export function getAccountIndex(accounts) {
+  let idx = accountIndices.get(accounts);
+  if (!idx || idx.len !== accounts.length) idx = buildAccountIndex(accounts);
+  return idx;
+}
+function indexAddAccount(accounts, a) {
+  const idx = accountIndices.get(accounts);
+  if (!idx) return;
+  idx.byId.set(a.id, a);
+  const lowerTr = a.name.toLocaleLowerCase('tr');
+  const lowerTrTR = a.name.toLocaleLowerCase('tr-TR');
+  idx.unitNameTr.add(`${a.unit}\0${lowerTr}`);
+  idx.unitNameTrTR.add(`${a.unit}\0${lowerTrTR}`);
+  if (a.kind === 'asset') idx.assetUnitNameTr.add(`${a.unit}\0${lowerTr}`);
+  idx.upperNames.add(a.name.toLocaleUpperCase('tr-TR'));
+  if (a.parentAccountId) {
+    idx.parentsWithChildren.add(a.parentAccountId);
+    idx.silverOrChildIds.add(a.id);
+  }
+  if (a.unit === 'SILVER') idx.silverOrChildIds.add(a.id);
+  if (a.partyType) idx.typedPartyIds.add(a.id);
+  if (a.physical) idx.physicalAccounts.push(a);
+  if (a.pairedGroups?.length) for (const g of a.pairedGroups) idx.pairedTargets.add(g);
+  idx.len = accounts.length;
+}
+function account(s, id) { return getAccountIndex(s.accounts).byId.get(id) || fail('Hesap bulunamadı.'); }
 function stockLines(s, items, direction, priced, version = 2, purchase = false) {
   if (!Array.isArray(items) || items.length < 1 || items.length > 30) fail('1–30 ürün satırı girin.');
   const entries = [], lines = [];
@@ -250,7 +316,7 @@ function exchangeTrade(s, c, total, purchase, familyMode = false, advanceTL = 0)
       paymentLines: (purchase ? given : received).lines.filter(row => row.kind === 'money'),
       counterpartyId, counterpartyType: partyType, credit: credits.total, paid: given.total - received.total, outstanding: debts.total - credits.total } };
 }
-const amendmentValidation = Symbol('validate amendment balances after both legs');
+export const amendmentValidation = Symbol('validate amendment balances after both legs');
 export function supplierAmendmentPreview(state,originalId) {
   text(originalId,'Düzeltilecek işlem',100);
   const original=state.journal.find(entry=>entry.id===originalId);
@@ -467,7 +533,8 @@ export function scrapCustomerResolver(state) {
 // A classic fully paid sale can name a customer without a receivable entry.
 export function classicCashCustomer(state, sale) {
   if (sale?.type !== 'sale' || sale.meta.counterpartyId || !sale.editableCommand?.customerAccount) return null;
-  if (sale.entries.some(row => state.accounts.some(a => a.id === row.accountId && a.kind === 'receivable'))) return null;
+  const byId = getAccountIndex(state.accounts).byId;
+  if (sale.entries.some(row => byId.get(row.accountId)?.kind === 'receivable')) return null;
   return scrapCustomerResolver(state)(sale);
 }
 
@@ -617,16 +684,16 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
   if (c.type === 'opening') {
     if (s.initialized) fail('Başlangıç devri zaten onaylandı.');
     date = validDate(c.date);
-    if (!c.balances || typeof c.balances !== 'object' || Array.isArray(c.balances) || Object.keys(c.balances).some(id => !s.accounts.some(a => a.id === id))) fail('Açılış hesapları geçersiz.');
+    if (!c.balances || typeof c.balances !== 'object' || Array.isArray(c.balances) || Object.keys(c.balances).some(id => !getAccountIndex(s.accounts).byId.has(id))) fail('Açılış hesapları geçersiz.');
     if (event.schemaVersion >= 5) {
       if (!Array.isArray(c.banks) || c.banks.length > 50) fail('Açılışta en çok 50 banka hesabı ekleyebilirsiniz.');
       for (const [index, bank] of c.banks.entries()) {
         if (!bank || typeof bank !== 'object' || Array.isArray(bank)) fail('Geçerli banka hesabı girin.');
         const name = text(bank.name, 'Banka adı', 70), unit = financialUnit(bank.unit);
         if (['HAS', 'SILVER'].includes(unit)) fail('Banka hesabında para birimi seçin.');
-        if (s.accounts.some(a => a.unit === unit && a.name.toLocaleLowerCase('tr-TR') === name.toLocaleLowerCase('tr-TR'))) fail('Aynı ad ve birimde banka zaten var.');
+        if (getAccountIndex(s.accounts).unitNameTrTR.has(`${unit}\0${name.toLocaleLowerCase('tr-TR')}`)) fail('Aynı ad ve birimde banka zaten var.');
         const a = { id: `bank-${event.id}-${index}`, name, unit, physical: false, kind: 'asset', countPolicy: 'none', countGroup: 'gunluk', retired: false, isSaleable: false, isPurchasable: false, pairedGroups: [], owner: 'işletme', location: 'finansal hesap', bank: true };
-        s.accounts.push(a); entries.push({ accountId: a.id, delta: quantity(bank.opening, unit) });
+        s.accounts.push(a); indexAddAccount(s.accounts, a); entries.push({ accountId: a.id, delta: quantity(bank.opening, unit) });
       }
     }
     for (const a of s.accounts) {
@@ -648,7 +715,8 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
     if (event.schemaVersion === 17) {
       supplierChange = prepareSupplier(s,event,{stockLines,moneyAccount,partyProfile,optionalText});
       ({entries,meta,label} = supplierChange);
-      if (supplierChange.accounts) s.accounts = supplierChange.accounts;
+      if (supplierChange.addAccount) { s.accounts.push(supplierChange.addAccount); indexAddAccount(s.accounts, supplierChange.addAccount); }
+      else if (supplierChange.accounts) s.accounts = supplierChange.accounts;
     } else if (orderTypes.has(c.type)) {
       ({ entries, meta, label } = orderChange);
     } else if (inventoryTagged && c.type === 'registerItem') {
@@ -689,7 +757,7 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
       const name = text(c.name, 'Stok adı', 70).toLocaleUpperCase('tr-TR'), unit = c.unit;
       if (!['GRAM','ADET'].includes(unit)) fail('Stok birimi adet veya gram olmalı.');
       if (c.isSaleable !== undefined && typeof c.isSaleable !== 'boolean') fail('Stok satış seçeneği geçersiz.');
-      if (s.accounts.some(a => a.name.toLocaleUpperCase('tr-TR') === name)) fail('Bu stok adı zaten var.');
+      if (getAccountIndex(s.accounts).upperNames.has(name)) fail('Bu stok adı zaten var.');
       const pairedGroups = c.pairedGroups ?? [];
       if (!Array.isArray(pairedGroups) || pairedGroups.length > 3 || new Set(pairedGroups).size !== pairedGroups.length || pairedGroups.some(id => !['bilezik22','taki14','taki22'].includes(id)) || (unit !== 'ADET' && pairedGroups.length)) fail('Geçerli bağlı terazi grupları seçin.');
       const opening = quantity(c.opening ?? '0', unit);
@@ -697,7 +765,7 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
       const countPolicy = c.countPolicy ?? (unit === 'ADET' ? 'daily' : 'periodic');
       if (!['daily','periodic'].includes(countPolicy) || (unit === 'ADET' && countPolicy !== 'daily')) fail('Adet stokları günlük sayılmalı.');
       const a = { id: `stock-${event.id}`, name, unit, physical: true, kind: 'asset', retired: false, isSaleable: c.isSaleable !== false, isPurchasable: true, pairedGroups: [...pairedGroups], countPolicy, countGroup: countPolicy === 'daily' ? 'gunluk' : 'stok', owner: 'işletme', location: 'dükkân', displayOrder: 90 };
-      s.accounts.push(a); entries = [{ accountId: a.id, delta: opening }]; label = 'Stok kartı açılışı'; meta = { accountId: a.id };
+      s.accounts.push(a); indexAddAccount(s.accounts, a); entries = [{ accountId: a.id, delta: opening }]; label = 'Stok kartı açılışı'; meta = { accountId: a.id };
     } else if (c.type === 'stockUpdate') {
       if (event.schemaVersion !== 5) fail('Stok düzenleme için güncel olay sürümü gerekli.');
       const a = account(s, c.accountId), name = text(c.name, 'Stok adı', 70).toLocaleUpperCase('tr-TR');
@@ -714,9 +782,9 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
       const name = text(c.name, 'Kasa / banka / has hesabı adı', 70), unit = financialUnit(c.unit);
       if (typeof c.physical !== 'boolean') fail('Fiziki kasa veya banka/diğer hesap seçin.');
       if (unit === 'SILVER' && !c.physical) fail('Saf gümüş için fiziki kasa veya cari hesap kullanın.');
-      if (s.accounts.some(a => a.kind === 'asset' && a.unit === unit && a.name.toLocaleLowerCase('tr') === name.toLocaleLowerCase('tr'))) fail('Bu ad ve birimde ödeme hesabı zaten var.');
+      if (getAccountIndex(s.accounts).assetUnitNameTr.has(`${unit}\0${name.toLocaleLowerCase('tr')}`)) fail('Bu ad ve birimde ödeme hesabı zaten var.');
       const a = { id: `fund-${event.id}`, name, unit, physical: c.physical, countPolicy: c.physical ? ['HAS', 'SILVER'].includes(unit) ? 'periodic' : 'daily' : 'none', countGroup: c.physical && unit === 'HAS' ? 'ana-terazi' : 'gunluk', kind: 'asset', retired: false, isSaleable: false, isPurchasable: false, pairedGroups: [], owner: 'işletme', location: c.physical ? 'dükkân' : 'finansal hesap' };
-      s.accounts.push(a);
+      s.accounts.push(a); indexAddAccount(s.accounts, a);
       entries = [{ accountId: a.id, delta: quantity(c.opening, unit) }];
       label = 'Ödeme hesabı açılışı'; meta = { accountId: a.id, note: 'Özgün birim bakiyesiyle yeni ödeme hesabı açıldı.' };
     } else if (c.type === 'account') {
@@ -726,9 +794,9 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
       const name = text(parent ? parent.name : c.name, 'Cari adı', 70);
       financialUnit(c.unit);
       if (parent && s.accounts.some(a => (a.id === parent.id || a.parentAccountId === parent.id) && a.unit === c.unit)) fail('Bu toptancının aynı birimde hesabı zaten var.');
-      if (s.accounts.some(a => a.name.toLocaleLowerCase('tr') === name.toLocaleLowerCase('tr') && a.unit === c.unit)) fail('Bu ad ve birimde cari zaten var.');
+      if (getAccountIndex(s.accounts).unitNameTr.has(`${c.unit}\0${name.toLocaleLowerCase('tr')}`)) fail('Bu ad ve birimde cari zaten var.');
       const a = { id: `cari-${event.id}`, name, unit: c.unit, physical: false, kind: 'receivable', owner: 'işletme', location: 'cari hesap', ...(event.schemaVersion >= 5 ? partyProfile(parent || c) : {}), ...(parent ? { parentAccountId: parent.id } : {}) };
-      s.accounts.push(a);
+      s.accounts.push(a); indexAddAccount(s.accounts, a);
       entries = [{ accountId: a.id, delta: quantity(c.opening, a.unit, { signed: true }) }];
       label = 'Cari açılışı'; meta = { accountId: a.id };
     } else if (c.type === 'sale') {
@@ -891,7 +959,7 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
       if (!['Sermaye', 'İşletmeden çekiş', 'Stok girişi', 'Gider', 'Cari tahsilat/ödeme', 'Açılış düzeltmesi'].includes(c.category)) fail('Hareket nedeni geçersiz.');
       const q = quantity(c.quantity, a.unit, { zero: false });
       if (c.category === 'Cari tahsilat/ödeme') fail('Cari işlemi için bağlı tahsilat/ödeme formunu kullanın.');
-      if (event.schemaVersion >= 2 && c.category !== 'Açılış düzeltmesi' && ((a.pairedGroups?.length || 0) > 0 || s.accounts.some(x => x.pairedGroups?.includes(a.id)))) fail('Bu ürün adet ve gram birlikte izlenir. Bağlı stok girişi/çıkışı formunu kullanın.');
+      if (event.schemaVersion >= 2 && c.category !== 'Açılış düzeltmesi' && ((a.pairedGroups?.length || 0) > 0 || getAccountIndex(s.accounts).pairedTargets.has(a.id))) fail('Bu ürün adet ve gram birlikte izlenir. Bağlı stok girişi/çıkışı formunu kullanın.');
       if (a.kind === 'receivable' && c.category !== 'Açılış düzeltmesi') fail('Cari bakiyesi yalnız bağlı tahsilat/ödeme veya gerekçeli açılış düzeltmesiyle değiştirilebilir.');
       if (c.category === 'Stok girişi' && (!a.physical || !['GRAM', 'ADET'].includes(a.unit) || c.direction !== 'in')) fail('Stok girişi fiziksel ürün hesabına giriş olmalı.');
       if (c.category === 'Gider') {
@@ -962,7 +1030,7 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
     } else if (c.type === 'stocktake') {
       if (![3, 6, 7].includes(event.schemaVersion)) fail('Dönemsel tartım için güncel sürüm gerekli.');
       const selected = Object.keys(c.counts || {});
-      const allowed = s.accounts.filter(a => a.physical && !a.retired && ([6, 7].includes(event.schemaVersion) ? currentCountPolicy(a) : a.countPolicy) === 'periodic');
+      const allowed = getAccountIndex(s.accounts).physicalAccounts.filter(a => !a.retired && ([6, 7].includes(event.schemaVersion) ? currentCountPolicy(a) : a.countPolicy) === 'periodic');
       if (!selected.length || typeof c.counts !== 'object' || Array.isArray(c.counts) || selected.some(id => !allowed.some(a => a.id === id))) fail('Yalnız tartılan dönemsel gram hesaplarını seçin; en az bir tartım gerekli.');
       const rows = [];
       for (const id of selected) {
@@ -978,7 +1046,7 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
       const modern = event.schemaVersion >= 3;
       if (modern && s.nominalUnconfirmed) fail('Gün kapanışından önce gram altının mevcut toplamını açıkça onaylayın.');
       const policy = a => [6, 7].includes(event.schemaVersion) ? currentCountPolicy(a) : a.countPolicy;
-      const allowed = s.accounts.filter(a => a.physical && (!modern || (!a.retired && policy(a) === 'daily')));
+      const allowed = getAccountIndex(s.accounts).physicalAccounts.filter(a => !modern || (!a.retired && policy(a) === 'daily'));
       if (!c.counts || typeof c.counts !== 'object' || Array.isArray(c.counts) || Object.keys(c.counts).some(id => !allowed.some(a => a.id === id))) fail('Günlük sayım hesapları geçersiz. Terazi gramları için dönemsel tartım formunu kullanın.');
       const countRows = [];
       for (const a of allowed) {
@@ -989,7 +1057,7 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
         countRows.push({ accountId: a.id, counted, expected, difference, reason });
         if (difference) entries.push({ accountId: a.id, delta: difference });
       }
-      const carried = modern ? s.accounts.filter(a => a.physical && !a.retired && policy(a) === 'periodic').map(a => ({ accountId: a.id, expected: s.balances[a.id] || 0, counted: null, status: 'not-counted' })) : [];
+      const carried = modern ? getAccountIndex(s.accounts).physicalAccounts.filter(a => !a.retired && policy(a) === 'periodic').map(a => ({ accountId: a.id, expected: s.balances[a.id] || 0, counted: null, status: 'not-counted' })) : [];
       const next = new Date(`${s.date}T12:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
       const nextDate = validDate(event.schemaVersion >= 4 && Object.hasOwn(c, 'nextDate') ? c.nextDate : next.toISOString().slice(0, 10));
       if (nextDate <= s.date) fail('Sonraki iş günü açık iş gününden sonra olmalı.');
@@ -999,7 +1067,7 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
       meta = { counts: countRows, carried, nextDate, note: modern ? 'Günlük sayım kaydedildi; terazi gramları tartılmadan hesaplanan bakiyeyle devredildi.' : 'Farklar açıklamalı düzeltme olarak işlendi; bakiyeler taşındı.' };
     } else fail('Bilinmeyen işlem türü.');
   }
-  applyInventory(s, event, meta, inventoryTagged, entries);
+  applyInventory(s, event, meta, inventoryTagged, entries, validationMode);
   entriesApply(s, entries, validationMode);
   if (validationMode !== amendmentValidation) checkReserved(s);
   if (orderChange) {
@@ -1036,24 +1104,25 @@ export function workdaySummary(state, date = state.date) {
   if (!state.initialized) fail('Önce başlangıç devrini onaylayın.');
   validDate(date);
   if (date < state.journal[0].date || date > state.date) fail('Özet tarihi başlangıç ile açık iş günü arasında olmalı.');
-  const created = new Map(state.journal.filter(e => ['account', 'fundAccount', 'stockAccount'].includes(e.type)).map(e => [e.meta.accountId, e.date]));
+  const created = new Map(state.journal.filter(e => ['account', 'fundAccount', 'stockAccount', 'supplierUnit'].includes(e.type) && e.meta?.accountId).map(e => [e.meta.accountId, e.date]));
   const rows = new Map(state.accounts.filter(a => !created.has(a.id) || created.get(a.id) <= date).map(a => [a.id, { accountId: a.id, unit: a.unit, opening: 0, incoming: 0, outgoing: 0, adjustment: 0, closing: 0 }]));
-  const journal = new Map(state.journal.map(e => [e.id, e]));
+  const adjIds = new Set();
   const totals = { sales: 0, purchases: 0 };
   const isOpening = e => ['opening', 'account', 'fundAccount', 'stockAccount', 'nominalOpening'].includes(e.type);
   const isAdjustment = e => ['close', 'stocktake'].includes(e.type) || (e.type === 'movement' && e.label === 'Açılış düzeltmesi');
   for (const e of state.journal) {
     if (e.date > date) continue;
+    if (isAdjustment(e)) adjIds.add(e.id);
     if (e.date === date) {
       totals.sales += e.meta.revenue || 0;
       totals.purchases += e.meta.purchaseTotal || 0;
     }
-    const original = e.type === 'reverse' ? journal.get(e.meta.originalId) : null;
+    const reversedAdj = e.type === 'reverse' && adjIds.has(e.meta.originalId);
     for (const entry of e.entries) {
       const row = rows.get(entry.accountId);
       if (!row) continue;
       if (e.date < date || isOpening(e)) row.opening += entry.delta;
-      else if (isAdjustment(e) || (original && isAdjustment(original))) row.adjustment += entry.delta;
+      else if (isAdjustment(e) || reversedAdj) row.adjustment += entry.delta;
       else if (entry.delta >= 0) row.incoming += entry.delta;
       else row.outgoing -= entry.delta;
     }

@@ -67,3 +67,21 @@ Yerel katkı provası temiz klonda ayrı codex/contribution-workflow-check dalı
 Bu kesitte yalnız lisans, sahiplik ve belgeler değişti. 92 kaynak/test hash'i tekrar eşleşti; runtime, finansal algoritmalar, CI, package/lockfile ve üçüncü taraf bildirimleri değişmedi. 53 açık script dosya referansı ile CI dosyasının varlığı kontrol edildi. Ağır backend/UI/oracle testleri yeniden çalıştırılmadı; yukarıdaki sonuçlar belirtilen önceki commit kesitlerine aittir. Yeni bağımlılık eklenmedi.
 
 Son çalışma ağacı/index/erişilebilir geçmiş taraması ve Git paket kontrollerinin ham kanıtları dağıtım dışındaki evidence alanındadır. Tarama desen tabanlıdır; her tür kişisel verinin yokluğunun mutlak garantisi değildir. Uzak CODEOWNERS parser/erişim denetimi, plan uygunluğu, korumalar ve gerçek Actions koşusu yayın aşamasında bekler. HaruEr kendi PR'ını onaylayamayacağından bu durumda ayrı süreç kararı olmadan merge engeli korunur.
+
+---
+
+## Paket 0–6B ve M4 Bütünleşik Kabul Özeti (`6c9621d` — 18 Kasım 2026)
+
+Yukarıdaki bölüm 11 Kasım 2026 (`b62eb4e`) tarihî başlangıç kabulüne aittir. `feature/ui-ux-overhaul` dalında (`b245e9c..6c9621d`) tamamlanan Paket 0–6B UI/UX, büyük veri ölçek (`hot-v1` + artımlı indeksler + `/api/summary?paginated=1`) ve M4 bütünleşik denetim kapanışı için `6c9621d` kesitinde ölçülen sonuçlar:
+
+- **İzlenebilir Test Matrisi (M5/Kapanış @ `6c9621d`):** `227` satır → `226 PASS`, `0 FAIL`, `1 NOT APPLICABLE`, `0 BLOCKED`, `0 NOT TESTED`.
+- **Bulgu Kütüğü (`7719eaf..6c9621d`):** `39` bulgunun `34` adedi kodda düzeltilip `45` yeni regresyon testiyle doğrulandı (`0` açık `P0`, `0` açık `P1`); `1` madde baz test sözleşmesi, `4` madde işletme politikası olarak korundu.
+- **Otomatik Kontroller (`6c9621d`, izole Windows ortamı, Node `v24.15.0`):**
+  - `node scripts/check-syntax.mjs`: `165` JS dosyası (`0` hata)
+  - `node scripts/release-check.mjs`: `203` dosya, `38` commit, `763` kontrol (`0` hata)
+  - `npm test`: `704 PASS`, `0 FAIL`, `1 # SKIP` (`10k receipt PDF performance budget`, `PDF_LAYOUT_BENCHMARK` opt-in)
+  - `npm run test:ui`: `32` smoke betiği + `71/71` Node UI testi `PASS`
+  - `npm run test:supplier-oracle`: `22/22 PASS` · `npm run test:recovery`: `15/15 PASS` · `git diff --check`: çıkış `0`
+- **Ölçek & Bellek (`Scale C: 10k/2k/100k`, sentetik yerel loopback):** `23/23` eşik `PASS`, `summary` post-GC JS Heap `7,64 MB <= 8,50 MB`.
+- **Kalıcı Dış Kanıt Arşivi:** Ham raporlar, `130` ekran görüntüsü ve `PureBigIntOracle` / rollback kanıtları Git deposu dışında `ER-SAT-QA-ARCHIVE\2026-11-18_6c9621d` altında saklanır.
+- **Sınır:** Bu sonuçlar gerçek mağaza donanımı veya üretim ortamı kabulü yerine geçmez; yeni dokümantasyon commit'leri için yayın öncesi regresyon sonuçları ayrıca çalıştırılır.
