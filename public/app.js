@@ -432,13 +432,13 @@ function ensureAccountCache() {
 function account(id) { return ensureAccountCache()?.get(id); }
 function activeAccounts() { ensureAccountCache(); return cachedActiveList || []; }
 function summaryAccountLabel(id) { const a = account(id); return esc(a?.name || id) + (a?.retired ? '<br><small>Eski hesap · yeni işleme kapalı</small>' : ''); }
-function inform(message, error = false, { persistent = false, kind = 'success' } = {}) {
+function inform(message, error = false, { persistent = false, kind = 'success', icon = '' } = {}) {
   const notice = $('#notice');
   if (uiKit && !error && !persistent) {
     uiKit.clearBanner(notice);
     notice.setAttribute('role', 'status');
     notice.setAttribute('aria-live', 'polite');
-    uiKit.toast(message, { kind });
+    uiKit.toast(message, { kind, icon });
     return;
   }
   if (uiKit) {
@@ -793,6 +793,7 @@ async function submit(command, message = 'İşlem kaydedildi.', envelope, effect
     if(content.command.type==='close'&&result.queried)inform('Kapanış kaydı defterde doğrulandı; ikinci kez gönderilmedi. Dosya yedeğinin durumunu Yedek ekranından ayrıca kontrol edin.',true);
     else if (content.command.type === 'close' && result.backupStatus?.saved === false) inform(`GÜN KAPANDI ve yeni gün açıldı; ancak YEDEK ALINAMADI: ${result.backupStatus.error || 'Dosya yazma hatası. Yedek ekranından uygun yedeği (büyük defter için akışlı arşiv) indirin.'}`, true);
     else if (content.command.type === 'close' && result.backupStatus?.saved) inform(`${result.duplicate ? 'Bu kapanış daha önce kaydedilmişti; ikinci kez işlenmedi.' : message} Dosya yedeği doğrulandı: ${result.backupStatus.filename}`, false, { persistent: true });
+    else if (!result.duplicate && ['sale', 'purchase'].includes(content.command.type)) { inform(message, false, { icon: 'check' }); uiKit?.playChime?.(); }
     else inform(result.duplicate ? 'Bu işlem daha önce kaydedilmişti. İkinci kez yazılmadı.' : message);
     return true;
   } catch (e) {
@@ -944,6 +945,7 @@ function setView(next, options = {}) {
   $('#notice').hidden = true;
   inSetViewRender = true;
   try { render(); } finally { inSetViewRender = false; }
+  if (prevView !== view) uiKit?.animateEnter?.($('#main'));
   if (hadDirty && prevView !== view) {
     inform('Açık formdaki taslak geçici olarak saklandı; geri döndüğünüzde devam edebilirsiniz.', false, { kind: 'info' });
   }
@@ -2094,6 +2096,7 @@ function renderSale(container, caris, mode = 'sale', editingCommand = null) {
     });
     if (!restoringDraft && form.dataset.draftKey && form.dataset.draftDirty === 'true') captureDrafts();
   };
+  uiKit?.enhanceStepper?.(form.querySelector('.stepper-bar'), form);
   const isNonTlPaymentRow = row => {
     if (!row) return false;
     if (['foreign', 'has', 'silver', 'asset'].includes(row.dataset.paymentType || '')) return true;
@@ -3294,7 +3297,7 @@ function bindSaleReturn(article, original, current) {
           detail.textContent='Verilen ürün: '+supplied.name+(product.inventoryCode?' · '+product.inventoryCode:'')+' · '+formatted(parseAmount(form.elements.refundProductQuantity,supplied.unit),supplied.unit)+(product.weightAccount?' · '+account(product.weightAccount).name+' · '+formatted(parseAmount(form.elements.refundProductWeight,'GRAM'),'GRAM'):'')+' · '+formatted(productFields.value());
           form.querySelector('[data-confirm-return]').before(detail);
         }
-        form.querySelector('[data-confirm-return]').addEventListener('click',()=>{form.dataset.reviewedReturn=fingerprint;form.requestSubmit();});form.querySelector('[data-confirm-return]').focus();return;
+        uiKit?.guardConfirm?.(form.querySelector('[data-confirm-return]'));form.querySelector('[data-confirm-return]').addEventListener('click',()=>{form.dataset.reviewedReturn=fingerprint;form.requestSubmit();});form.querySelector('[data-confirm-return]').focus();return;
       }
       submit(command,exchanging()?'Değişim ve fiilî fark birlikte kaydedildi.':'İade ve verilen karşılık kaydedildi.',undefined,{key:form.dataset.draftKey});
     });
@@ -3556,7 +3559,7 @@ function renderJournal() {
         if(form.dataset.reviewedNote!==note){
           form.querySelector('[data-reverse-review]')?.remove();
           form.insertAdjacentHTML('beforeend',`<div data-reverse-review class="info neutral"><p class="journal-record-context">Ters çevrilen kayıt: ${esc(original.id)} · ${esc(original.label)} · ${esc(day(original.date))}</p><strong>Uygulanacak açık iş günü: ${esc(state.date)}</strong><p>Eski kayıt silinmez. Aşağıdaki bağlı etkilerin tamamı uygulanır</p>${itemEffects.map(item=>`<p>${esc(item.code)} · ${esc(({available:'Stoğa döner',sold:'Satılmış durumuna döner',issued:'İadede verilmiş durumuna döner'})[item.before] || item.before)}</p>`).join('')}${effects.map(row=>`<div>${esc(account(row.accountId).name)}: ${esc(formatted(-row.delta,account(row.accountId).unit))}</div>`).join('')}<button class="button danger" type="button" data-confirm-reverse>Etkileri kontrol ettim, ters kaydı onayla</button></div>`);
-          form.querySelector('[data-confirm-reverse]').addEventListener('click',()=>{form.dataset.reviewedNote=note;form.requestSubmit();});
+          uiKit?.guardConfirm?.(form.querySelector('[data-confirm-reverse]'));form.querySelector('[data-confirm-reverse]').addEventListener('click',()=>{form.dataset.reviewedNote=note;form.requestSubmit();});
           form.querySelector('[data-confirm-reverse]').focus();return;
         }
         submit({type:original.meta.exchangeId?'undoExchange':'reverse',originalId:form.dataset.original,note},'Olayın bütün bağlı hareketleri açık güne ters kaydedildi.');
@@ -3701,7 +3704,7 @@ function renderBackup() {
     document.querySelector('[data-clear-workspace-drafts]').addEventListener('click', () => { if (pending) { inform('Önce sonucu belirsiz son isteği doğrulayın.', true); return; } clearWorkspaceDrafts(); render(); $('#main').focus({ preventScroll: true }); });
   }
 }
-$('#navigation').addEventListener('click', e => { const b = e.target.closest('[data-view]'); if (b && !busy) setView(b.dataset.view); });
+$('#navigation').addEventListener('click', e => { const b = e.target.closest('[data-view]'); if (b && !busy) setView(b.dataset.view); });uiKit?.enhanceNav?.($('#navigation'));
 $('#refresh').addEventListener('click', () => refresh());
 $('#retry').textContent='Kaydı sorgula / yeniden dene';
 $('#retry').addEventListener('click', () => { if (pending) submit(pending.command, 'Bekleyen işlem doğrulandı.', pending); });

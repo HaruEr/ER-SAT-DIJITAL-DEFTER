@@ -35,8 +35,29 @@ function heading(title,description) { return '<div class="page-heading"><span cl
 function metadata(revision = data?.revision, date = data?.date) { $('#report-meta').textContent=(workspace==='demo'?'Örnek defter':'Dükkân defteri')+' · '+(date?dateLabel(date):'Tarih doğrulanamadı')+(Number.isSafeInteger(revision)?' · Veri sürümü '+revision:' · Veri sürümü doğrulanamadı'); }
 function accessibleTables(container) { container.querySelectorAll('.table-wrap').forEach(wrapper=>{wrapper.tabIndex=0;wrapper.setAttribute('role','region');wrapper.setAttribute('aria-label','Hesap hareketleri tablosu; yatay kaydırılabilir');}); }
 function accountCard(account, extra='') { return '<article class="account-card"><div><h3>'+esc(account.name)+'</h3><p>'+esc(extra||({daily:'Günlük sayım',periodic:'Dönemsel tartım',none:'Hesap bakiyesi'}[account.countPolicy]||'Hesap bakiyesi'))+'</p></div><strong class="account-value">'+esc(amount(account.balance,account.unit))+'</strong></article>'; }
+// GUI redesign Faz 10: one indicator slides behind the active report tab (visual only; aria-current
+// still marks the page). Placed from the active button's box; re-placed without motion on resize.
+const navIndicator=(()=>{
+  const nav=document.querySelector('.report-nav');
+  if(!nav)return null;
+  nav.dataset.indicator='true';
+  const el=document.createElement('span');
+  el.className='report-nav-indicator';el.setAttribute('aria-hidden','true');nav.prepend(el);
+  let placed=false;
+  const place=()=>{
+    const active=nav.querySelector('[data-report-view].active');
+    if(!active){el.classList.remove('is-visible');return;}
+    const n=nav.getBoundingClientRect(),b=active.getBoundingClientRect();
+    el.style.setProperty('--x',(b.left-n.left-nav.clientLeft)+'px');el.style.setProperty('--y',(b.top-n.top-nav.clientTop)+'px');
+    el.style.setProperty('--w',b.width+'px');el.style.setProperty('--h',b.height+'px');el.style.setProperty('--r',getComputedStyle(active).borderTopLeftRadius);
+    if(!placed){el.classList.add('no-transition','is-visible');void el.offsetWidth;el.classList.remove('no-transition');placed=true;}else el.classList.add('is-visible');
+  };
+  if(typeof ResizeObserver==='function')new ResizeObserver(()=>{el.classList.add('no-transition');place();requestAnimationFrame(()=>el.classList.remove('no-transition'));}).observe(nav);
+  return {place};
+})();
 function render() {
   document.querySelectorAll('[data-report-view]').forEach(button=>{const selected=button.dataset.reportView===view;button.classList.toggle('active',selected);button.setAttribute('aria-current',selected?'page':'false');});
+  navIndicator?.place();
   if(!data)return;
   metadata();
   if(!data.initialized){$('#report-main').innerHTML=heading('Henüz açılış yapılmadı','Bu defter için başlangıç devri ana bilgisayarda onaylandığında raporlar burada görünür.')+'<section class="empty-state"><h2>Raporlanacak kayıt yok</h2><p>Bu ekranda açılış veya işlem oluşturulmaz.</p></section>';return;}

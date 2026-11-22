@@ -832,6 +832,8 @@ async function sendPending() {
     broadcast?.postMessage({actorId:actorId(),workspace:selected,revision:result.revision});
     message=(result.duplicate?'Önceki kayıt doğrulandı. ':'İşlem kaydedildi. ')+'Kayıt '+result.id;
     if(request.kind==='trade') {
+      // GUI Faz 9: check-mark toast + chime for a new sale/purchase. #status still announces the text.
+      if(!result.duplicate)uiKit?.celebrate?.(message,{announce:false});
       clearStoredDraft(selected,request.operation);
       customerCombobox?.clear?.({emitChange:false});
       $('search').value='';
@@ -884,6 +886,7 @@ const setCheckoutStep = step => {
   });
   if (draftDirty && !rendering) saveDraft();
 };
+uiKit?.enhanceStepper?.($('trade')?.querySelector('.stepper-bar'), $('trade'));
 function syncFlowMode({ preferredStep = null, notify = false } = {}) {
   const prevMode = flowMode;
   const complex = isComplexCheckoutState();
