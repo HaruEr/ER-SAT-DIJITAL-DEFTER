@@ -1,0 +1,818 @@
+@charset "UTF-8";
+/*
+ * Motion layer — GUI redesign (docs/gui-redesign-plan.md §4).
+ * Loaded after styles.css/access.css (and after reports.css on the report portal).
+ * Rules for this file:
+ *   - It never introduces a colour. Every tone is the existing palette (var(--gold), var(--surface), …)
+ *     mixed with `transparent`; no hex, rgb() or hsl() literals.
+ *   - Only transform and opacity are animated.
+ *   - Everything collapses to zero motion under prefers-reduced-motion or <html data-motion="reduced">.
+ */
+
+/* ── Tokens ───────────────────────────────────────────────────────────── */
+:root {
+  /* Durations */
+  --dur-instant: 90ms;   /* button press */
+  --dur-fast: 150ms;     /* closing, hover */
+  --dur-base: 220ms;     /* modal / popover opening */
+  --dur-slow: 250ms;     /* drawer, bottom sheet, wizard step (plan rule: opening ≤ 250ms) */
+
+  /* Easing */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);        /* fast start, soft landing */
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);            /* exits */
+  --ease-spring: cubic-bezier(0.34, 1.32, 0.64, 1); /* light spring, ~3% overshoot */
+
+  /* Physical values */
+  --lift-hover: -2px;
+  --lift-card: -2px;
+  --press-scale: 0.97;
+  --press-scale-card: 0.99;
+  --enter-scale: 0.96;
+  --exit-scale: 0.98;
+  --enter-shift: 10px;    /* page and card fade-in distance */
+  --flyout-shift: -8px;   /* popover / listbox opening distance */
+
+  /* Effects derived from the existing palette (no new colours) */
+  --glow-gold: 0 0 0 1px color-mix(in srgb, var(--gold) 30%, transparent),
+               0 6px 24px color-mix(in srgb, var(--gold) 22%, transparent);
+  --glow-focus: 0 0 0 4px color-mix(in srgb, var(--gold) 28%, transparent);
+  --glow-danger: 0 0 0 1px color-mix(in srgb, var(--red) 35%, transparent),
+                 0 6px 24px color-mix(in srgb, var(--red) 18%, transparent);
+  --glass-bg: color-mix(in srgb, var(--surface) 78%, transparent);
+  --glass-bg-strong: color-mix(in srgb, var(--surface) 90%, transparent);
+  --glass-bg-solid: color-mix(in srgb, var(--surface) 96%, transparent);   /* small text-only surfaces (toasts) */
+  --glass-border: color-mix(in srgb, var(--line-strong) 40%, transparent);
+  --glass-blur: 16px;
+  /* Modal scrim: the same warm charcoal family as the existing ::backdrop. */
+  --backdrop-tint: color-mix(in srgb, var(--sidebar) 58%, transparent);
+  --backdrop-tint-plain: color-mix(in srgb, var(--sidebar) 64%, transparent);
+  --backdrop-blur: 4px;
+  --glass-head: color-mix(in srgb, var(--surface-soft) 72%, transparent);
+
+  /* Bottom sheet (Faz 3) */
+  --radius-sheet: 20px;
+
+  /* Layer placement (Faz 2) */
+  --toast-inset-bottom: 24px;
+  --toast-inset-right: 24px;
+}
+
+/* Browsers without color-mix(): drop the derived effects instead of inventing colours. */
+@supports not (color: color-mix(in srgb, black 50%, transparent)) {
+  :root {
+    --glow-gold: none;
+    --glow-focus: none;
+    --glow-danger: none;
+    --glass-bg: var(--surface);
+    --glass-bg-strong: var(--surface);
+    --glass-bg-solid: var(--surface);
+    --glass-border: var(--line-strong);
+    --glass-head: var(--surface-soft);
+    --backdrop-tint: transparent;
+    --backdrop-tint-plain: transparent;
+  }
+}
+
+/* Browsers without backdrop-filter: glass layers become opaque so text contrast is kept. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --glass-bg: var(--surface);
+    --glass-bg-strong: var(--surface);
+    --glass-bg-solid: var(--surface);
+    --glass-blur: 0px;
+    --backdrop-blur: 0px;
+  }
+}
+
+/* ── Reduced motion ───────────────────────────────────────────────────── */
+/* System preference: styles.css already removes animation/transition; zero the tokens too
+   so JS that reads them (ghost exit, sheet drag) also skips motion. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-instant: 0ms; --dur-fast: 0ms; --dur-base: 0ms; --dur-slow: 0ms;
+    --lift-hover: 0px; --lift-card: 0px; --press-scale: 1; --press-scale-card: 1;
+    --enter-scale: 1; --exit-scale: 1; --enter-shift: 0px; --flyout-shift: 0px;
+  }
+}
+
+/* In-app "Animasyonları azalt" switch (ui-prefs.js sets <html data-motion="reduced">). */
+:root[data-motion="reduced"] {
+  --dur-instant: 0ms; --dur-fast: 0ms; --dur-base: 0ms; --dur-slow: 0ms;
+  --lift-hover: 0px; --lift-card: 0px; --press-scale: 1; --press-scale-card: 1;
+  --enter-scale: 1; --exit-scale: 1; --enter-shift: 0px; --flyout-shift: 0px;
+}
+:root[data-motion="reduced"] *,
+:root[data-motion="reduced"] *::before,
+:root[data-motion="reduced"] *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
+}
+
+/* ══ Faz 2 — Layers: modal, drawer, popover, command palette, toast ════════ */
+
+/* Glass surfaces. Text stays on ≥90% surface; inputs keep their own opaque fields. */
+.defter-dialog,
+.defter-dialog.defter-command-palette {
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+}
+.defter-dialog-head,
+.defter-popover-head { background: var(--glass-head); }
+.defter-dialog::backdrop {
+  -webkit-backdrop-filter: blur(var(--backdrop-blur, 4px));
+  backdrop-filter: blur(var(--backdrop-blur, 4px));
+}
+/* One blurred layer at a time: a covered dialog (ui-kit sets aria-hidden) stops blurring. */
+.defter-dialog[aria-hidden="true"] { -webkit-backdrop-filter: none; backdrop-filter: none; }
+.defter-dialog[aria-hidden="true"]::backdrop { -webkit-backdrop-filter: none; backdrop-filter: none; }
+
+/* Opening motion (closing is the ghost copy below). */
+@keyframes defter-modal-in { from { opacity: 0; transform: scale(var(--enter-scale)); } }
+@keyframes defter-drawer-in { from { transform: translateX(100%); } }
+@keyframes defter-fade-in { from { opacity: 0; } }
+@keyframes defter-flyout-in { from { opacity: 0; transform: translateY(var(--flyout-shift)) scale(0.97); } }
+
+.defter-modal[open],
+.defter-dialog.defter-command-palette[open] {
+  transform-origin: 50% 40%;
+  animation: defter-modal-in var(--dur-base) var(--ease-spring);
+}
+.defter-dialog.defter-command-palette[open] { transform-origin: 50% 0; }
+.defter-drawer[open] { animation: defter-drawer-in var(--dur-slow) var(--ease-out); }
+.defter-dialog[open]::backdrop { animation: defter-fade-in var(--dur-base) var(--ease-out); }
+
+.defter-popover {
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+  transform-origin: 24px 0;
+  animation: defter-flyout-in 180ms var(--ease-out);
+}
+
+/* Ghost copies (ui-kit animateExit): visual only, inside a shadow root, removed after the exit. */
+.defter-ghost-host { display: contents; }
+.defter-dialog.defter-ghost { display: flex; }
+.defter-ghost { pointer-events: none; animation: none; }
+.defter-ghost-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  pointer-events: none;
+  background: var(--backdrop-tint);
+  -webkit-backdrop-filter: blur(var(--backdrop-blur));
+  backdrop-filter: blur(var(--backdrop-blur));
+}
+.defter-ghost-backdrop--plain {
+  background: var(--backdrop-tint-plain);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* Toasts: bottom-right stack, slide in from the right, remaining-time bar. */
+.defter-toast-region {
+  top: auto;
+  bottom: calc(var(--toast-inset-bottom) + env(safe-area-inset-bottom, 0px));
+  right: var(--toast-inset-right);
+  left: auto;
+}
+@media (max-width: 900px) {
+  .defter-toast-region {
+    top: auto;
+    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    right: 12px;
+    left: 12px;
+  }
+}
+@keyframes defter-toast-in { from { opacity: 0; transform: translateX(calc(100% + var(--toast-inset-right))); } }
+@keyframes defter-toast-up { from { opacity: 0; transform: translateY(calc(100% + 12px)); } }
+@keyframes defter-toast-time { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+.defter-toast {
+  position: relative;
+  overflow: hidden;
+  background: var(--glass-bg-solid);
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+  animation: defter-toast-in var(--dur-base) var(--ease-spring);
+}
+.defter-toast--warning { background: color-mix(in srgb, var(--warning-soft) 96%, transparent); }
+@media (max-width: 900px) {
+  .defter-toast { animation-name: defter-toast-up; }
+}
+.defter-toast-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: color-mix(in srgb, var(--gold) 70%, transparent);
+  transform-origin: left center;
+  animation: defter-toast-time var(--toast-duration, 4000ms) linear forwards;
+  pointer-events: none;
+}
+.defter-toast.is-paused .defter-toast-progress { animation-play-state: paused; }
+@media (prefers-reduced-motion: reduce) { .defter-toast-progress { display: none; } }
+:root[data-motion="reduced"] .defter-toast-progress { display: none; }
+
+/* Searchable lists (combobox) fly out from their field; dropup lists rise from below.
+   combobox.js positions the panel from the input's rect, never the panel's, so the transform is safe. */
+@keyframes defter-flyup-in { from { opacity: 0; transform: translateY(calc(-1 * var(--flyout-shift))) scale(0.97); } }
+.defter-combobox-panel:not([hidden]) {
+  transform-origin: 50% 0;
+  animation: defter-flyout-in 160ms var(--ease-out);
+}
+.defter-combobox.defter-combobox--dropup .defter-combobox-panel:not([hidden]) {
+  transform-origin: 50% 100%;
+  animation-name: defter-flyup-in;
+}
+
+/* Keyboard/pointer highlight in lists moves softly instead of jumping. */
+.defter-command-palette .defter-command-palette-option,
+.defter-combobox-panel .defter-combobox-option {
+  transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+/* ══ Faz 3 — Bottom sheet at phone width ═══════════════════════════════════
+   ≤700px a drawer rises from the bottom edge, sized to its content (max 92dvh), with a grab
+   handle drawn on its header. ui-kit.js attachSheetDrag makes the header draggable. */
+@keyframes defter-sheet-in { from { transform: translateY(100%); } }
+@media (max-width: 700px) {
+  .defter-drawer {
+    width: 100vw;
+    max-width: 100vw;
+    /* Anchor to the bottom edge only: with the UA's inset-block: 0 an auto height would stretch
+       to fill the viewport instead of fitting the content. */
+    inset: auto 0 0 0;
+    height: auto;
+    max-height: 92dvh;
+    margin: 0;
+    border: 1px solid var(--line-strong);
+    border-bottom: 0;
+    border-radius: var(--radius-sheet) var(--radius-sheet) 0 0;
+  }
+  .defter-drawer[open] { animation-name: defter-sheet-in; }
+  .defter-drawer .defter-dialog-head {
+    position: relative;
+    padding-top: 26px;
+    touch-action: none;           /* the browser must not pan/scroll while the header is dragged */
+    cursor: grab;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .defter-drawer .defter-dialog-head::before {
+    content: "";
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    width: 44px;
+    height: 5px;
+    margin-left: -22px;
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--muted) 45%, transparent);
+  }
+  .defter-drawer .defter-dialog-body { padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+  .defter-drawer.is-dragging { cursor: grabbing; }
+  .defter-drawer.is-dragging .defter-dialog-head { cursor: grabbing; }
+}
+
+/* ══ Faz 4 — Critical confirmations ═══════════════════════════════════════
+   confirmCritical modals carry a top stripe and an icon; danger uses the existing --red,
+   caution the existing gold. In-page review panels (iade/değişim, ters kayıt) get motion
+   without any DOM change. Arming (ui-kit guardConfirm) dims the confirm button briefly. */
+.defter-dialog--danger { border-top: 4px solid var(--red); }
+.defter-dialog--caution { border-top: 4px solid var(--gold); }
+.defter-dialog--danger .defter-dialog-head,
+.defter-dialog--caution .defter-dialog-head { align-items: center; }
+.defter-critical-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  color: var(--gold-text);
+  background: color-mix(in srgb, var(--gold) 16%, transparent);
+}
+.defter-critical-icon.is-danger {
+  color: var(--red);
+  background: var(--negative-soft);
+}
+.defter-critical-icon svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.defter-dialog--danger .defter-dialog-head > div,
+.defter-dialog--caution .defter-dialog-head > div { flex: 1 1 auto; min-width: 0; }
+.defter-dialog--danger .defter-confirm-impact {
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
+  border-radius: var(--radius-sm);
+  background: var(--negative-soft);
+  color: var(--ink);
+}
+.defter-dialog--caution .defter-confirm-impact {
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--gold) 35%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--gold) 10%, transparent);
+}
+
+/* In-page review panels rise into view. Their frame already encodes the consequence
+   (styles.css D07: #journal-list … 2px border, red for ters kayıt), so only motion and a soft
+   red ground for the irreversible reverse are added. .info.neutral is (0,2,0): match its weight. */
+@keyframes defter-review-in { from { opacity: 0; transform: translateY(var(--enter-shift)); } }
+.info[data-return-review],
+.info[data-reverse-review] { animation: defter-review-in var(--dur-base) var(--ease-out); }
+.info[data-reverse-review] { background: color-mix(in srgb, var(--negative-soft) 70%, var(--surface-soft)); }
+
+/* Arming window: the confirm button looks inactive until it accepts user input. */
+.button.is-arming {
+  opacity: 0.55;
+  cursor: progress;
+}
+.button[data-confirm-guard] { transition: opacity var(--dur-base) var(--ease-out); }
+
+/* ══ Faz 5 — Guided steps ═════════════════════════════════════════════════
+   ui-kit enhanceStepper adds .stepper-meta (count + progress line) to .stepper-bar and sets
+   --step-progress; login.js builds the two-step first-run setup. */
+.stepper-bar[data-stepper-enhanced] { row-gap: 10px; }
+.stepper-meta {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+}
+.stepper-count,
+.setup-count { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.stepper-progress,
+.setup-track,
+.password-meter-track {
+  position: relative;
+  flex: 1 1 auto;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--line);
+}
+.stepper-progress i,
+.setup-track i,
+.password-meter-track i {
+  position: absolute;
+  inset: 0;
+  background: var(--gold);
+  transform-origin: left center;
+  transition: transform var(--dur-slow) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
+}
+.stepper-progress i { transform: scaleX(var(--step-progress, 0.333)); }
+.setup-track i { transform: scaleX(var(--setup-progress, 0.5)); }
+.password-meter-track i {
+  transform: scaleX(var(--password-progress, 0));
+  background: var(--line-strong);
+}
+.password-meter.is-complete .password-meter-track i { background: var(--gold); }
+
+.stepper-tab,
+.stepper-tab span {
+  transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+/* First-run setup wizard (login.html). */
+.setup-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+}
+.password-meter { display: flex; align-items: center; gap: 10px; margin-top: -4px; }
+.password-meter small { flex: 0 0 auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.password-meter.is-complete small { color: var(--gold-text); font-weight: 650; }
+.setup-actions { display: flex; gap: 10px; }
+.setup-actions > .button { flex: 1 1 auto; }
+.setup-actions > #setup-back { flex: 0 0 auto; }
+
+@keyframes defter-step-forward { from { opacity: 0; transform: translateX(16px); } }
+@keyframes defter-step-back { from { opacity: 0; transform: translateX(-16px); } }
+#login[data-setup-dir="forward"] > :not([hidden]):not(.setup-progress),
+#login[data-setup-dir="forward"] > .setup-actions > :not([hidden]) {
+  animation: defter-step-forward var(--dur-slow) var(--ease-out);
+}
+#login[data-setup-dir="back"] > :not([hidden]):not(.setup-progress),
+#login[data-setup-dir="back"] > .setup-actions > :not([hidden]) {
+  animation: defter-step-back var(--dur-slow) var(--ease-out);
+}
+
+/* ══ Faz 6 — Micro-interactions ═══════════════════════════════════════════
+   Buttons press, primary actions lift with a gold glow, clickable tiles rise, the sidebar
+   highlight slides, tables and tabs change colour softly. Hover effects only for a real
+   mouse; every transform collapses to nothing with reduced motion (tokens are zeroed). */
+
+/* Buttons */
+.button {
+  transition: background-color .15s ease, border-color .15s ease, color .15s ease,
+    transform var(--dur-instant) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+}
+.button:active:not(:disabled):not(.is-arming) { transform: scale(var(--press-scale)); }
+@media (hover: hover) and (pointer: fine) {
+  /* Primary = gold actions (.button without secondary/text/danger). */
+  .button:not(.secondary):not(.text):not(.danger):not(:disabled):not(.is-arming):hover {
+    transform: translateY(var(--lift-hover));
+    box-shadow: var(--glow-gold);
+  }
+  .button:not(.secondary):not(.text):not(.danger):not(:disabled):not(.is-arming):active {
+    transform: translateY(0) scale(var(--press-scale));
+  }
+}
+
+/* Clickable tiles: overview quick actions and the count-mode choice buttons. Information cards
+   (hesap/stok/banka) are not clickable as a whole, so they intentionally do not lift. */
+.quick-action,
+button.count-mode {
+  transition: background-color .15s ease, border-color .15s ease,
+    transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+}
+@media (hover: hover) and (pointer: fine) {
+  .quick-action:hover,
+  button.count-mode:hover {
+    transform: translateY(var(--lift-card));
+    box-shadow: var(--glow-gold);
+  }
+  button.count-mode.active:hover { box-shadow: inset 0 -3px var(--gold), var(--glow-gold); }
+}
+.quick-action:active,
+button.count-mode:active { transform: scale(var(--press-scale-card)); }
+
+/* Tabs, chips and rows change colour softly instead of snapping. */
+.transaction-tabs button,
+.transaction-subtabs button,
+.workbench-tab,
+.payment-chip {
+  transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+}
+tbody tr > td,
+tbody tr > th { transition: background-color var(--dur-fast) var(--ease-out); }
+
+/* Focus: the existing 3px outline stays; a soft gold halo is added around controls. */
+.button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible { box-shadow: var(--glow-focus); }
+
+/* Sidebar: one indicator slides behind the active item (desktop sidebar only, ≥901px).
+   It reproduces the active look from styles.css "Refined premium" (@media screen):
+   --sidebar-hover ground, --sidebar-line edge, 3px gold inset on the left. */
+#navigation[data-nav-indicator] { position: relative; }
+.nav-indicator { display: none; }
+@media (min-width: 901px) {
+  .nav-indicator {
+    display: block;
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 0;
+    width: var(--nav-w, 0);
+    height: var(--nav-h, 0);
+    border: 1px solid var(--sidebar-line);
+    border-radius: 8px;
+    background: var(--sidebar-hover);
+    box-shadow: inset 3px 0 var(--gold);
+    opacity: 0;
+    pointer-events: none;
+    transform: translate(var(--nav-x, 0), var(--nav-y, 0));
+    transition: transform var(--dur-base) var(--ease-spring), opacity var(--dur-fast) var(--ease-out);
+  }
+  .nav-indicator.is-visible { opacity: 1; }
+  .nav-indicator.no-transition { transition: none; }
+  #navigation[data-nav-indicator] button {
+    position: relative;
+    z-index: 1;
+    transition: background-color .15s ease, border-color .15s ease, color var(--dur-base) var(--ease-out);
+  }
+  #navigation[data-nav-indicator] button.active,
+  #navigation[data-nav-indicator] button.active:hover { background: transparent; border-color: transparent; box-shadow: none; }
+  .nav-icon { transition: transform var(--dur-fast) var(--ease-out), color var(--dur-base) var(--ease-out); }
+}
+@media (min-width: 901px) and (hover: hover) and (pointer: fine) {
+  #navigation button:not(.active):hover .nav-icon { transform: translateX(2px); }
+}
+
+/* ══ Faz 7 — Top bar, theme icon, settings ════════════════════════════════
+   Theme toggle becomes an icon-only moon/sun button (its text stays for assistive tech via
+   aria-label); a gear button opens the settings flyout (ui-kit openSettings). The SVG masks
+   below use only their alpha channel, so the stroke value inside them is not a colour. */
+#theme-toggle.theme-toggle {
+  width: 46px;
+  min-width: 46px;
+  padding: 0;
+  gap: 0;
+  font-size: 0;
+}
+#theme-toggle.theme-toggle::before {
+  content: "";
+  display: block;
+  width: 22px;
+  height: 22px;
+  background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z'/%3E%3C/svg%3E") center / contain no-repeat;
+  transition: transform 420ms var(--ease-spring);
+}
+:root[data-theme="dark"] #theme-toggle.theme-toggle::before {
+  content: "";
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='4'/%3E%3Cpath d='M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='4'/%3E%3Cpath d='M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4'/%3E%3C/svg%3E");
+  transform: rotate(180deg);
+}
+
+/* Icon buttons (settings gear). */
+.icon-button {
+  width: 46px;
+  min-width: 46px;
+  padding: 0;
+}
+.icon-button svg {
+  display: block;
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform var(--dur-base) var(--ease-spring);
+}
+.settings-trigger[aria-expanded="true"] svg { transform: rotate(90deg); }
+
+/* Order: … Yenile · ay/güneş · ayarlar (settings is the right-most control). */
+.topbar-actions #theme-toggle,
+.access-bar #theme-toggle { order: 1; }
+.topbar-actions #settings-trigger,
+.access-bar #settings-trigger { order: 2; }
+@media screen and (max-width: 600px) {
+  .topbar:has([data-settings-trigger]) {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto;
+    grid-template-areas: 'date date workspace workspace' 'palette palette palette palette' 'refresh refresh theme settings';
+  }
+  .topbar #settings-trigger { grid-area: settings; }
+  .topbar #theme-toggle.theme-toggle,
+  .topbar #settings-trigger { width: 46px; padding: 0; }
+}
+
+/* Settings flyout (built on the popover: glass, flyout motion, Esc / outside click to close). */
+.defter-popover.defter-settings { width: min(360px, calc(100vw - 16px)); }
+.defter-settings .defter-popover-body { padding: 6px 14px 12px; font-size: 14px; }
+.defter-settings-list { display: grid; }
+.defter-setting {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 14px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.defter-setting-text { display: grid; gap: 2px; cursor: pointer; }
+.defter-setting-text strong { font-size: 15px; }
+.defter-setting-text small { color: var(--muted); font-size: 13px; line-height: 1.45; }
+.defter-setting-preview { grid-column: 1 / -1; justify-self: start; min-height: 36px; padding: 4px 0; font-size: 14px; }
+.defter-settings-note { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
+
+/* Switch (guide §20), gold when on. The real checkbox sits on top of the track for clicks. */
+.defter-switch { position: relative; display: inline-flex; width: 44px; height: 26px; flex: 0 0 auto; }
+.defter-switch input {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.defter-switch-track {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+}
+.defter-switch-track::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform var(--dur-base) var(--ease-spring), background-color var(--dur-fast) var(--ease-out);
+}
+.defter-switch input:checked + .defter-switch-track { border-color: var(--gold); background: var(--gold); }
+.defter-switch input:checked + .defter-switch-track::before { background: var(--on-action); transform: translateX(18px); }
+.defter-switch input:focus-visible + .defter-switch-track { outline: 3px solid var(--focus); outline-offset: 2px; box-shadow: var(--glow-focus); }
+.defter-switch input:focus-visible { box-shadow: none; }
+
+/* Top bar: sticky on wide screens, glass once the page has scrolled (ui-kit enhanceTopbar).
+   --topbar-h keeps other sticky panels and anchor jumps below it. */
+@media screen and (min-width: 901px) {
+  /* "Üst barı sabit tut" off → <html data-topbar="static"> (ui-prefs.js): every rule here is skipped. */
+  :root:not([data-topbar="static"]) .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 4;
+    transition: background-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
+  }
+  :root:not([data-topbar="static"]) .topbar.is-scrolled {
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: blur(var(--glass-blur));
+    backdrop-filter: blur(var(--glass-blur));
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--sidebar) 14%, transparent);
+  }
+  html:not([data-topbar="static"]) { scroll-padding-top: calc(var(--topbar-h, 0px) + 16px); }
+  :root:not([data-topbar="static"]) .trade-live-summary { top: calc(var(--topbar-h, 0px) + 18px); }
+  :root:not([data-topbar="static"]) .workbench-split.has-detail > .journal-detail-pane {
+    top: calc(var(--topbar-h, 0px) + 16px);
+    max-height: calc(100vh - var(--topbar-h, 0px) - 32px);
+  }
+}
+
+/* ══ Faz 8 — Sign-in and employee accounts ════════════════════════════════
+   Sign-in: slowly drifting gold light behind a glass card (guide §3/§7, existing palette only).
+   Users: employees as cards with their own "Erişimi kapat" action (users.js). */
+
+/* styles.css gives every <main> min-height: calc(100vh - 220px); on these one-card pages that
+   stretched the card far below its content. The card now fits its content. */
+body.access-page:not(.checkout-page) > main.access-card { min-height: 0; }
+
+/* Card entrance (sign-in and users). */
+@keyframes defter-card-in { from { opacity: 0; transform: translateY(var(--enter-shift)) scale(0.985); } }
+body.access-page:not(.checkout-page) > main.access-card { animation: defter-card-in 320ms var(--ease-out); }
+
+/* Sign-in background: three very soft gold lights drifting over 20s. Only on the sign-in page. */
+@keyframes defter-bg-drift {
+  0% { transform: translate(0, 0) rotate(0deg); }
+  100% { transform: translate(-5%, -5%) rotate(3deg); }
+}
+/* isolation: the body paints its own --paper ground (html has a background too), so the light layer
+   must live inside the body's stacking context to sit above that ground and below the card. */
+body.access-page:has(#login) { position: relative; isolation: isolate; overflow-x: hidden; }
+body.access-page:has(#login)::before {
+  content: "";
+  position: fixed;
+  top: -50%;
+  left: -50%;
+  z-index: -1;
+  width: 200%;
+  height: 200%;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse at 22% 48%, color-mix(in srgb, var(--gold) 14%, transparent) 0%, transparent 46%),
+    radial-gradient(ellipse at 78% 22%, color-mix(in srgb, var(--gold-bright) 12%, transparent) 0%, transparent 44%),
+    radial-gradient(ellipse at 52% 82%, color-mix(in srgb, var(--gold-text) 8%, transparent) 0%, transparent 46%);
+  animation: defter-bg-drift 20s ease-in-out infinite alternate;
+}
+body.access-page:has(#login) > main.access-card {
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+  border-color: var(--glass-border);
+  box-shadow: var(--shadow), 0 18px 48px color-mix(in srgb, var(--sidebar) 12%, transparent);
+}
+
+/* Users page: employee cards. */
+.employee-list { display: grid; gap: 10px; margin: 8px 0 4px; padding: 0; list-style: none; }
+.employee-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+  transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+}
+.employee-card.is-new { animation: defter-review-in var(--dur-base) var(--ease-out); }
+.employee-avatar {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--gold) 18%, transparent);
+  color: var(--gold-text);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: .5px;
+}
+.employee-card strong { display: block; overflow-wrap: anywhere; }
+.employee-card small { display: block; color: var(--muted); font-size: 13px; }
+.employee-card .button { min-height: 40px; padding: 6px 12px; font-size: 14px; }
+.employee-empty {
+  padding: 16px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  text-align: center;
+}
+/* The select-based form stays in the page (same submit, same confirmation) but the cards drive it. */
+#disable.is-list-backed { display: none; }
+@media (hover: hover) and (pointer: fine) {
+  .employee-card:hover { border-color: var(--line-strong); box-shadow: var(--shadow); }
+}
+
+/* ══ Faz 9 — Checkout and sale feedback ═══════════════════════════════════
+   A recorded sale/purchase shows a toast whose check mark draws itself (400ms) next to the
+   chime (ui-kit celebrate). Pressed pills (payment chips, quick/guided switch) pop once. */
+@keyframes defter-check-draw { from { stroke-dashoffset: 1; } }
+@keyframes defter-check-pop { from { opacity: 0; transform: scale(0.4); } }
+.defter-toast-icon {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  color: var(--gold-text);
+}
+.defter-toast-icon svg {
+  width: 26px;
+  height: 26px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  overflow: visible;
+}
+.defter-toast-icon circle {
+  fill: color-mix(in srgb, var(--gold) 20%, transparent);
+  stroke: none;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: defter-check-pop 300ms var(--ease-spring);
+}
+.defter-toast-icon path {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+  animation: defter-check-draw 400ms var(--ease-out) 120ms backwards;
+}
+.defter-toast:has(.defter-toast-icon) .defter-toast-body { flex: 1 1 auto; }
+
+@keyframes defter-pill-pop {
+  0% { transform: scale(0.96); }
+  60% { transform: scale(1.03); }
+  100% { transform: scale(1); }
+}
+.payment-chip[aria-pressed="true"],
+.checkout-flow-actions [aria-pressed="true"] { animation: defter-pill-pop 260ms var(--ease-spring); }
+
+/* ══ Faz 10 — Read-only report portal (/reports, reports.css) ══════════════
+   Each view is re-rendered into #report-main, so its direct children rising in (slightly staggered)
+   is both the card entrance and the page transition. Durations come from the motion tokens, which
+   are 0ms under prefers-reduced-motion (reports.css only removes transitions, not animations). */
+@keyframes defter-report-in { from { opacity: 0; transform: translateY(var(--enter-shift)); } }
+#report-main > * { animation: defter-report-in var(--dur-base) var(--ease-out) backwards; }
+#report-main > :nth-child(2) { animation-delay: 40ms; }
+#report-main > :nth-child(3) { animation-delay: 80ms; }
+#report-main > :nth-child(4) { animation-delay: 120ms; }
+#report-main > :nth-child(n+5) { animation-delay: 160ms; }
+
+/* Tab indicator (reports.js navIndicator): reproduces the active tab of reports.css @media screen —
+   --surface ground, --line edge, 2px gold underline — and slides between tabs. ≤520px the nav is
+   position: fixed and is itself the containing block; wider it needs position: relative. */
+@media (min-width: 521px) {
+  .report-nav[data-indicator] { position: relative; }
+}
+.report-nav-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  width: var(--w, 0);
+  height: var(--h, 0);
+  border: 1px solid var(--line);
+  border-radius: var(--r, 8px);
+  background: var(--surface);
+  box-shadow: inset 0 -2px var(--gold);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(var(--x, 0), var(--y, 0));
+  transition: transform var(--dur-base) var(--ease-spring), opacity var(--dur-fast) var(--ease-out);
+}
+.report-nav-indicator.is-visible { opacity: 1; }
+.report-nav-indicator.no-transition { transition: none; }
+.report-nav[data-indicator] button { position: relative; z-index: 1; transition: color var(--dur-base) var(--ease-out), background-color var(--dur-fast) var(--ease-out); }
+.report-nav[data-indicator] button.active { background: transparent; border-color: transparent; box-shadow: none; }

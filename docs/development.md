@@ -116,6 +116,30 @@ Ana uygulamanın JSON/akışlı yedek, arşiv ve geri yükleme kaynakları dahil
 
 Şifreli yedek pilotu ayrı, isteğe bağlı sentetik geliştirici aracıdır; `scripts/restic-pilot-tool.json` içindeki sabit sürüm/hash beklentisine uygun harici **restic 0.19.1 Windows amd64** gerektirir. İncelenmiş ikiliyi `tools/restic_0.19.1_windows_amd64.exe` konumuna kendiniz kurun veya `RESTIC_PILOT_BINARY` ile tam yolunu belirtin; betik SHA256 pinini doğrular. Klonun kardeş `../temp` klasörünü oluşturun. Normal uygulama, backend/UI testleri veya yerel yedek ekranı için restic gerekmez. `npm.cmd run test:backup-pilot` ve `npm.cmd run pilot:backup` önkoşulları sağlanmadan PASS sayılmaz. Bulut sağlayıcı kurulumu, otomatik görev ve RPO/RTO işletme kabulü bu aday tarafından yapılmaz.
 
+## Arayüz hareket katmanı
+
+GUI yeniden tasarımı (ayrıntılar ve kararlar: [gui-redesign-plan.md](gui-redesign-plan.md)) renk paletine dokunmaz; yalnızca hareket, açılır katmanlar ve etkileşim ekler.
+
+- **`public/motion.css`:** Tüm sayfalarda son stil dosyası. Token'lar `--dur-*`, `--ease-*`, `--lift-*`, `--press-scale`, `--glass-*`, `--glow-*`. **Renk literali içermez**: yalnızca mevcut palet token'ları `transparent` ile karıştırılır; `test/gui-motion.test.mjs` bunu ve cam yüzeylerde ≥ 4.5:1 metin kontrastını denetler. Yalnızca `transform` / `opacity` canlandırılır. Hover etkileri yalnızca `(hover: hover) and (pointer: fine)` için geçerli.
+- **`public/ui-prefs.js` (`window.DefterPrefs`):** Her sayfada `<head>` içinde, stillerden önce yüklenir. Cihaz tercihleri:
+  - `getMotion` / `setMotion` / `motionReduced`: `defter-motion`; sistem `prefers-reduced-motion` ayarı da sayılır.
+  - `getSound` / `setSound`: `defter-sound`.
+  - `getTopbarSticky` / `setTopbarSticky`: `defter-topbar`.
+  - `onChange`.
+
+  Tercihler `<html data-motion="reduced">` ve `<html data-topbar="static">` olarak ilk boyamadan önce uygulanır. Depolama engelliyse varsayılanlar geçerli olur.
+- **`public/ui-kit.js` (`window.DefterUI`) eklemeleri:**
+  - `animateExit`: katmanlar eşzamanlı kapanır; çıkışı gölge DOM içindeki görsel kopya oynatır ve hiçbir `document` sorgusu onu bulamaz.
+  - `guardConfirm`: kritik onay butonu ilk 300 ms kullanıcı girdisini (`isTrusted`) yok sayar; programla yapılan `.click()` etkilenmez.
+  - `enhanceStepper`, `enhanceNav`, `animateEnter`, `openSettings`, `playChime` / `celebrate`, `enhanceTopbar`.
+  - `toast(…, { icon: 'check', announce })`.
+
+  Bu fonksiyonlar mevcut adım, menü ve tema mantığına dokunmaz; değişimi `MutationObserver` ile izler veya sayfanın kendi butonlarını tetikler.
+- **Yeni statik dosyalar** (`motion.css`, `ui-prefs.js`) hem `server.mjs` hem `report-server.mjs` statik listesinde olmalıdır; sunucu değişikliğinden sonra yeniden başlatın.
+- **Gerçek tarayıcı testleri:** `npm run test:gui-browser`. Chrome bulunamazsa `CHROME_PATH` verin. `test-support/gui-browser.mjs` sentetik defter, sunucular ve CDP oturumunu kurar; `data/` klasörüne dokunmaz. `startGuiSession({ empty: true })` ilk kurulum, `{ reports: true }` rapor portalı içindir.
+- **Ekran görüntüleri:** `node scripts/gui-screenshots.mjs <klasör> [--only=login,owner,users,checkout,reports]`. 3 genişlik × 2 tema; `index.html` galeri oluşturur. Klasörü depo dışında tutun.
+- **`paket6b` CDP testleri:** macOS'te `CHROMIUM_PATH` gerektirir. Bu ortamda 22 senaryo yeniden tasarımdan önce de başarısızdı (çoğu `Ctrl+A`'nın macOS'te seçim yapmaması); Windows'ta ayrıca doğrulanmalıdır.
+
 ## Değişiklik doğrulama
 
 UI, API ve domain katmanlarının birbiriyle uyumunu test edin. Eski olay fixture'ları sentetiktir; finansal şema değişikliğinde replay/restore ve bağımsız oracle sonuçlarını karşılaştırın. Yeni birim veya hesap davranışını otomatik dönüşümle tamamlamayın. Test çalışırken aynı kaynak dosyalarını değiştirmeyin. Kaynak SHA256'ları, test kesiti ve fiilî komut/exit bilgileri kabul raporunda eşleşmelidir.

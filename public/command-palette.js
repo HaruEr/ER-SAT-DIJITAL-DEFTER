@@ -1508,6 +1508,14 @@
     syncTriggerExpanded(false);
 
     if (dialogEl) {
+      // Visual exit only: the palette still closes and leaves the DOM synchronously.
+      const exitUi = getUI();
+      if (exitUi && typeof exitUi.animateExit === 'function') {
+        try {
+          const layers = typeof exitUi.getLayerCount === 'function' ? exitUi.getLayerCount() : 1;
+          exitUi.animateExit(dialogEl, 'modal', { backdrop: layers <= 1 ? 'plain' : false });
+        } catch {}
+      }
       if (typeof dialogEl.close === 'function' && dialogEl.open) {
         try { dialogEl.close(); } catch {}
       }

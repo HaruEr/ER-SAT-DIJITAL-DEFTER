@@ -497,9 +497,14 @@ export async function launchChromeSession({
   }
 
   async function clickSelector(selector) {
-    const pt = await evaluate(`(() => {
+    const pt = await evaluate(`(async () => {
       const el = document.querySelector(${JSON.stringify(selector)});
       if (!el) return { found: false };
+      // GUI Faz 2: layers slide/scale in (<= 250ms). A real pointer cannot click mid-flight, so wait
+      // for running transform/opacity animations on the target or its ancestors (capped at 1s)
+      // before measuring; otherwise the computed point is where the element was, not where it lands.
+      const moving = document.getAnimations().filter(a => a.playState === 'running' && a.effect?.target instanceof Element && (a.effect.target === el || a.effect.target.contains(el)));
+      if (moving.length) await Promise.race([Promise.allSettled(moving.map(a => a.finished)), new Promise(r => setTimeout(r, 1000))]);
       el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
       const r = el.getBoundingClientRect();
       return { found: true, x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height, disabled: Boolean(el.disabled) };
