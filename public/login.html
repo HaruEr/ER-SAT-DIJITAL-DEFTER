@@ -3,9 +3,18 @@
 <title>Oturum aç · ER ŞAT Dijital Defter</title><link rel="icon" href="data:,"><script src="/ui-prefs.js"></script><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/access.css"><link rel="stylesheet" href="/motion.css">
 <script defer src="/access-client.js"></script><script defer src="/login.js"></script></head>
 <body class="access-page"><main class="access-card"><p class="eyebrow">ER ŞAT DİJİTAL DEFTER</p><h1 id="heading">Oturum aç</h1>
-<form id="login" hidden><label id="select-label">Kullanıcı<select id="user" autocomplete="username"></select></label>
+<form id="login" hidden><label id="select-label">Kullanıcı adı<input id="user" type="text" maxlength="100" autocomplete="username" placeholder="Kullanıcı adınız"></label>
 <label id="name-label" hidden>İşletme sahibinin adı<input id="name" maxlength="100" autocomplete="name"></label>
-<label>Parola<input id="password" type="password" required autocomplete="current-password"></label>
-<p id="help" hidden>İlk kurulumu işletme sahibi yapar. En az 15 karakterlik bir parola kullanın.</p>
-<button class="button" id="submit">Oturum aç</button></form><p role="alert" id="feedback"></p>
+<label id="pin-label">6 Haneli PIN<input id="password" class="pin-input" type="password" inputmode="numeric" maxlength="6" pattern="[0-9]{6}" required autocomplete="current-password" placeholder="••••••"></label>
+<label id="pin-confirm-label" hidden>6 Haneli PIN (Tekrar)<input id="pin-confirm" class="pin-input" type="password" inputmode="numeric" maxlength="6" pattern="[0-9]{6}" autocomplete="new-password" placeholder="••••••"></label>
+<p id="help" hidden>İlk kurulumu işletme sahibi yapar. Tüm ekranlara erişecek 6 haneli Yönetici PIN kodunuzu belirleyin.</p>
+<button class="button" id="submit">Oturum aç</button></form>
+<form id="force-pin-change" hidden>
+<p class="context-note" id="force-pin-note">Geçici PIN ile giriş yaptınız. Devam etmeden önce kendi 6 haneli PIN kodunuzu belirleyin.</p>
+<label>Mevcut geçici PIN<input id="force-current-pin" class="pin-input" type="password" inputmode="numeric" maxlength="6" pattern="[0-9]{6}" required autocomplete="current-password" placeholder="••••••"></label>
+<label>Yeni 6 haneli PIN<input id="force-new-pin" class="pin-input" type="password" inputmode="numeric" maxlength="6" pattern="[0-9]{6}" required autocomplete="new-password" placeholder="••••••"></label>
+<label>Yeni 6 haneli PIN (Tekrar)<input id="force-confirm-pin" class="pin-input" type="password" inputmode="numeric" maxlength="6" pattern="[0-9]{6}" required autocomplete="new-password" placeholder="••••••"></label>
+<div class="setup-actions"><button type="button" class="button secondary" id="force-pin-cancel">Farklı kullanıcı</button><button class="button" id="force-pin-submit">PIN'i kaydet ve devam et</button></div>
+</form>
+<p role="alert" id="feedback"></p>
 <noscript>Oturum açmak için JavaScript'i etkinleştirin.</noscript></main></body></html>

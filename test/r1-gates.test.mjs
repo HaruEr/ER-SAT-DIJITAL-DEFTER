@@ -632,6 +632,11 @@ test('R1 checkout.js: beforeunload protects dirty/pending/other-op drafts withou
     const parsed = new URL(String(reqUrl), 'http://127.0.0.1/checkout');
     if (parsed.pathname === '/api/auth/session') return { ok: true, status: 200, json: async () => ({ id: 'emp-1', name: 'Çalışan', role: 'employee' }) };
     if (parsed.pathname === '/api/checkout') return { ok: true, status: 200, json: async () => checkoutState(repo.state({ compact: true })) };
+    if (parsed.pathname === '/api/pending-approvals') {
+      if ((init.method || 'GET').toUpperCase() === 'GET') return { ok: true, status: 200, json: async () => ({ items: [] }) };
+      if (failTrade) return { ok: false, status: 503, json: async () => ({ error: 'Sunucu hatası' }) };
+      return { ok: true, status: 201, json: async () => repo.submitPending(JSON.parse(init.body), { actor: { id: 'emp-1', name: 'Çalışan', role: 'employee' } }) };
+    }
     if (parsed.pathname === '/api/command') {
       if (failTrade) return { ok: false, status: 503, json: async () => ({ error: 'Sunucu hatası' }) };
       return { ok: true, status: 200, json: async () => repo.execute(JSON.parse(init.body)) };

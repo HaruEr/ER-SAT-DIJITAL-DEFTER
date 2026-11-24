@@ -1,10 +1,17 @@
 <!doctype html>
 <html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Çalışan hesapları · ER ŞAT</title><link rel="icon" href="data:,"><script src="/ui-prefs.js"></script><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/access.css"><link rel="stylesheet" href="/motion.css">
+<title>Kullanıcı ve PIN yönetimi · ER ŞAT</title><link rel="icon" href="data:,"><script src="/ui-prefs.js"></script><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/access.css"><link rel="stylesheet" href="/motion.css">
 <script defer src="/ui-kit.js"></script><script defer src="/access-client.js"></script><script defer src="/users.js"></script></head><body class="access-page">
-<main class="access-card"><a href="/owner">Deftere dön</a><h1>Çalışan hesapları</h1><p id="session-name"></p>
-<form id="employee"><h2>Çalışan ekle</h2><label>Adı<input name="name" required maxlength="100" autocomplete="off"></label>
-<label>Parola<input name="password" type="password" required minlength="15" autocomplete="new-password"></label><small>En az 15 karakter girin.</small>
+<main class="access-card wide">
+<nav class="access-nav-links" aria-label="Sayfa bağlantıları"><a href="/owner">← Deftere dön</a><a href="/checkout">Tezgâh ekranı →</a></nav>
+<div class="access-bar"><div><h1>Kullanıcı ve PIN yönetimi</h1><p id="session-name"></p></div><div class="employee-card-actions"><button type="button" class="button secondary compact theme-toggle" id="theme-toggle" aria-pressed="false">Gece modu</button><button type="button" class="button secondary compact" id="owner-rename-btn">Yönetici Adını Düzenle</button><button type="button" class="button secondary compact" id="owner-change-pin">Yönetici PIN Değiştir</button></div></div>
+<form id="employee"><h2>Çalışan ekle</h2>
+<label>Adı<input name="name" required maxlength="100" autocomplete="off"></label>
+<div class="access-columns">
+<label>Geçici 6 haneli PIN<input name="pin" class="pin-input" type="password" inputmode="numeric" required maxlength="6" pattern="[0-9]{6}" autocomplete="new-password" placeholder="••••••"></label>
+<label>Geçici PIN (Tekrar)<input name="pinConfirm" class="pin-input" type="password" inputmode="numeric" required maxlength="6" pattern="[0-9]{6}" autocomplete="new-password" placeholder="••••••"></label>
+</div>
+<small>Çalışan ilk girişte kendi 6 haneli PIN kodunu belirlemek zorundadır.</small>
 <button class="button">Hesap oluştur</button></form>
 <form id="disable"><h2>Erişimi kapat</h2><label>Çalışan<select name="id" required></select></label>
 <button class="button secondary">Seçili hesabı devre dışı bırak</button></form>

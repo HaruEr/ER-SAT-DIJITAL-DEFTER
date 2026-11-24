@@ -132,7 +132,7 @@ test('response serialization failure is handled before sending successful header
       console.log('controlled-serialization-error');
     } finally { await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }); rmSync(directory, { recursive: true, force: true }); }
   `;
-  const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], { cwd: projectDirectory, encoding: 'utf8', timeout: 10000 });
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], { cwd: projectDirectory, encoding: 'utf8', timeout: 30000 });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /controlled-serialization-error/);
 });

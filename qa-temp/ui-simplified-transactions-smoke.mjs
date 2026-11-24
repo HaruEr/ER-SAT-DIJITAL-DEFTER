@@ -74,7 +74,11 @@ checks.push(['purchase customer choice and no stock balances in product options'
   assert.ok(c.document.querySelector('#f-counterpartyId'));
   const product=c.document.querySelector('[data-item-field="accountId"]');
   assert.ok([...product.options].every(option=>!option.textContent.includes(' · ')));
-  for(const id of ['hurda8','hurda14','hurda18','hurda21','hurda22','hurda24']) assert.ok([...product.options].some(option=>option.value===id),id);
+  assert.ok([...product.options].some(option=>option.value==='hurda24'),'hurda24');
+  for(const id of ['hurda8','hurda14','hurda18','hurda21','hurda22']) assert.ok([...product.options].every(option=>option.value!==id),id+' excluded from Ürün/Altın');
+  c.document.querySelector('#add-purchase-scrap').click();
+  const scrapSelect=c.document.querySelector('[data-purchase-scrap="true"] [data-item-field="accountId"]');
+  for(const id of ['hurda8','hurda14','hurda18','hurda21','hurda22']) assert.ok([...scrapSelect.options].some(option=>option.value===id),id+' in Hurda Alışı');
   assert.equal(c.document.querySelector('[data-add-allocation="payment"][data-payment-type="pos"]'),null);
 }]);
 checks.push(['collection filters determine the only valid direction', async c => {
@@ -104,7 +108,7 @@ checks.push(['multiple scrap purities and split foreign payment preserve their u
   assert.equal(c.repo.state().balances.hurda8,1200);assert.equal(c.repo.state().balances.hurda21,800);assert.equal(c.repo.state().balances.usd,10100);
 }]);
 checks.push(['cash customer purchase stores payee and cannot overpay', async c => {
-  c.tab('purchase');c.set('#f-counterpartyId',c.claim);c.set('[data-item-field="accountId"]','hurda14');c.set('[data-item-field="quantity"]','1');c.set('[data-item-field="value"]','100');
+  c.tab('purchase');c.set('#f-counterpartyId',c.claim);c.document.querySelector('#add-purchase-scrap').click();c.set('[data-purchase-scrap="true"] [data-item-field="accountId"]','hurda14');c.set('[data-purchase-scrap="true"] [data-item-field="quantity"]','1');c.set('[data-purchase-scrap="true"] [data-item-field="value"]','100');
   c.document.querySelector('[data-payment-type="cash"]').click();c.set('[data-allocation-kind="payment"] [data-allocation-field="quantity"]','110');c.submit('#sale-form');await tick();assert.equal(c.commands.length,0);
   c.set('[data-allocation-kind="payment"] [data-allocation-field="quantity"]','100');c.submit('#sale-form');await tick();
   assert.equal(c.commands.at(-1).command.counterpartyId,c.claim);assert.equal(c.commands.at(-1).command.source,'customer');assert.equal(c.repo.state().balances.hurda14,1000);

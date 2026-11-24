@@ -301,7 +301,10 @@ function configureItem(row,clear=false) {
   const {product,serial}=itemProduct(row), select=row.querySelector('[data-pool]');
   const previous=select.value;
   const pools=product?.weights || [];
-  select.innerHTML=pools.map(p=>option(p.id,p.name+' · '+format(operation==='sale'?(p.freeQuantity ?? p.quantity):p.quantity,'GRAM'))).join('');
+  select.innerHTML=pools.map(p=>{
+    const qty=operation==='sale'?(p.freeQuantity ?? p.quantity):p.quantity;
+    return option(p.id,qty===undefined?p.name:p.name+' · '+format(qty,'GRAM'));
+  }).join('');
   if (pools.some(p=>p.id===previous)) select.value=previous;
   row.querySelector('[data-weight-fields]').hidden=!pools.length;
   row.querySelector('[data-weight]').required=!!pools.length;
@@ -323,7 +326,7 @@ function productChoices() {
   for (const product of snapshot?.products || []) {
     if (!(sale ? product.canSell : product.canBuy)) continue;
     const avail = product.freeQuantity ?? product.quantity ?? 0;
-    const hasPool = !product.weights?.length || product.weights.some(w => (w.freeQuantity ?? w.quantity ?? 0) > 0);
+    const hasPool = !product.weights?.length || product.weights.some(w => (w.freeQuantity === undefined && w.quantity === undefined) ? true : (w.freeQuantity ?? w.quantity ?? 0) > 0);
     const isZeroStock = sale && (avail <= 0 || !hasPool);
     items.push({
       id: product.id,
@@ -803,12 +806,55 @@ async function refresh() {
     if(sequence!==loadSequence || selected!==workspace)return;
     snapshot=fresh;externalRevision=Math.max(externalRevision,fresh.revision);
     $('date').textContent=fresh.initialized?'Açık iş günü · '+day(fresh.date):'Bu defterin açılışını işletme sahibi yapmalı.';
-    restoreDraft(readStoredDraft(workspace, operation));stockTable();$('trade').hidden=!fresh.initialized;
+    restoreDraft(readStoredDraft(workspace, operation));stockTable();renderBlindCountRows();$('trade').hidden=!fresh.initialized;
     if(selectedCustomer && !pending) await lookupCustomer(selectedCustomer.id);
     if(sequence!==loadSequence || selected!==workspace)return;
+    void refreshMySubmissions();
     status('');
   }catch(error){if(sequence===loadSequence)status(error.message);}
   controls();
+}
+async function refreshMySubmissions() {
+  const panel = $('my-submissions-panel');
+  if (!panel) return;
+  const isWorker = current()?.actor?.role === 'employee';
+  panel.hidden = !isWorker;
+  const confirmBtn = $('confirm');
+  const noteEl = $('review-approval-note');
+  if (confirmBtn) confirmBtn.textContent = isWorker ? 'Yönetici Onayına Gönder' : 'İşlemi kaydet';
+  if (noteEl) noteEl.hidden = !isWorker;
+  if (!isWorker) return;
+  try {
+    const data = await api(route('pending-approvals', workspace));
+    const items = data.items || [];
+    $('my-submissions-count').textContent = String(items.length);
+    const listEl = $('my-submissions-list');
+    if (!items.length) {
+      listEl.innerHTML = '<p class="context-note">Henüz yönetici onayına gönderilen bildiriminiz yok.</p>';
+      return;
+    }
+    listEl.innerHTML = items.map(item => {
+      const stLabel = item.status === 'pending' ? 'Onay bekliyor' : item.status === 'rejected' ? 'Reddedildi' : item.wasEdited ? 'Düzenlenerek onaylandı' : 'Onaylandı';
+      const stCls = item.status === 'pending' ? 'gold' : item.status === 'rejected' ? 'order-badge-overdue' : 'order-badge-fulfilled';
+      if (item.type === 'dailyCount') {
+        const cnt = item.summary?.countedCount || 0;
+        const noted = item.summary?.notedCount || 0;
+        return `<article class="submission-mini-card"><div class="order-card-meta"><span class="badge ${stCls}">${esc(stLabel)}</span><span class="badge">Günlük Kör Sayım</span><small>${esc(day(item.date))}</small></div>` +
+          `<p><strong>${cnt} kalem sayıldı</strong>${noted ? ` · ${noted} kalemde not var` : ''}</p>` +
+          (item.summary?.note ? `<p class="context-note wrap-anywhere">${esc(item.summary.note)}</p>` : '') +
+          (item.status === 'rejected' && item.rejectionReason ? `<p class="context-note"><strong>Red gerekçesi:</strong> ${esc(item.rejectionReason)}</p>` : '') +
+          (item.reviewedBy ? `<small class="context-note">İşlem: ${esc(item.reviewedBy.name)}</small>` : '') +
+          `</article>`;
+      }
+      const lineText = (item.summary?.lines || []).map(l => `${l.name} (${l.weight ? format(l.weight, 'GRAM') : format(l.quantity, l.unit)})`).join(' · ');
+      return `<article class="submission-mini-card"><div class="order-card-meta"><span class="badge ${stCls}">${esc(stLabel)}</span><span class="badge">${item.type === 'sale' ? 'Satış' : 'Alış'}</span><small>${esc(day(item.date))}</small></div>` +
+        `<p><strong>${esc(item.summary?.customerName || 'Peşin müşteri')}</strong> · ${esc(format(item.summary?.totalTL || 0, 'TL'))}</p>` +
+        `<p class="context-note wrap-anywhere">${esc(lineText)}</p>` +
+        (item.status === 'rejected' && item.rejectionReason ? `<p class="context-note"><strong>Red gerekçesi:</strong> ${esc(item.rejectionReason)}</p>` : '') +
+        (item.reviewedBy ? `<small class="context-note">İşlem: ${esc(item.reviewedBy.name)}</small>` : '') +
+        `</article>`;
+    }).join('');
+  } catch {}
 }
 async function lookupCustomer(id) {
   const sequence=++customerSequence,selected=workspace;
@@ -827,10 +873,15 @@ async function sendPending() {
   writing=true;controls();
   let message;
   try {
-    const result=await api(route('command',selected),request.envelope);
+    const isWorkerTrade = request.kind === 'trade' && current()?.actor?.role === 'employee';
+    const result = isWorkerTrade
+      ? await api(route('pending-approvals', selected), { id: request.envelope.id, revision: request.envelope.revision, command: request.envelope.command })
+      : await api(route('command', selected), request.envelope);
     saveStoredPending(null,selected);pending=null;
-    broadcast?.postMessage({actorId:actorId(),workspace:selected,revision:result.revision});
-    message=(result.duplicate?'Önceki kayıt doğrulandı. ':'İşlem kaydedildi. ')+'Kayıt '+result.id;
+    if (!isWorkerTrade) broadcast?.postMessage({actorId:actorId(),workspace:selected,revision:result.revision});
+    message = isWorkerTrade
+      ? (result.duplicate ? 'Önceki bildirim doğrulandı. ' : 'İşlem bildirimi yönetici onayına gönderildi. ') + 'Bildirim ' + result.id
+      : (result.duplicate ? 'Önceki kayıt doğrulandı. ' : 'İşlem kaydedildi. ') + 'Kayıt ' + result.id;
     if(request.kind==='trade') {
       // GUI Faz 9: check-mark toast + chime for a new sale/purchase. #status still announces the text.
       if(!result.duplicate)uiKit?.celebrate?.(message,{announce:false});
@@ -1381,4 +1432,183 @@ function initCheckoutCommandPalette(){
   });
 }
 initCheckoutCommandPalette();
+let activeBlindGroup = 'all';
+function renderBlindCountRows() {
+  const tbody = $('blind-count-rows');
+  if (!tbody) return;
+  const items = snapshot?.countItems || [];
+  const prevValues = new Map();
+  const prevReasons = new Map();
+  for (const inp of tbody.querySelectorAll('[data-bc-count]')) prevValues.set(inp.dataset.bcCount, inp.value);
+  for (const inp of tbody.querySelectorAll('[data-bc-reason]')) prevReasons.set(inp.dataset.bcReason, inp.value);
+  tbody.innerHTML = items.map(item => {
+    const unitLabel = item.unit === 'ADET' ? 'adet' : 'gr';
+    const val = prevValues.get(item.id) || '';
+    const reason = prevReasons.get(item.id) || '';
+    return `<tr data-bc-row-group="${esc(item.group)}">` +
+      `<td><strong>${esc(item.name)}</strong> <small class="muted">(${esc(unitLabel)})</small></td>` +
+      `<td><input type="text" inputmode="decimal" maxlength="24" data-bc-count="${esc(item.id)}" data-bc-unit="${esc(item.unit)}" placeholder="${item.unit === 'ADET' ? 'Adet' : 'Gram'}" value="${esc(val)}" aria-label="${esc(item.name)} sayılan miktar"></td>` +
+      `<td><input type="text" maxlength="160" data-bc-reason="${esc(item.id)}" placeholder="Eksik / yanlış / hasar notu" value="${esc(reason)}" aria-label="${esc(item.name)} notu"></td>` +
+      `</tr>`;
+  }).join('');
+  applyBlindGroupFilter();
+  updateBlindCountProgress();
+}
+function applyBlindGroupFilter() {
+  const tbody = $('blind-count-rows');
+  if (!tbody) return;
+  for (const tr of tbody.querySelectorAll('tr[data-bc-row-group]')) {
+    tr.hidden = activeBlindGroup !== 'all' && tr.dataset.bcRowGroup !== activeBlindGroup;
+  }
+  for (const tab of document.querySelectorAll('#blind-count-tabs [data-bc-group]')) {
+    tab.setAttribute('aria-selected', String(tab.dataset.bcGroup === activeBlindGroup));
+  }
+}
+function updateBlindCountProgress() {
+  const el = $('blind-count-progress');
+  const tbody = $('blind-count-rows');
+  if (!el || !tbody) return;
+  const inputs = [...tbody.querySelectorAll('[data-bc-count]')];
+  const filled = inputs.filter(i => i.value.trim() !== '').length;
+  el.textContent = `${filled} / ${inputs.length} kalem girildi`;
+}
+$('open-blind-count-btn')?.addEventListener('click', () => {
+  const sec = $('blind-count-section');
+  if (!sec) return;
+  sec.hidden = !sec.hidden;
+  if (!sec.hidden) {
+    renderBlindCountRows();
+    sec.scrollIntoView?.({ block: 'start', behavior: 'instant' });
+  }
+});
+$('close-blind-count-btn')?.addEventListener('click', () => {
+  const sec = $('blind-count-section');
+  if (sec) sec.hidden = true;
+});
+document.querySelectorAll('#blind-count-tabs [data-bc-group]').forEach(tab => tab.addEventListener('click', () => {
+  activeBlindGroup = tab.dataset.bcGroup;
+  applyBlindGroupFilter();
+}));
+$('blind-count-form')?.addEventListener('input', e => {
+  if (e.target.matches('[data-bc-count]')) {
+    const unit = e.target.dataset.bcUnit || 'ADET';
+    if (e.target.value.trim() === '') {
+      if (codec) codec.clearInputState(e.target);
+      else e.target.setCustomValidity('');
+    } else if (codec) {
+      codec.parseInputElement(e.target, unit, false);
+    }
+    updateBlindCountProgress();
+  }
+});
+$('blind-count-form')?.addEventListener('submit', async e => {
+  e.preventDefault();
+  if (!snapshot?.initialized) { status('Defter henüz açılmamış.'); return; }
+  const tbody = $('blind-count-rows');
+  const counts = {};
+  const reasons = {};
+  let valid = true;
+  for (const inp of tbody.querySelectorAll('[data-bc-count]')) {
+    const rawVal = inp.value.trim();
+    if (!rawVal) {
+      if (codec) codec.clearInputState(inp);
+      else inp.setCustomValidity('');
+      continue;
+    }
+    const unit = inp.dataset.bcUnit || 'ADET';
+    if (codec) {
+      const parsed = codec.parseInputElement(inp, unit, false);
+      if (parsed === null) { valid = false; continue; }
+      counts[inp.dataset.bcCount] = codec.canonicalInputValue(inp, unit, false);
+    } else {
+      counts[inp.dataset.bcCount] = rawVal.replace(',', '.');
+    }
+    const rInp = [...tbody.querySelectorAll('[data-bc-reason]')].find(el => el.dataset.bcReason === inp.dataset.bcCount);
+    if (rInp?.value.trim()) reasons[inp.dataset.bcCount] = rInp.value.trim();
+  }
+  if (!valid || !$('blind-count-form').reportValidity()) {
+    const msg = 'İşaretli sayım miktarını kontrol edin.';
+    if (uiKit?.toast) uiKit.toast(msg, { kind: 'error' }); else status(msg);
+    return;
+  }
+  if (!Object.keys(counts).length) {
+    const msg = 'Göndermek için en az bir kalemin sayımını girin.';
+    if (uiKit?.toast) uiKit.toast(msg, { kind: 'error' }); else status(msg);
+    return;
+  }
+  const btn = $('blind-count-submit');
+  btn.disabled = true;
+  try {
+    const note = $('blind-count-note')?.value.trim() || '';
+    const command = { type: 'dailyCount', date: snapshot.date, counts, reasons, ...(note ? { note } : {}) };
+    await api(route('pending-approvals', workspace), { id: crypto.randomUUID(), command });
+    $('blind-count-form').reset();
+    renderBlindCountRows();
+    $('blind-count-section').hidden = true;
+    await refreshMySubmissions();
+    const okMsg = 'Günlük fiziki sayımınız yönetici onayına gönderildi.';
+    if (uiKit?.toast) uiKit.toast(okMsg, { kind: 'success' }); else status(okMsg);
+  } catch (err) {
+    if (uiKit?.toast) uiKit.toast(err.message, { kind: 'error' }); else status(err.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$('change-pin-btn')?.addEventListener('click', event => {
+  const form = document.createElement('form');
+  form.className = 'pin-modal-form';
+  form.innerHTML =
+    '<label><span>Mevcut 6 haneli PIN</span><input name="currentPin" class="pin-input" type="password" inputmode="numeric" required maxlength="6" pattern="[0-9]{6}" autocomplete="current-password" placeholder="••••••"></label>' +
+    '<label><span>Yeni 6 haneli PIN</span><input name="newPin" class="pin-input" type="password" inputmode="numeric" required maxlength="6" pattern="[0-9]{6}" autocomplete="new-password" placeholder="••••••"></label>' +
+    '<label><span>Yeni 6 haneli PIN (Tekrar)</span><input name="confirmPin" class="pin-input" type="password" inputmode="numeric" required maxlength="6" pattern="[0-9]{6}" autocomplete="new-password" placeholder="••••••"></label>' +
+    '<p role="alert" data-modal-error hidden></p>' +
+    '<div class="form-actions"><button type="button" class="button secondary" data-modal-cancel>İptal</button><button type="submit" class="button">PIN\'i güncelle</button></div>';
+  for (const inp of form.querySelectorAll('.pin-input')) {
+    inp.addEventListener('input', () => {
+      const cleaned = inp.value.replace(/\D+/g, '').slice(0, 6);
+      if (inp.value !== cleaned) inp.value = cleaned;
+    });
+  }
+  const errEl = form.querySelector('[data-modal-error]');
+  const layer = uiKit?.openModal?.({
+    title: 'PIN Değiştir',
+    subtitle: 'Eski 6 haneli PIN kodunuzu doğrulayarak yeni PIN belirleyin',
+    content: form,
+    size: 'sm',
+    closeOnBackdrop: true,
+    trigger: event.currentTarget
+  });
+  form.querySelector('[data-modal-cancel]')?.addEventListener('click', () => layer?.close?.('cancel'));
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    errEl.hidden = true;
+    errEl.textContent = '';
+    const { currentPin, newPin, confirmPin } = Object.fromEntries(new FormData(form));
+    if (!/^\d{6}$/.test(currentPin) || !/^\d{6}$/.test(newPin)) {
+      errEl.textContent = 'PIN kodları tam 6 haneli rakamdan oluşmalı.';
+      errEl.hidden = false;
+      return;
+    }
+    if (newPin !== confirmPin) {
+      errEl.textContent = 'Yeni PIN ve tekrarı eşleşmiyor.';
+      errEl.hidden = false;
+      return;
+    }
+    const btn = form.querySelector('button[type="submit"]');
+    btn.disabled = true;
+    try {
+      await api('/api/auth/change-pin', { currentPin, newPin });
+      layer?.close?.('submit');
+      if (uiKit?.toast) uiKit.toast('PIN kodunuz güncellendi.', { kind: 'success' });
+      else $('status').textContent = 'PIN kodunuz güncellendi.';
+    } catch (error) {
+      errEl.textContent = error.message;
+      errEl.hidden = false;
+      if (uiKit?.toast) uiKit.toast(error.message, { kind: 'error' });
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  form.querySelector('input')?.focus();
+});
 if(current())void refresh();

@@ -88,8 +88,8 @@ fill('#daily-count-'+otherFunds.SAR.id,'0');assert.equal(document.querySelector(
 for(const [code,quantity] of [['SAR','1000'],['AED','500']])run({type:'movement',date:repo.state().date,accountId:otherFunds[code].id,direction:'in',category:'Sermaye',quantity,note:'Sentetik döviz açılış desteği'});
 document.querySelector('#refresh').click();await tick();window.__ui.setView('suppliers');await tick();document.querySelector('[data-create-firm]').click();fill('[data-supplier-form] [name="name"]','SAR Firma');await send('[data-supplier-form]');
 const sarFirm=repo.state().supplierFirms.find(a=>a.name==='SAR Firma');assert.ok(sarFirm);
-document.querySelector('[data-open-firm="'+sarFirm.id+'"]').click();document.querySelector('[data-add-supplier-unit]').click();fill('[data-supplier-form] [name="unit"]','other','change');fill('[data-supplier-form] [name="currencyCode"]','SAR');await send('[data-supplier-form]');
-const sarSupplier=repo.state().accounts.find(a=>a.supplierId===sarFirm.id);assert.equal(sarSupplier.unit,'SAR');assert.equal(sarSupplier.partyType,'supplier');
+document.querySelector('[data-open-firm="'+sarFirm.id+'"]').click();
+const sarSupplier=repo.state().accounts.find(a=>a.supplierId===sarFirm.id&&a.unit==='SAR');assert.ok(sarSupplier,'SAR unit auto-created on new supplier');assert.equal(sarSupplier.unit,'SAR');assert.equal(sarSupplier.partyType,'supplier');
 // Establish real unpaid native purchase rather than invent an opening balance on a new firm.
 run({type:'supplierPurchase',date:repo.state().date,supplierId:sarFirm.id,items:[{accountId:'gramToplam',quantity:'1'}],charges:[{accountId:sarSupplier.id,quantity:'100'}]});document.querySelector('#refresh').click();await tick();
 const native=(group,index,key,value)=>{const e=document.querySelectorAll('[data-group="'+group+'"] [data-row]')[index].querySelector('[data-field="'+key+'"]');assert.ok(e);e.value=value;e.dispatchEvent(new window.Event(e.tagName==='SELECT'?'change':'input',{bubbles:true}));};

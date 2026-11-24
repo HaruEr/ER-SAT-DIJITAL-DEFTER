@@ -39,19 +39,35 @@ test('anonymous and unknown sessions cannot read or write either ledger', async 
 
 test('employee privileges stay narrow and logout revokes the bearer', async t => {
   const { send, repositories } = await fixture(t);
-  const setup = await send('/api/auth/setup', null, { name: 'Sahip', password: 'example-owner-test-2026' });
+  const setup = await send('/api/auth/setup', null, { name: 'Sahip', pin: '102030' });
   assert.equal(setup.status, 201);
   const owner = await setup.json();
-  const created = await send('/api/auth/employees', owner.token, { name: 'Çalışan', password: 'example-worker-test-2026' });
+  // Anti-enumeration: unauthenticated GET /api/auth/users must NOT leak usernames
+  const anonUsers = await (await send('/api/auth/users', null)).json();
+  assert.deepEqual(anonUsers, { setup: false, users: [] });
+  // Authenticated owner CAN list users
+  const ownerUsers = await (await send('/api/auth/users', owner.token)).json();
+  assert.equal(ownerUsers.users.length, 1);
+  // Login by typed username works
+  const byName = await send('/api/auth/login', null, { name: 'sahip', pin: '102030' });
+  assert.equal(byName.status, 200);
+  const created = await send('/api/auth/employees', owner.token, { name: 'Çalışan', pin: '405060' });
   assert.equal(created.status, 201);
   const person = await created.json();
-  const logged = await send('/api/auth/login', null, { id: person.id, password: 'example-worker-test-2026' });
+  assert.equal(person.mustChangePin, true);
+  const logged = await send('/api/auth/login', null, { id: person.id, pin: '405060' });
   assert.equal(logged.status, 200);
   const worker = await logged.json();
+  assert.equal(worker.actor.mustChangePin, true);
+  // While mustChangePin is true, even /api/checkout is blocked until PIN is changed
+  assert.equal((await send('/api/checkout', worker.token)).status, 403);
+  const changed = await send('/api/auth/change-pin', worker.token, { currentPin: '405060', newPin: '708090' });
+  assert.equal(changed.status, 200);
+  assert.equal((await changed.json()).actor.mustChangePin, false);
   for (const route of ['state','journal','account-statement','summary','backup','archive','recovery']) {
     assert.equal((await send('/api/' + route, worker.token)).status, 403);
   }
-  for (const route of ['restore','archive/restore','download-ticket','auth/employees']) {
+  for (const route of ['restore','archive/restore','download-ticket','auth/employees','auth/reset-pin']) {
     assert.equal((await send('/api/' + route, worker.token, {})).status, 403);
   }
   for (const type of ['close','movement','account','amend','reverse','opening','collection','linkScrapPurchase','itemCostSource','scrapAdvanceTransfer','scrapAdvanceUndo']) {
@@ -65,22 +81,25 @@ test('employee privileges stay narrow and logout revokes the bearer', async t =>
   const named = { type: 'fundAccount', date: opening.date, name: 'Tezgâh bankası', unit: 'USD', physical: false, opening: '0', note: secret };
   assert.equal((await send('/api/command', owner.token, { id: 'usd', revision: 1, command: named })).status, 200);
   const checkout = await (await send('/api/checkout', worker.token)).json();
-  assert.deepEqual(Object.keys(checkout).sort(), ['date','initialized','inventoryItems','payments','products','revision','stocks']);
+  assert.deepEqual(Object.keys(checkout).sort(), ['countItems','date','initialized','inventoryItems','payments','products','revision','stocks']);
   assert.deepEqual(checkout.payments.find(p => p.id === 'fund-usd'), { id: 'fund-usd', name: named.name, unit: 'USD' });
   const sale = { type: 'sale', date: opening.date, counterpartyType: 'customer',
     items: [{ accountId: 'ceyrek', quantity: '1', value: '50' }], received: [{ accountId: 'fund-usd', quantity: '1', valueTL: '50' }] };
   const envelope = { id: 'local-sale', revision: 2, command: sale };
   for (const extra of [{ costTL:'0' }, { costTL:null }, { costTL:'' }]) {
     const forbidden = { ...sale, salePricing: { version: 1, lines: [extra] } };
-    assert.equal((await send('/api/command', worker.token, { ...envelope, command: forbidden })).status, 403);
+    assert.equal((await send('/api/pending-approvals', worker.token, { ...envelope, command: forbidden })).status, 403);
   }
   const coupled = { ...sale, given: [{ accountId: 'nakit', quantity: '1', valueTL: '1' }] };
-  assert.equal((await send('/api/command', worker.token, { ...envelope, command: coupled })).status, 400);
+  assert.equal((await send('/api/pending-approvals', worker.token, { ...envelope, command: coupled })).status, 400);
+  // Direct employee sale on /api/command is blocked (must go through approval queue)
+  assert.equal((await send('/api/command', worker.token, envelope)).status, 403);
   for (const duplicate of [false,true]) {
-    const response = await send('/api/command', worker.token, envelope);
-    assert.equal(response.status, 200, await response.clone().text());
-    assert.deepEqual(await response.json(), { id: 'local-sale', revision: 3, duplicate });
+    const response = await send('/api/pending-approvals', worker.token, { id: envelope.id, command: sale });
+    assert.equal(response.status, 201, await response.clone().text());
+    assert.equal((await response.json()).duplicate, duplicate);
   }
+  assert.equal((await send('/api/pending-approvals/approve', owner.token, { id: envelope.id, revision: 2 })).status, 200);
   const state = await (await send('/api/state', owner.token)).json();
   assert.equal(state.balances.ceyrek, 4);
   assert.equal(state.balances['fund-usd'], 100);
@@ -99,9 +118,10 @@ test('employee privileges stay narrow and logout revokes the bearer', async t =>
 
 test('only the owner can request a registered thumbnail; state, journal and employee reads omit pixel bytes', async t => {
   const { send } = await fixture(t);
-  const owner = await (await send('/api/auth/setup', null, { name:'Fotoğraf sahibi', password:'example-owner-photo-2026' })).json();
-  const employee = await (await send('/api/auth/employees', owner.token, { name:'Çalışan', password:'example-worker-photo-2026' })).json();
-  const worker = await (await send('/api/auth/login', null, { id:employee.id, password:'example-worker-photo-2026' })).json();
+  const owner = await (await send('/api/auth/setup', null, { name:'Fotoğraf sahibi', pin:'112233' })).json();
+  const employee = await (await send('/api/auth/employees', owner.token, { name:'Çalışan', pin:'445566' })).json();
+  const worker = await (await send('/api/auth/login', null, { id:employee.id, pin:'445566' })).json();
+  assert.equal((await send('/api/auth/change-pin', worker.token, { currentPin:'445566', newPin:'778899' })).status, 200);
   const initial = await (await send('/api/state', owner.token)).json(), date = '2026-11-10';
   const opening = { type:'opening', date, balances:Object.fromEntries(initial.accounts.filter(a=>!a.retired).map(a=>[a.id,a.id==='saat'?'1':'0'])) };
   assert.equal((await send('/api/command',owner.token,{id:'open-photo',revision:0,command:opening})).status,200);
@@ -127,12 +147,14 @@ test('only the owner can request a registered thumbnail; state, journal and empl
 });
 test('successful restores revoke all sessions and tickets; unsuccessful restore keeps the actor authorized', async t => {
   const {send} = await fixture(t);
-  const credentials={name:'Sahip',password:'sentetik-restore-parola-2026'};
+  const credentials={name:'Sahip',pin:'246810'};
   let owner=await (await send('/api/auth/setup',null,credentials)).json();
   const id=owner.actor.id;
-  const employee=await (await send('/api/auth/employees',owner.token,{name:'Çalışan',password:credentials.password})).json();
+  const employee=await (await send('/api/auth/employees',owner.token,{name:'Çalışan',pin:'135791'})).json();
+  const firstW=await (await send('/api/auth/login',null,{id:employee.id,pin:'135791'})).json();
+  await send('/api/auth/change-pin',firstW.token,{currentPin:'135791',newPin:'357913'});
   for(const format of ['json','archive']){
-    const worker=await (await send('/api/auth/login',null,{id:employee.id,password:credentials.password})).json();
+    const worker=await (await send('/api/auth/login',null,{id:employee.id,pin:'357913'})).json();
     const state=await (await send('/api/state',owner.token)).json();
     const ticket=await (await send('/api/download-ticket',owner.token,{operation:'backup'})).json();
     const backup=await (await send('/api/backup',owner.token)).json();
@@ -151,15 +173,15 @@ test('successful restores revoke all sessions and tickets; unsuccessful restore 
     assert.equal((await send('/api/checkout',worker.token)).status,401);
     assert.equal((await send(ticket.url,null)).status,401);
     assert.equal((await response.json()).reauthenticate,true);
-    owner=await (await send('/api/auth/login',null,{id,password:credentials.password})).json();
+    owner=await (await send('/api/auth/login',null,{id,pin:credentials.pin})).json();
     assert.equal((await send('/api/state',owner.token)).status,200);
   }
 });
 test('logging out while NDJSON is staging prevents commit and preserves another owner session', async t => {
   const {send,dataDirectory,repositories}=await fixture(t);
-  const credentials={name:'Sahip',password:'sentetik-stream-parola-2026'};
+  const credentials={name:'Sahip',pin:'987654'};
   const owner=await (await send('/api/auth/setup',null,credentials)).json();
-  const observer=await (await send('/api/auth/login',null,{id:owner.actor.id,password:credentials.password})).json();
+  const observer=await (await send('/api/auth/login',null,{id:owner.actor.id,pin:credentials.pin})).json();
   const archive=await send('/api/archive',owner.token), lines=(await archive.text()).trimEnd().split('\n');
   const url=new URL('/api/archive/restore?'+new URLSearchParams({revision:'0',confirmation:'GERİ YÜKLE'}),archive.url);
   let request;
@@ -185,9 +207,10 @@ test('logging out while NDJSON is staging prevents commit and preserves another 
 
 test('employee retail supports mixed native consideration and zero-balance customer creation without broad access', async t => {
   const {send,repositories}=await fixture(t);
-  const owner=await (await send('/api/auth/setup',null,{name:'Retail owner',password:'retail-owner-password-2026'})).json();
-  const employee=await (await send('/api/auth/employees',owner.token,{name:'Retail worker',password:'retail-worker-password-2026'})).json();
-  const worker=await (await send('/api/auth/login',null,{id:employee.id,password:'retail-worker-password-2026'})).json();
+  const owner=await (await send('/api/auth/setup',null,{name:'Retail owner',pin:'202601'})).json();
+  const employee=await (await send('/api/auth/employees',owner.token,{name:'Retail worker',pin:'202602'})).json();
+  const worker=await (await send('/api/auth/login',null,{id:employee.id,pin:'202602'})).json();
+  assert.equal((await send('/api/auth/change-pin',worker.token,{currentPin:'202602',newPin:'202603'})).status,200);
   const initial=await (await send('/api/state',owner.token)).json(),date='2026-11-10';
   const balances=Object.fromEntries(initial.accounts.filter(a=>!a.retired).map(a=>[a.id,({ceyrek:'5',nakit:'1000',usd:'100',hurda22:'3'})[a.id]||'0']));
   assert.equal((await send('/api/command',owner.token,{id:'retail-open',revision:0,command:{type:'opening',date,balances}})).status,200);
@@ -207,14 +230,15 @@ test('employee retail supports mixed native consideration and zero-balance custo
   const sale={type:'sale',date,counterpartyType:'customer',counterpartyId:id,items:[{accountId:'ceyrek',quantity:'1',value:'100'}],
     received:[{accountId:'usd',quantity:'1',valueTL:'40'},{accountId:'hurda22',quantity:'0.1',valueTL:'30'},{accountId:'nakit',quantity:'50'}],
     given:[{accountId:'nakit',quantity:'10'}],credits:[{accountId:id,quantity:'20'}],debts:[{accountId:id,quantity:'30'}]};
-  let response=await send('/api/command',worker.token,{id:'retail-sale',revision:2,command:sale});
-  assert.equal(response.status,200,await response.clone().text());
-  assert.deepEqual(await response.json(),{id:'retail-sale',revision:3,duplicate:false});
+  let response=await send('/api/pending-approvals',worker.token,{id:'retail-sale',command:sale});
+  assert.equal(response.status,201,await response.clone().text());
+  assert.equal((await send('/api/pending-approvals/approve',owner.token,{id:'retail-sale',revision:2})).status,200);
   const purchase={type:'purchase',source:'customer',date,counterpartyType:'customer',counterpartyId:id,items:[{accountId:'hurda22',quantity:'0.2',value:'100'}],
     received:[{accountId:'nakit',quantity:'10'}],given:[{accountId:'usd',quantity:'1',valueTL:'40'},{accountId:'nakit',quantity:'50'}],
     credits:[{accountId:id,quantity:'10'}],debts:[{accountId:id,quantity:'30'}]};
-  response=await send('/api/command',worker.token,{id:'retail-purchase',revision:3,command:purchase});
-  assert.equal(response.status,200,await response.clone().text());
+  response=await send('/api/pending-approvals',worker.token,{id:'retail-purchase',command:purchase});
+  assert.equal(response.status,201,await response.clone().text());
+  assert.equal((await send('/api/pending-approvals/approve',owner.token,{id:'retail-purchase',revision:3})).status,200);
   const detail=await (await send('/api/customers?id='+id,worker.token)).json();
   assert.deepEqual(detail,{id,name:customer.name,phone:customer.phone,taxId:'',address:customer.address,accounts:[{id,name:customer.name,unit:'TL',balance:-3000}]});
   const state=await (await send('/api/state',owner.token)).json();

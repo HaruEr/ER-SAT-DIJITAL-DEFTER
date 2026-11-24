@@ -118,8 +118,8 @@
   -webkit-backdrop-filter: blur(var(--glass-blur));
   backdrop-filter: blur(var(--glass-blur));
 }
-.defter-dialog-head,
-.defter-popover-head { background: var(--glass-head); }
+.defter-dialog-head { background: var(--glass-head); }
+.defter-popover-head { background: var(--surface-soft); }
 .defter-dialog::backdrop {
   -webkit-backdrop-filter: blur(var(--backdrop-blur, 4px));
   backdrop-filter: blur(var(--backdrop-blur, 4px));
@@ -144,9 +144,9 @@
 .defter-dialog[open]::backdrop { animation: defter-fade-in var(--dur-base) var(--ease-out); }
 
 .defter-popover {
-  background: var(--glass-bg-strong);
-  -webkit-backdrop-filter: blur(var(--glass-blur));
-  backdrop-filter: blur(var(--glass-blur));
+  background: var(--surface);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   transform-origin: 24px 0;
   animation: defter-flyout-in 180ms var(--ease-out);
 }
@@ -197,6 +197,14 @@
   animation: defter-toast-in var(--dur-base) var(--ease-spring);
 }
 .defter-toast--warning { background: color-mix(in srgb, var(--warning-soft) 96%, transparent); }
+.defter-toast--error {
+  border-color: color-mix(in srgb, var(--red) 45%, transparent);
+  background: color-mix(in srgb, var(--negative-soft) 96%, transparent);
+  color: var(--ink);
+}
+.defter-toast--error .defter-toast-progress { background: color-mix(in srgb, var(--red) 80%, transparent); }
+.defter-dialog--lg { width: min(760px, calc(100vw - 24px)); max-width: min(760px, calc(100vw - 24px)); }
+.defter-dialog--xl { width: min(980px, calc(100vw - 24px)); max-width: min(980px, calc(100vw - 24px)); }
 @media (max-width: 900px) {
   .defter-toast { animation-name: defter-toast-up; }
 }
@@ -571,7 +579,7 @@ textarea:focus-visible { box-shadow: var(--glow-focus); }
 }
 
 /* Settings flyout (built on the popover: glass, flyout motion, Esc / outside click to close). */
-.defter-popover.defter-settings { width: min(360px, calc(100vw - 16px)); }
+.defter-popover.defter-settings { width: min(360px, calc(100vw - 24px)); background: var(--surface); }
 .defter-settings .defter-popover-body { padding: 6px 14px 12px; font-size: 14px; }
 .defter-settings-list { display: grid; }
 .defter-setting {

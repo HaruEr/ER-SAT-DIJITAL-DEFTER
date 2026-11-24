@@ -59,9 +59,9 @@ test('application supplier route preserves drafts, clears committed requests and
   assert.equal(d.querySelector('#retry-bar').hidden,true);
   assert.equal(d.querySelector('[data-create-firm]').disabled,false,'new controls unlock after successful retry');
   const supplierId=repo.state().supplierParties[0].id;
+  const hasAccId=repo.state().supplierParties[0].accounts.find(a=>a.unit==='HAS').id;
   const post=(id,command)=>repo.execute({id,revision:repo.state().revision,command:{date:'2026-11-10',...command}});
-  post('unit',{type:'supplierUnit',supplierId,unit:'HAS'});
-  post('purchase',{type:'supplierPurchase',supplierId,items:[{accountId:'ceyrek',quantity:'1'}],charges:[{accountId:'supplier-unit-unit',quantity:'3'}]});
+  post('purchase',{type:'supplierPurchase',supplierId,items:[{accountId:'ceyrek',quantity:'1'}],charges:[{accountId:hasAccId,quantity:'3'}]});
   await w.__supplierTest.refresh(false);const event=repo.state().journal.at(-1),receipt=d.createElement('div');
   receipt.innerHTML=w.__supplierTest.journalItemMarkup(event,new Set(),[]);
   assert.equal(receipt.querySelector('[data-edit-transaction]'),null,'native edits belong to the supplier workflow');

@@ -51,12 +51,12 @@ test('supplier children inherit canonical profile, stay single level and unique 
   rejectsUnchanged(repo, 'customer-parent', { type: 'account', name: 'Bad child', parentAccountId: 'cari-customer', unit: 'USD', opening: '0' });
 });
 
-test('SILVER is explicit pure grams with three digits and periodic physical funds, XAG remains currency', t => {
+test('SILVER is explicit pure grams with three digits and daily physical funds, XAG remains currency', t => {
   const repo = family(t);
   assert.equal(quantity('125.125', 'SILVER'), 125125); assert.equal(decimal(125125, 'SILVER'), '125.125');
   assert.equal(quantity('1.25', 'XAG'), 125); assert.throws(() => quantity('1.001', 'XAG'));
   assert.throws(() => quantity('1.0001', 'SILVER'));
-  assert.equal(repo.state().accounts.find(a => a.id === 'fund-fund-SILVER').countPolicy, 'periodic');
+  assert.equal(repo.state().accounts.find(a => a.id === 'fund-fund-SILVER').countPolicy, 'daily');
   rejectsUnchanged(repo, 'silver-bank', { type: 'fundAccount', name: 'Silver bank', unit: 'SILVER', physical: false, opening: '0' });
   const bad = { id: 'bad-replay', schemaVersion: 7, command: { type: 'fundAccount', date, name: 'Silver bank', unit: 'SILVER', physical: false, opening: '0' } };
   assert.throws(() => replay([...repo.events(), bad]));
@@ -82,17 +82,18 @@ test('mixed supplier payment preserves independent quantities and reverses exact
   assert.deepEqual(vector(repo), before);
 });
 
-test('SILVER physical count is periodic, explicit and carried through daily closing', t => {
+test('SILVER physical count is daily, explicit and required in daily closing', t => {
   const repo = family(t);
   const id = 'fund-fund-SILVER';
-  assert.equal(currentCountPolicy(repo.state().accounts.find(a => a.id === id)), 'periodic');
-  execute(repo, 'silver-count', { type: 'stocktake', counts: { [id]: '999.875' }, reasons: { [id]: 'Synthetic measured difference' }, approvedBy: 'Synthetic operator' });
-  assert.equal(repo.events().at(-1).schemaVersion, 7); assert.equal(repo.state().balances[id], 999875);
-  assert.equal(repo.accountStatement({ accountId: id }).lastPhysicalCount.counted, 999875);
+  assert.equal(currentCountPolicy(repo.state().accounts.find(a => a.id === id)), 'daily');
+  rejectsUnchanged(repo, 'bad-periodic-silver', { type: 'stocktake', counts: { [id]: '999.875' }, reasons: { [id]: 'Synthetic' }, approvedBy: 'Synthetic operator' });
   const state = repo.state(), counts = Object.fromEntries(state.accounts.filter(a => a.physical && !a.retired && currentCountPolicy(a) === 'daily').map(a => [a.id, decimal(state.balances[a.id] || 0, a.unit)]));
-  rejectsUnchanged(repo, 'bad-daily-silver', { type: 'close', counts: { ...counts, [id]: '999.875' }, reasons: {}, approvedBy: 'Synthetic operator' });
-  execute(repo, 'daily-close', { type: 'close', counts, reasons: {}, approvedBy: 'Synthetic operator' });
+  const withoutSilver = { ...counts }; delete withoutSilver[id];
+  rejectsUnchanged(repo, 'missing-daily-silver', { type: 'close', counts: withoutSilver, reasons: {}, approvedBy: 'Synthetic operator' });
+  execute(repo, 'daily-close', { type: 'close', counts: { ...counts, [id]: '999.875' }, reasons: { [id]: 'Synthetic measured difference' }, approvedBy: 'Synthetic operator' });
+  assert.equal(repo.events().at(-1).schemaVersion, 18);
   assert.equal(repo.state().balances[id], 999875); assert.equal(repo.state().date, '2026-10-28');
+  assert.equal(repo.accountStatement({ accountId: id }).lastPhysicalCount.counted, 999875);
   assert.equal(replay(repo.events()).balances[id], 999875);
 });
 

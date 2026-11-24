@@ -144,16 +144,17 @@ test('2. Static allowlist serves /search-norm.js and /combobox.js with strict CS
 // 3. /api/customers Upgrade & Role Boundaries
 test('3. /api/customers supports Turkish folding, phone/taxId search, &meta=1, &limit=, and strict employee isolation', async t => {
   const { send } = await createHttpFixture(t);
-  const setup = await send('/api/auth/setup', null, { name: 'Sahip', password: 'example-owner-test-2026' });
+  const setup = await send('/api/auth/setup', null, { name: 'Sahip', pin: '102030' });
   assert.equal(setup.status, 201);
   const owner = await setup.json();
 
-  const empRes = await send('/api/auth/employees', owner.token, { name: 'Tezgahtar', password: 'example-worker-test-2026' });
+  const empRes = await send('/api/auth/employees', owner.token, { name: 'Tezgahtar', pin: '405060' });
   assert.equal(empRes.status, 201);
   const emp = await empRes.json();
-  const workerLogin = await send('/api/auth/login', null, { id: emp.id, password: 'example-worker-test-2026' });
+  const workerLogin = await send('/api/auth/login', null, { id: emp.id, pin: '405060' });
   assert.equal(workerLogin.status, 200);
   const worker = await workerLogin.json();
+  assert.equal((await send('/api/auth/change-pin', worker.token, { currentPin: '405060', newPin: '708090' })).status, 200);
 
   const initState = await (await send('/api/state', owner.token)).json();
   let rev = initState.revision;

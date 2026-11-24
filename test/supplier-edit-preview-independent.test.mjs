@@ -27,8 +27,8 @@ const purchase={type:'supplierPurchase',supplierId,items:[{accountId:'ceyrek',qu
 
 test('supplier edit preview is owner-only, same-firm and nonmutating for success or rejection',async t=>{
   const c=await fixture(t);c.run('buy',purchase);c.run('other',{type:'supplierFirm',name:'Other'});
-  const created=await c.post('/api/auth/employees',{name:'Worker',password:'synthetic-preview-worker'});assert.equal(created.status,201);
-  const person=await created.json();const login=await fetch(c.base+'/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:person.id,password:'synthetic-preview-worker'})});
+  const created=await c.post('/api/auth/employees',{name:'Worker',pin:'405060'});assert.equal(created.status,201);
+  const person=await created.json();const login=await fetch(c.base+'/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:person.id,pin:'405060'})});
   assert.equal(login.status,200);const {token}=await login.json();
   const url=c.base+'/api/suppliers?supplierId='+supplierId+'&editOriginalId=buy',before=snapshot(c.repo);
   assert.equal((await fetch(url)).status,401);

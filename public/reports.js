@@ -130,7 +130,7 @@ async function loadJournal(append=false) {
     const result=await getReport('journal',params,selectedWorkspace);if(ticket!==sequence||selectedWorkspace!==workspace||!target.isConnected)return;
     const items=append?[...journalPage.items,...result.items]:result.items;journalPage={...result,items,filters:append?journalPage.filters:params};
     target.innerHTML=items.length?items.map(journalMarkup).join(''):'<p class="empty-note">Seçili filtrelerde kayıt bulunamadı.</p>';
-    updateJournalFilters();$('#report-more').hidden=!result.nextCursor;metadata(result.revision,null);notice.textContent=items.length+' kayıt gösteriliyor. Veri sürümü '+result.revision+'.';
+    updateJournalFilters();$('#report-more').hidden=!result.nextCursor;metadata(result.revision,result.date||data?.date||items[0]?.date||null);notice.textContent=items.length+' kayıt gösteriliyor. Veri sürümü '+result.revision+'.';
   }catch(error){if(ticket===sequence&&target.isConnected){journalPage=null;updateJournalFilters();target.innerHTML='<div class="empty-state"><h2>'+ (denied(error)?'Bu rapora erişim izni yok':'Hareket listesi alınamadı') +'</h2><p>'+esc(error.message)+'</p><button id="journal-reload" class="button secondary" type="button">Listeyi yeniden yükle</button></div>';$('#report-more').hidden=true;notice.textContent='Liste güncel olarak doğrulanamadı.';$('#journal-reload').addEventListener('click',()=>loadJournal());}}
   finally{if(ticket===sequence)setBusy(false);}
 }
@@ -140,6 +140,22 @@ async function refresh() {
   catch(error){if(ticket===sequence&&selectedWorkspace===workspace){data=null;metadata(null,null);status('Rapor alınamadı. Gösterilecek güncel veri doğrulanamadı.',true);$('#report-main').innerHTML='<section class="empty-state"><h1>'+ (denied(error)?'Bu rapora erişim izni yok':'Rapor açılamadı') +'</h1><p>'+esc(error.message)+'</p><button id="report-retry" class="button" type="button">Yeniden dene</button></section>';$('#report-retry').addEventListener('click',refresh);}}
   finally{if(ticket===sequence)setBusy(false);}
 }
+function applyTheme(theme) {
+  const selected = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = selected;
+  const button = $('#theme-toggle');
+  if (button) {
+    button.textContent = selected === 'dark' ? 'Gündüz modu' : 'Gece modu';
+    button.setAttribute('aria-pressed', String(selected === 'dark'));
+    button.setAttribute('aria-label', selected === 'dark' ? 'Gündüz moduna geç' : 'Gece moduna geç');
+  }
+  try { localStorage.setItem('defter-theme', selected); } catch {}
+}
+const storedTheme = (() => { try { return localStorage.getItem('defter-theme'); } catch { return null; } })();
+applyTheme(storedTheme || (window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+$('#theme-toggle')?.addEventListener('click', () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+window.addEventListener('storage', event => { if (event.key === 'defter-theme' && event.newValue) applyTheme(event.newValue); });
+
 document.querySelector('.report-nav').addEventListener('click',event=>{const button=event.target.closest('[data-report-view]');if(!button||busy)return;rememberFilters();view=button.dataset.reportView;++sequence;render();$('#report-main').focus({preventScroll:true});});
 $('#report-refresh').addEventListener('click',refresh);
 $('#report-workspace').addEventListener('change',()=>{if(busy){$('#report-workspace').value=workspace;return;}rememberFilters();workspace=$('#report-workspace').value;$('#report-main').textContent='';data=null;++sequence;refresh();});

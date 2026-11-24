@@ -44,7 +44,7 @@ cases.push(['money tab contains movement and owner shortcuts', async c => {
   c.click('[data-owner-operation="settlement"]'); assert.ok(c.document.querySelector('#settlement-form'));
 }]);
 cases.push(['bank and stock operation choices do not overwrite customer tab or draft', async c => {
-  c.nav.legacy('purchase'); c.set('[data-item-field="accountId"]', 'hurda8'); c.set('[data-item-field="quantity"]', '2.5'); c.set('#f-note', 'Müşteri taslağı');
+  c.nav.legacy('purchase'); c.document.querySelector('#add-purchase-scrap').click(); c.set('[data-purchase-scrap="true"] [data-item-field="accountId"]', 'hurda8'); c.set('[data-purchase-scrap="true"] [data-item-field="quantity"]', '2.5'); c.set('#f-note', 'Müşteri taslağı');
   c.nav.setView('banks'); c.click('[data-bank-action="settlement"]'); c.nav.setView('stocks'); c.click('#stock-movement');
   c.nav.setView('transaction'); assert.equal(c.document.querySelector('h2').textContent, 'Müşteriden alış'); assert.equal(c.document.querySelector('[data-item-field="quantity"]').value, '2.5'); assert.equal(c.document.querySelector('#f-note').value, 'Müşteri taslağı');
 }]);

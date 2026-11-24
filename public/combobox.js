@@ -922,15 +922,35 @@
       if (rect && rect.width > 0) {
         const vw = root.innerWidth || doc.documentElement?.clientWidth || 1024;
         const vh = root.innerHeight || doc.documentElement?.clientHeight || 768;
+        let offsetX = 0;
+        let offsetY = 0;
+        if (host !== doc.body && host !== doc.documentElement) {
+          const hostStyle = root.getComputedStyle?.(host);
+          const createsContainingBlock = Boolean(hostStyle && (
+            (hostStyle.backdropFilter && hostStyle.backdropFilter !== 'none') ||
+            (hostStyle.webkitBackdropFilter && hostStyle.webkitBackdropFilter !== 'none') ||
+            (hostStyle.transform && hostStyle.transform !== 'none') ||
+            (hostStyle.filter && hostStyle.filter !== 'none') ||
+            (hostStyle.perspective && hostStyle.perspective !== 'none') ||
+            (hostStyle.contain && /(paint|layout|strict|content)/.test(hostStyle.contain))
+          ));
+          if (createsContainingBlock) {
+            const hRect = host.getBoundingClientRect?.();
+            if (hRect) {
+              offsetX = hRect.left + (parseFloat(hostStyle.borderLeftWidth) || 0);
+              offsetY = hRect.top + (parseFloat(hostStyle.borderTopWidth) || 0);
+            }
+          }
+        }
         const width = Math.min(rect.width, vw - 16);
         const left = Math.max(8, Math.min(rect.left, vw - width - 8));
         panelEl.style.width = `${Math.round(width)}px`;
-        panelEl.style.left = `${Math.round(left)}px`;
+        panelEl.style.left = `${Math.round(left - offsetX)}px`;
         const panelHeight = Math.min(320, panelEl.offsetHeight || 260);
         if (rect.bottom + 4 + panelHeight > vh - 8 && rect.top - 4 - panelHeight >= 8) {
-          panelEl.style.top = `${Math.round(Math.max(8, rect.top - panelHeight - 4))}px`;
+          panelEl.style.top = `${Math.round(Math.max(8, rect.top - panelHeight - 4) - offsetY)}px`;
         } else {
-          panelEl.style.top = `${Math.round(Math.min(vh - 48, rect.bottom + 4))}px`;
+          panelEl.style.top = `${Math.round(Math.min(vh - 48, rect.bottom + 4) - offsetY)}px`;
         }
       }
     }

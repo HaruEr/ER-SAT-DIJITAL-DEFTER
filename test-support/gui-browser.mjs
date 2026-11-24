@@ -133,11 +133,10 @@ export async function startGuiSession({ reports = false, empty = false } = {}) {
   async function login(userName = OWNER_NAME) {
     await navigate(`${base}/`, LOGIN_READY);
     await evaluate(`(() => {
-      const select = document.querySelector('#user');
-      const option = [...select.options].find(o => o.textContent === ${JSON.stringify(userName)});
-      if (!option) throw new Error('user not found');
-      select.value = option.value;
-      document.querySelector('#password').value = ${JSON.stringify(fixture.password)};
+      const userInput = document.querySelector('#user');
+      userInput.value = ${JSON.stringify(userName)};
+      const pin = ${JSON.stringify(userName === EMPLOYEE_NAME ? (fixture.employeePin || fixture.password) : (fixture.pin || fixture.password))};
+      document.querySelector('#password').value = pin;
       document.querySelector('#login').requestSubmit();
       return true;
     })()`);
@@ -161,11 +160,13 @@ export async function startGuiSession({ reports = false, empty = false } = {}) {
   async function close() {
     try { ws.close(); } catch {}
     chrome.kill();
+    server.closeAllConnections?.();
     server.close();
-    reportApp?.server.close();
+    reportApp?.server?.closeAllConnections?.();
+    reportApp?.server?.close();
     await sleep(300);
-    rmSync(profile, { recursive: true, force: true });
-    rmSync(fixture.directory, { recursive: true, force: true });
+    try { rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch {}
+    try { rmSync(fixture.directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch {}
   }
 
   return { base, reportBase, fixture, page, send, evaluate, until, settle, navigate, viewport, setTheme, login, logout, closeLayers, enableReportProxy, consoleErrors, close };

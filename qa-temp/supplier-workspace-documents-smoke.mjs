@@ -17,7 +17,7 @@ function fixture(t, mutate=()=>{}){
 }
 test('explicit same-unit allocation sends only source and purchase identity, no financial legs',async t=>{
  const f=fixture(t);f.root.querySelector('[data-supplier-documents]').click();await tick();await tick();
- const section=f.root.querySelector('[data-supplier-sources]'),save=f.root.querySelector('[data-supplier-document-form] > button:last-of-type');assert.equal(section.open,true,'required selection must start expanded');assert.ok(section.compareDocumentPosition(save)&f.dom.window.Node.DOCUMENT_POSITION_FOLLOWING,'save follows required source controls');
+ const section=f.root.querySelector('[data-supplier-sources]'),save=f.root.querySelector('[data-supplier-document-form] button[type="submit"]');assert.equal(section.open,true,'required selection must start expanded');assert.ok(section.compareDocumentPosition(save)&f.dom.window.Node.DOCUMENT_POSITION_FOLLOWING,'save follows required source controls');
  f.root.querySelector('[data-add-source]').click();f.fill('[data-source-field="choice"]',JSON.stringify(['source','has']));f.fill('[data-source-field="purchase"]',JSON.stringify(['purchase','has']));f.fill('[data-source-field="quantity"]','2');
  f.root.querySelector('form').requestSubmit();await tick();
  assert.deepEqual(f.sent[0].allocations,[{sourceId:'source',purchaseId:'purchase',accountId:'has',quantity:'2'}]);assert.equal(f.sent[0].type,'supplierAllocation');assert.equal('given' in f.sent[0],false);
@@ -74,7 +74,7 @@ test('return preview separates physical flows, native credit and document residu
  f.fill('[data-document-group="credits"] input','1.5');f.fill('[name="reduction-has"]','');assert.match(preview.textContent,/Belgeden düşüm girilmedi/);assert.match(preview.textContent,/Kullanılabilir iade alacağı: 1500 HAS/);
 });
 test('offset required sources are open before save while optional target disclosure stays closed',async t=>{
- const f=fixture(t);f.root.querySelector('[data-supplier-task="offset"]').click();await tick();await tick();const sources=f.root.querySelector('[data-supplier-sources]'),save=f.root.querySelector('[data-supplier-document-form] > button:last-of-type');assert.equal(sources.open,true);assert.ok(sources.compareDocumentPosition(save)&f.dom.window.Node.DOCUMENT_POSITION_FOLLOWING);assert.equal(f.root.querySelector('[data-offset-targets]').closest('details').open,false);
+ const f=fixture(t);f.root.querySelector('[data-supplier-task="offset"]').click();await tick();await tick();const sources=f.root.querySelector('[data-supplier-sources]'),save=f.root.querySelector('[data-supplier-document-form] button[type="submit"]');assert.equal(sources.open,true);assert.ok(sources.compareDocumentPosition(save)&f.dom.window.Node.DOCUMENT_POSITION_FOLLOWING);assert.equal(f.root.querySelector('[data-offset-targets]').closest('details').open,false);
 });
 
 test('paired return preview rejects mismatched final or exhausted partial weight',async t=>{

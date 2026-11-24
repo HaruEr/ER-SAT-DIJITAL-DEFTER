@@ -101,10 +101,12 @@
       return;
     }
     if (layerStack.length > 0) {
-      if (event && typeof event === 'object') consumedPopstateEvents.add(event);
       const top = topLayer();
       const hadPushed = Boolean(top?.historyPushed);
       const hasUnderlyingLayer = layerStack.length > 1;
+      if ((hadPushed || Boolean(top?.external)) && event && typeof event === 'object') {
+        consumedPopstateEvents.add(event);
+      }
       if (hadPushed || (top?.external && hasUnderlyingLayer)) {
         event?.stopImmediatePropagation?.();
       }
@@ -678,22 +680,55 @@
       region.className = 'defter-toast-region';
       region.setAttribute('aria-live', 'polite');
       region.setAttribute('aria-atomic', 'false');
+      if (typeof region.showPopover === 'function') {
+        region.setAttribute('popover', 'manual');
+      }
       document.body.append(region);
     }
     return region;
   }
 
+  function promoteToastRegion(region) {
+    if (!region || typeof region.showPopover !== 'function') return;
+    try {
+      if (region.matches?.(':popover-open')) region.hidePopover();
+      region.showPopover();
+    } catch {}
+  }
+
+  function syncToastPopover(region) {
+    if (!region || typeof region.showPopover !== 'function') return;
+    try {
+      if (region.childElementCount > 0) promoteToastRegion(region);
+      else if (region.matches?.(':popover-open')) region.hidePopover();
+    } catch {}
+  }
+
   // icon: 'check' draws a check mark (GUI Faz 9). announce: false keeps the toast visual only when the
   // page already announces the same text in its own live region (avoids a double announcement).
-  function toast(message, { kind = 'success', durationMs = 4000, label = '', icon = '', announce = true } = {}) {
+  function toast(message, { kind = 'success', durationMs, label = '', icon = '', announce = true } = {}) {
     const text = String(message ?? '').trim();
     if (!text) return null;
     const region = ensureToastRegion();
     if (!region) return null;
 
+    const normalizedKind = ['success', 'info', 'warning', 'error'].includes(kind) ? kind : 'info';
+    const resolvedDuration = durationMs === undefined ? (normalizedKind === 'error' ? 6000 : 4000) : durationMs;
+    const dedupeKey = `${normalizedKind}:${text}`;
+    const now = Date.now();
+    const duplicate = [...region.children].find(el =>
+      el.dataset?.toastKey === dedupeKey && (now - Number(el.dataset.toastAt || 0)) < 1500
+    );
+    if (duplicate) {
+      duplicate.dataset.toastAt = String(now);
+      promoteToastRegion(region);
+      return { element: duplicate, dismiss: () => duplicate.querySelector('.defter-toast-close')?.click() };
+    }
     const item = document.createElement('div');
-    item.className = `defter-toast defter-toast--${['success', 'info', 'warning'].includes(kind) ? kind : 'info'}`;
-    if (announce) item.setAttribute('role', 'status');
+    item.className = `defter-toast defter-toast--${normalizedKind}`;
+    item.dataset.toastKey = dedupeKey;
+    item.dataset.toastAt = String(now);
+    if (announce) item.setAttribute('role', normalizedKind === 'error' ? 'alert' : 'status');
     else item.setAttribute('aria-hidden', 'true');
     if (label) item.setAttribute('aria-label', label);
     let iconEl = null;
@@ -724,11 +759,11 @@
 
     // Remaining-time bar; restarts with the timer after a hover/focus pause.
     let progress = null;
-    if (durationMs > 0) {
+    if (resolvedDuration > 0) {
       progress = document.createElement('span');
       progress.className = 'defter-toast-progress';
       progress.setAttribute('aria-hidden', 'true');
-      item.style.setProperty('--toast-duration', `${durationMs}ms`);
+      item.style.setProperty('--toast-duration', `${resolvedDuration}ms`);
     }
 
     let timer = null;
@@ -742,11 +777,12 @@
       animateExit(item, 'toast');
       item.remove();
       glide();
+      syncToastPopover(region);
     };
 
     const armTimer = () => {
-      if (durationMs > 0 && !timer) {
-        timer = setTimeout(dismiss, durationMs);
+      if (resolvedDuration > 0 && !timer) {
+        timer = setTimeout(dismiss, resolvedDuration);
         if (progress) {
           item.classList.remove('is-paused');
           const fresh = progress.cloneNode(false);
@@ -770,6 +806,7 @@
     item.append(body, closeBtn);
     if (progress) item.append(progress);
     region.append(item);
+    promoteToastRegion(region);
     activeToasts.add(dismiss);
     armTimer();
     warmGhostStyles();
@@ -868,13 +905,13 @@
     return layerStack[layerStack.length - 1] || null;
   }
 
-  function openLayer({ kind = 'modal', title = '', subtitle = '', content = '', size = 'md', closeOnBackdrop = false, closeOnEsc = true, syncHistory = true, trigger = null, onClose = null } = {}) {
+  function openLayer({ kind = 'modal', title = '', subtitle = '', content = '', size = 'md', className = '', closeOnBackdrop = false, closeOnEsc = true, syncHistory = true, trigger = null, onClose = null } = {}) {
     if (typeof document === 'undefined' || !document.body) return null;
     const prevTop = topLayer();
     const returnTarget = trigger || document.activeElement;
 
     const dialog = document.createElement('dialog');
-    dialog.className = `defter-dialog defter-${kind} defter-dialog--${size}`;
+    dialog.className = `defter-dialog defter-${kind} defter-dialog--${size}${className ? ` ${className}` : ''}`;
     dialog.setAttribute('role', 'dialog');
     dialog.setAttribute('aria-modal', 'true');
     const headingId = `defter-dialog-title-${++layerSeq}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -1026,6 +1063,10 @@
       try { dialog.showModal(); } catch { dialog.setAttribute('open', ''); }
     } else {
       dialog.setAttribute('open', '');
+    }
+    const existingToasts = document.getElementById('defter-toast-region');
+    if (existingToasts && existingToasts.childElementCount > 0) {
+      promoteToastRegion(existingToasts);
     }
 
     dialog.addEventListener('keydown', handleKeydown);
@@ -1198,8 +1239,10 @@
     const popRect = pop.getBoundingClientRect?.() || { width: 280, height: 140 };
     const popW = pop.offsetWidth || popRect.width || 280;
     const popH = pop.offsetHeight || popRect.height || 140;
-    const left = Math.max(8, Math.min(rect.left, vw - popW - 8));
-    const top = rect.bottom + 8 + popH <= vh - 8 ? rect.bottom + 8 : Math.max(8, rect.top - popH - 8);
+    const pad = 12;
+    const preferredLeft = rect.left + popW <= vw - pad ? rect.left : rect.right - popW;
+    const left = Math.max(pad, Math.min(preferredLeft, vw - popW - pad));
+    const top = rect.bottom + 8 + popH <= vh - pad ? rect.bottom + 8 : Math.max(pad, rect.top - popH - 8);
     pop.style.left = `${Math.round(left)}px`;
     pop.style.top = `${Math.round(top)}px`;
 
@@ -1280,6 +1323,237 @@
     return { prevTop, release };
   }
 
+  function createWizardStepper({ form, steps = [], initialStep = 0, submitButton = null, cancelButton = null, navLabel = 'İşlem adımları', nextLabel = 'Sonraki →', prevLabel = '← Önceki', onStepChange = null } = {}) {
+    if (!form || !Array.isArray(steps) || !steps.length) return null;
+    const doc = form.ownerDocument || document;
+    const uid = `wiz-${++layerSeq}-${Date.now().toString(36)}`;
+    let current = Math.max(0, Math.min(initialStep, steps.length - 1));
+    const visited = new Set([current]);
+
+    const nav = doc.createElement('nav');
+    nav.className = 'wizard-stepper';
+    nav.setAttribute('aria-label', navLabel);
+    const list = doc.createElement('ol');
+    list.className = 'wizard-stepper-list';
+    nav.append(list);
+
+    const live = doc.createElement('p');
+    live.className = 'sr-only';
+    live.setAttribute('role', 'status');
+    live.setAttribute('aria-live', 'polite');
+    live.dataset.wizardLive = 'true';
+
+    const stepBtns = [];
+    const stepItems = [];
+    steps.forEach((step, idx) => {
+      const li = doc.createElement('li');
+      li.className = 'wizard-step';
+      const btn = doc.createElement('button');
+      btn.type = 'button';
+      btn.className = 'wizard-step-btn';
+      btn.dataset.wizardStepBtn = String(idx);
+      const num = doc.createElement('span');
+      num.className = 'wizard-step-num';
+      num.setAttribute('aria-hidden', 'true');
+      num.textContent = String(idx + 1);
+      const labelSpan = doc.createElement('span');
+      labelSpan.className = 'wizard-step-label';
+      labelSpan.textContent = step.title || `Adım ${idx + 1}`;
+      const srState = doc.createElement('span');
+      srState.className = 'sr-only';
+      srState.dataset.wizardSrState = '';
+      btn.append(num, labelSpan, srState);
+      btn.addEventListener('click', () => {
+        if (idx === current) return;
+        if (idx > current) {
+          for (let i = current; i < idx; i++) {
+            if (!validateStep(i)) return;
+          }
+        }
+        goToStep(idx, { focus: true });
+      });
+      li.append(btn);
+      list.append(li);
+      stepBtns.push(btn);
+      stepItems.push(li);
+
+      if (step.panel) {
+        step.panel.classList.add('wizard-step-panel');
+        step.panel.dataset.wizardPanel = step.id || String(idx);
+        const hId = `${uid}-h-${idx}`;
+        let heading = step.panel.querySelector(':scope > .wizard-step-heading');
+        if (!heading) {
+          heading = doc.createElement('h3');
+          heading.className = 'wizard-step-heading';
+          heading.id = hId;
+          heading.tabIndex = -1;
+          heading.textContent = `${idx + 1}. ${step.title || `Adım ${idx + 1}`}`;
+          step.panel.prepend(heading);
+        } else if (!heading.id) {
+          heading.id = hId;
+        }
+        step.panel.setAttribute('aria-labelledby', heading.id);
+      }
+    });
+
+    const footer = doc.createElement('div');
+    footer.className = 'wizard-footer';
+    const leftGroup = doc.createElement('div');
+    leftGroup.className = 'wizard-footer-left';
+    const rightGroup = doc.createElement('div');
+    rightGroup.className = 'wizard-footer-right';
+
+    const prevBtn = doc.createElement('button');
+    prevBtn.type = 'button';
+    prevBtn.className = 'button secondary';
+    prevBtn.dataset.wizardPrev = 'true';
+    prevBtn.textContent = prevLabel;
+
+    const nextBtn = doc.createElement('button');
+    nextBtn.type = 'button';
+    nextBtn.className = 'button';
+    nextBtn.dataset.wizardNext = 'true';
+    nextBtn.textContent = nextLabel;
+
+    if (cancelButton) leftGroup.append(cancelButton);
+    leftGroup.append(prevBtn);
+    rightGroup.append(nextBtn);
+    if (submitButton) rightGroup.append(submitButton);
+    footer.append(leftGroup, rightGroup);
+
+    const openDetailsAncestors = el => {
+      for (let node = el?.parentElement; node && node !== form; node = node.parentElement) {
+        if (node.tagName === 'DETAILS') node.open = true;
+      }
+    };
+
+    const focusControl = el => {
+      if (!el) return;
+      openDetailsAncestors(el);
+      const comboInput = root.DefterCombobox?.getInstance?.(el)?.input;
+      const target = comboInput || el;
+      target?.focus?.({ preventScroll: false });
+      target?.scrollIntoView?.({ block: 'center', behavior: 'instant' });
+    };
+
+    const findStepOfElement = el => {
+      if (!el) return -1;
+      for (let i = 0; i < steps.length; i++) {
+        if (steps[i].panel && steps[i].panel.contains(el)) return i;
+      }
+      return -1;
+    };
+
+    function syncUI({ focus = false, announce = false } = {}) {
+      steps.forEach((step, idx) => {
+        const active = idx === current;
+        const done = idx < current && visited.has(idx);
+        if (step.panel) step.panel.hidden = !active;
+        stepItems[idx].classList.toggle('is-active', active);
+        stepItems[idx].classList.toggle('is-complete', done);
+        if (active) stepBtns[idx].setAttribute('aria-current', 'step');
+        else stepBtns[idx].removeAttribute('aria-current');
+        const sr = stepBtns[idx].querySelector('[data-wizard-sr-state]');
+        if (sr) sr.textContent = active ? ' (Geçerli adım)' : done ? ' (Tamamlandı)' : ' (Bekliyor)';
+      });
+      prevBtn.hidden = current === 0;
+      const isLast = current === steps.length - 1;
+      nextBtn.hidden = isLast;
+      if (submitButton) submitButton.hidden = !isLast;
+      if (announce) {
+        live.textContent = `Adım ${current + 1} / ${steps.length}: ${steps[current].title || ''}`;
+      }
+      if (focus && steps[current]?.panel) {
+        const heading = steps[current].panel.querySelector(':scope > .wizard-step-heading');
+        if (heading) heading.focus({ preventScroll: true });
+      }
+    }
+
+    function goToStep(idx, { focus = false, announce = true } = {}) {
+      const clamped = Math.max(0, Math.min(idx, steps.length - 1));
+      const prev = current;
+      current = clamped;
+      visited.add(clamped);
+      syncUI({ focus, announce });
+      onStepChange?.({ index: current, previous: prev, step: steps[current] });
+    }
+
+    function validateStep(idx) {
+      const step = steps[idx];
+      if (!step) return true;
+      if (typeof step.prepare === 'function') step.prepare();
+      const panel = step.panel;
+      if (panel) {
+        const controls = [...panel.querySelectorAll('input, select, textarea')];
+        for (const el of controls) {
+          if (el.disabled || el.type === 'hidden') continue;
+          if (typeof el.checkValidity === 'function' && !el.checkValidity()) {
+            if (idx !== current) goToStep(idx, { focus: false, announce: true });
+            openDetailsAncestors(el);
+            el.reportValidity?.();
+            focusControl(el);
+            toast('İşaretli alanı kontrol edin. Eksik veya geçersiz bilgilerle sonraki adıma geçilemedi.', { kind: 'error' });
+            return false;
+          }
+        }
+      }
+      if (typeof step.validate === 'function') {
+        const res = step.validate();
+        if (res === false || (typeof res === 'string' && res.length > 0)) {
+          if (idx !== current) goToStep(idx, { focus: false, announce: true });
+          const msg = typeof res === 'string' ? res : 'Bu adımdaki zorunlu alanları tamamlayın.';
+          toast(msg, { kind: 'error' });
+          return false;
+        }
+      }
+      return true;
+    }
+
+    function validateAllSteps() {
+      for (let i = 0; i < steps.length; i++) {
+        if (!validateStep(i)) return false;
+      }
+      return true;
+    }
+
+    prevBtn.addEventListener('click', () => {
+      if (current > 0) goToStep(current - 1, { focus: true });
+    });
+    nextBtn.addEventListener('click', () => {
+      if (validateStep(current) && current < steps.length - 1) {
+        goToStep(current + 1, { focus: true });
+      }
+    });
+
+    // Capture-phase invalid safety net: if native validation hits a control in a hidden step,
+    // immediately reveal that step so the browser can focus it cleanly.
+    const onInvalidCapture = event => {
+      const ownerIdx = findStepOfElement(event.target);
+      if (ownerIdx !== -1 && ownerIdx !== current) {
+        goToStep(ownerIdx, { focus: false, announce: true });
+        openDetailsAncestors(event.target);
+      }
+    };
+    form.addEventListener('invalid', onInvalidCapture, true);
+
+    syncUI({ focus: false, announce: false });
+
+    return {
+      nav,
+      live,
+      footer,
+      prevBtn,
+      nextBtn,
+      getCurrentStep: () => current,
+      goToStep,
+      validateStep,
+      validateAllSteps,
+      destroy: () => {
+        form.removeEventListener('invalid', onInvalidCapture, true);
+      }
+    };
+  }
+
   const exportsObj = {
     toast,
     clearToasts,
@@ -1298,6 +1572,7 @@
     guardConfirm,
     shake,
     enhanceStepper,
+    createWizardStepper,
     enhanceNav,
     animateEnter,
     openSettings,

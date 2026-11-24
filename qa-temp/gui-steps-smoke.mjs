@@ -158,19 +158,19 @@ test('Faz 5 first-run setup wizard in a real browser', { skip, timeout: 120000 }
       await pressEnter();
       await sleep(30);
       const state = await wizardState();
-      assert.deepEqual(state, { step: '2', count: 'Adım 2 / 2 · Parola', name: false, next: false, password: true, back: true, submit: true, focus: 'password' });
+      assert.deepEqual(state, { step: '2', count: 'Adım 2 / 2 · Yönetici PIN', name: false, next: false, password: true, back: true, submit: true, focus: 'password' });
       const anim = await evaluate(`[...document.querySelectorAll('#login > *')].flatMap(el => el.getAnimations()).map(a => a.animationName)`);
       assert.ok(anim.includes('defter-step-forward'), `forward slide: ${anim}`);
       assert.equal(await evaluate(`document.querySelector('#password').getAttribute('aria-describedby')`), 'password-count');
     });
 
-    await t.test('the password meter counts toward 15 characters', async () => {
-      await typeInto('#password', 'kısa');
+    await t.test('the PIN meter counts toward 6 digits', async () => {
+      await typeInto('#password', '1234');
       let meter = await evaluate(`({ text: document.querySelector('#password-count').textContent, done: document.querySelector('.password-meter').classList.contains('is-complete') })`);
-      assert.deepEqual(meter, { text: '4 / 15 karakter', done: false });
-      await page('Input.insertText', { text: ' ama yeterli parola' });
+      assert.deepEqual(meter, { text: '4 / 6 hane', done: false });
+      await page('Input.insertText', { text: '56' });
       meter = await evaluate(`({ text: document.querySelector('#password-count').textContent, done: document.querySelector('.password-meter').classList.contains('is-complete'), valid: document.querySelector('#password').validity.valid })`);
-      assert.deepEqual(meter, { text: '23 karakter · yeterli', done: true, valid: true });
+      assert.deepEqual(meter, { text: '6 / 6 hane · hazır', done: true, valid: true });
     });
 
     await t.test('"Geri" returns to the name step with the name kept, sliding from the left', async () => {
@@ -207,7 +207,8 @@ test('Faz 5 first-run setup wizard in a real browser', { skip, timeout: 120000 }
     await t.test('completing step 2 creates the owner and signs in (same /api/auth/setup call)', async () => {
       await typeInto('#name', 'Deneme Kuyumcu');
       await evaluate(`(() => { document.querySelector('#setup-next').click(); return true; })()`);
-      await typeInto('#password', 'çok güvenli bir kurulum parolası');
+      await typeInto('#password', '246810');
+      await typeInto('#pin-confirm', '246810');
       await evaluate(`(() => { document.querySelector('#submit').click(); return true; })()`);
       await until(`location.pathname === '/owner'`, 15000);
       const session = await evaluate(`JSON.parse(sessionStorage.getItem('defter-session'))?.actor`);

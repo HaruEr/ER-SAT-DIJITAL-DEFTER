@@ -298,7 +298,8 @@ test('Hash navigation: pre-seeded pending envelope blocks popstate navigation an
     await tick();
 
     assert.equal(window.location.hash, '#v=transaction&tab=sale');
-    assert.match(document.querySelector('#notice')?.textContent || '', /belirsiz/i);
+    const toastText = [...document.querySelectorAll('.defter-toast-body')].map(el => el.textContent).join(' ');
+    assert.match((document.querySelector('#notice')?.textContent || '') + ' ' + toastText, /belirsiz/i);
     assert.equal(postedCommands.length, 0);
   } finally {
     dom.window.close();

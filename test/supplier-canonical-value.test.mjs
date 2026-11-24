@@ -624,7 +624,7 @@ test('F3 edit round-trip: onRecordAction converts canonical dot-decimals back to
     h.root.querySelector('[data-supplier-task="purchase"]').click();
     const pForm = await waitForSelector(h.root, 'form[data-supplier-form="purchase"]');
 
-    h.fill('[data-group="items"] [data-row] [data-field="accountId"]', 'hurda22', 'change');
+    h.fill('[data-group="items"] [data-row] [data-field="accountId"]', 'gramToplam', 'change');
     h.fill('[data-group="items"] [data-row] [data-field="quantity"]', '1.250,125', 'input');
     h.fill('[data-group="items"] [data-row] [data-field="referenceTL"]', '1.500,25', 'input');
     h.fill('[data-group="charges"] [data-row] [data-field="accountId"]', hasId, 'change');
@@ -681,7 +681,7 @@ test('F3 edit round-trip: onRecordAction converts canonical dot-decimals back to
     assert.equal(h.sent[1].replacement.charges[0].quantity, '1250.250');
     assert.equal(h.sent[1].replacement.note, 'Not 1.500 ve 10.500 korunmalı');
     assert.equal(h.sent[1].replacement.agreementId, 'AGR.10.500');
-    assert.equal(repo.state().balances.hurda22, 1250250);
+    assert.equal(repo.state().balances.gramToplam, 1250250);
     assert.equal(repo.state().balances[hasId], -1250250);
   }
 

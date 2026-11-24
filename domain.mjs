@@ -1,5 +1,5 @@
 import { applyInventory, checkReserved, usesInventory } from './inventory.mjs';
-import { isSupplierCommand, prepareSupplier, assertSupplierUndoAllowed } from './supplier-ledger.mjs';
+import { isSupplierCommand, prepareSupplier, assertSupplierUndoAllowed, supplierFirms, supplierAccountIds } from './supplier-ledger.mjs';
 import { applyExchange, exchangeUndo } from './retail-exchange.mjs';
 
 import { hasSalePricing, underlyingSaleCommand, salePriceSnapshot } from './sale-pricing.mjs';
@@ -35,12 +35,47 @@ for (const a of INITIAL_ACCOUNTS) a.displayOrder = stockOrder.includes(a.id) ? s
 const editableTypes = new Set(['sale', 'purchase', 'movement', 'collection', 'transfer', 'settlement', 'stock']);
 const optionalNoteTypes = new Set(['sale', 'purchase', 'collection', 'transfer', 'settlement', 'stock', 'movement']);
 const scrapAdvanceTypes = new Set(['scrapAdvanceTransfer', 'scrapAdvanceUndo']);
-const orderTypes = new Set(['customerOrder', 'orderAdvance', 'orderRefund', 'orderCancel', ...scrapAdvanceTypes]);
+const orderTypes = new Set(['customerOrder', 'orderUpdate', 'orderAdvance', 'orderRefund', 'orderCancel', ...scrapAdvanceTypes]);
+export const ORDER_CATEGORIES = new Set(['bilezik', 'urun', 'sarrafiye', 'gram']);
 function orderFeature(command) {
   return orderTypes.has(command?.type) || (command?.type === 'sale' && Object.hasOwn(command, 'orderSettlement'));
 }
+function usesV18OrderFeature(command) {
+  if (!command || typeof command !== 'object') return false;
+  if (command.type === 'orderUpdate') return true;
+  if (command.type === 'customerOrder') {
+    return ['category', 'productAccountId', 'weightAccountId', 'orderUnit', 'targetQuantity', 'deliveryDate', 'targetSpec', 'estimatedTotalTL', 'initialAdvance'].some(k => Object.hasOwn(command, k));
+  }
+  if (command.type === 'orderAdvance') {
+    return ['receivedQuantity', 'creditedQuantity', 'weightAccount', 'weight', 'note'].some(k => Object.hasOwn(command, k));
+  }
+  if (command.type === 'orderRefund') {
+    return ['refundedQuantity', 'creditedQuantity', 'weightAccount', 'weight', 'note'].some(k => Object.hasOwn(command, k));
+  }
+  if (command.type === 'sale' && command.orderSettlement && Array.isArray(command.orderSettlement.advances)) {
+    return command.orderSettlement.advances.some(r => r && typeof r === 'object' && (Object.hasOwn(r, 'appliedQuantity') || Object.hasOwn(r, 'appliedValueTL')))
+      || (Array.isArray(command.given) && command.given.length > 0)
+      || (Array.isArray(command.debts) && command.debts.length > 0);
+  }
+  return false;
+}
+function usesAutoSupplierUnit(command) {
+  if (!command || typeof command !== 'object') return false;
+  if (command.type === 'supplierFirm' && command.autoUnits === true) return true;
+  if (command.type === 'supplierTransfer') return true;
+  const hasScrap = rows => Array.isArray(rows) && rows.some(r => /^hurda(8|14|18|21|22)$/.test(r?.accountId || ''));
+  if (command.type === 'supplierPurchase' && hasScrap(command.items)) return true;
+  if (command.type === 'supplierPayment' && hasScrap(command.received)) return true;
+  const checkRows = rows => Array.isArray(rows) && rows.some(r => typeof r?.accountId === 'string' && r.accountId.startsWith('auto-unit:'));
+  return checkRows(command.charges) || checkRows(command.credits) || checkRows(command.debts) || checkRows(command.reductions)
+    || (typeof command.fromAccountId === 'string' && command.fromAccountId.startsWith('auto-unit:'))
+    || (typeof command.toAccountId === 'string' && command.toAccountId.startsWith('auto-unit:'));
+}
 export function eventVersion(command, state) {
-  if (isSupplierCommand(command)) return 17;
+  if (isSupplierCommand(command)) return usesAutoSupplierUnit(command) ? 18 : 17;
+  if (['close', 'stocktake'].includes(command.type) && state?.accounts?.some(a => !a.retired && a.physical && a.unit === 'SILVER')) return 18;
+  if (command.type === 'fundAccount' && command.autoSupplierUnits === true) return 18;
+  if (usesV18OrderFeature(command)) return 18;
   if (scrapAdvanceTypes.has(command.type)) return 16;
   if (hasSalePricing(command)) return 10;
   if (['saleReturn','retailExchange'].includes(command.type) && Object.hasOwn(command,'customerConsideration')) return 14;
@@ -270,7 +305,7 @@ function noMixedPayments(c, legacyFields) {
   if (legacyFields.some(key => c[key] !== undefined)) fail('Çok birimli ödeme satırları ile eski ödeme alanları birlikte kullanılamaz.');
 }
 const dailyScrapIds = new Set(['hurda8', 'hurda14', 'hurda18', 'hurda21', 'hurda22', 'hurda24']);
-export function currentCountPolicy(a) { return dailyScrapIds.has(a.id) ? 'daily' : a.countPolicy || 'none'; }
+export function currentCountPolicy(a) { return (dailyScrapIds.has(a.id) || (a.physical && a.unit === 'SILVER')) ? 'daily' : a.countPolicy || 'none'; }
 function exchangeAssets(s, rows, sign) {
   if (!Array.isArray(rows) || rows.length > 30) fail('Karşılık bölümünde en çok 30 satır olabilir.');
   const entries = [], lines = []; let total = 0;
@@ -339,15 +374,67 @@ function entriesApply(s, entries, validationMode) {
     s.balances[id] = result;
   }
 }
-// Each receipt retains its own unused TL amount. Refund and final-sale materialization
+function orderUnitCheck(state, raw) {
+  if (raw === undefined || raw === '') return 'TL';
+  const u = String(raw).trim().toUpperCase();
+  if (u === 'ADET' || u === 'GRAM' || u === 'HAS' || u === 'SILVER' || u === 'TL') return u;
+  if (/^[A-Z]{3}$/.test(u) && u !== 'TRY') return u;
+  fail('Sipariş takip birimi geçersiz.');
+}
+function orderAssetAccount(state, accountId) {
+  const a = account(state, accountId);
+  if (a.retired || a.kind !== 'asset' || a.id === 'pos') fail('Kapora için aktif kasa, banka, döviz, hurda veya ürün hesabı seçin.');
+  return a;
+}
+function orderAdvanceRemaining(a, orderUnit) {
+  if (orderUnit === 'TL' && a.creditedQuantity === undefined) {
+    return a.receivedTL - a.refundedTL - a.appliedTL - (a.returnedToPayableTL || 0);
+  }
+  const credited = a.creditedQuantity ?? a.receivedTL ?? 0;
+  const refunded = a.refundedQuantity ?? a.refundedTL ?? 0;
+  const applied = a.appliedQuantity ?? a.appliedTL ?? 0;
+  const returned = a.returnedToPayableTL || 0;
+  return credited - refunded - applied - returned;
+}
+function orderAssetEntries(state, asset, qty, direction, weightAccount, weight) {
+  const entries = [{ accountId: asset.id, delta: direction * qty }];
+  if (asset.pairedGroups?.length) {
+    if (!weightAccount || !asset.pairedGroups.includes(weightAccount)) fail(`${asset.name} için bağlı terazi grubunu seçin.`);
+    const w = quantity(weight, 'GRAM', { zero: false });
+    entries.push({ accountId: weightAccount, delta: direction * w });
+  } else if (weightAccount || (weight !== undefined && weight !== '')) {
+    fail(`${asset.name} için terazi ağırlığı girilemez.`);
+  }
+  return entries;
+}
+function orderProductBinding(state, rawProductId, rawWeightId) {
+  const productAccountId = rawProductId !== undefined && rawProductId !== '' ? String(rawProductId).trim() : '';
+  const weightAccountId = rawWeightId !== undefined && rawWeightId !== '' ? String(rawWeightId).trim() : '';
+  if (!productAccountId) {
+    if (weightAccountId) fail('Ayar / terazi grubu seçmek için önce ürün seçin.');
+    return { productAccountId: '', weightAccountId: '' };
+  }
+  const prod = account(state, productAccountId);
+  if (prod.retired || prod.kind !== 'asset' || !prod.isSaleable || /^hurda(8|14|18|21|22)$/.test(prod.id)) {
+    fail('Sipariş ürünü olarak aktif ve satılabilir bir stok kartı seçin.');
+  }
+  if (weightAccountId) {
+    if (!Array.isArray(prod.pairedGroups) || !prod.pairedGroups.includes(weightAccountId)) {
+      fail(`${prod.name} için geçerli bir bağlı ayar / terazi grubu seçin.`);
+    }
+  }
+  return { productAccountId: prod.id, weightAccountId };
+}
+// Each receipt retains its own unused amount in the order's tracking unit. Refund and final-sale materialization
 // are staged until the financial entries have passed the normal balance checks.
 function prepareOrder(state, event) {
   const c = event.command;
   const orders = state.customerOrders || [];
   const fields = {
-    customerOrder: ['type','date','customerId','description'],
-    orderAdvance: ['type','date','orderId','accountId','amountTL'],
-    orderRefund: ['type','date','orderId','advanceId','accountId','amountTL'],
+    customerOrder: ['type','date','customerId','description','category','productAccountId','weightAccountId','orderUnit','targetQuantity','deliveryDate','targetSpec','estimatedTotalTL','initialAdvance'],
+    orderUpdate: ['type','date','orderId','category','productAccountId','weightAccountId','orderUnit','targetQuantity','deliveryDate','targetSpec','estimatedTotalTL','description','note'],
+    orderAdvance: ['type','date','orderId','accountId','amountTL','receivedQuantity','creditedQuantity','weightAccount','weight','note'],
+    orderRefund: ['type','date','orderId','advanceId','accountId','amountTL','refundedQuantity','creditedQuantity','weightAccount','weight','note'],
     scrapAdvanceTransfer: ['type','date','orderId','purchaseId','customerId','amountTL','note'],
     scrapAdvanceUndo: ['type','date','orderId','advanceId','amountTL','note'],
     orderCancel: ['type','date','orderId','note']
@@ -355,23 +442,101 @@ function prepareOrder(state, event) {
   if (fields[c.type] && Object.keys(c).some(key => !fields[c.type].includes(key))) fail('Sipariş işleminde desteklenmeyen alan.');
   if (c.type === 'customerOrder') {
     const customer = assertParty(state, c.customerId, 'customer');
-    const order = { id: event.id, customerId: customer.id, description: text(c.description, 'Sipariş açıklaması', 300),
-      date: c.date, status: 'open', availableTL: 0, advances: [] };
-    return { orders: [...orders,order], entries: [], label: 'Müşteri siparişi',
-      meta: { orderId: order.id, counterpartyId: customer.id, description: order.description, revenue: 0 } };
+    const category = c.category !== undefined && c.category !== '' ? String(c.category).trim().toLowerCase() : 'urun';
+    if (!ORDER_CATEGORIES.has(category)) fail('Geçerli bir sipariş kategorisi seçin (Bilezik, Ürün, Sarrafiye veya Gram).');
+    const { productAccountId, weightAccountId } = orderProductBinding(state, c.productAccountId, c.weightAccountId);
+    const orderUnit = orderUnitCheck(state, c.orderUnit);
+    const targetQuantity = c.targetQuantity !== undefined && c.targetQuantity !== '' ? quantity(c.targetQuantity, orderUnit, { zero: false }) : null;
+    const deliveryDate = c.deliveryDate !== undefined && c.deliveryDate !== '' ? validDate(c.deliveryDate) : '';
+    const targetSpec = c.targetSpec !== undefined && c.targetSpec !== '' ? text(c.targetSpec, 'Hedef özellik / ayar', 80) : '';
+    const estimatedTotalTL = c.estimatedTotalTL !== undefined && c.estimatedTotalTL !== '' ? quantity(c.estimatedTotalTL, 'TL', { zero: false }) : null;
+    const order = {
+      id: event.id,
+      customerId: customer.id,
+      description: text(c.description, 'Sipariş açıklaması', 300),
+      category,
+      ...(productAccountId ? { productAccountId } : {}),
+      ...(weightAccountId ? { weightAccountId } : {}),
+      orderUnit,
+      ...(targetQuantity !== null ? { targetQuantity } : {}),
+      ...(deliveryDate ? { deliveryDate } : {}),
+      ...(targetSpec ? { targetSpec } : {}),
+      ...(estimatedTotalTL !== null ? { estimatedTotalTL } : {}),
+      date: c.date,
+      status: 'open',
+      availableTL: 0,
+      availableQuantity: 0,
+      advances: []
+    };
+    const entries = [];
+    const meta = {
+      orderId: order.id,
+      counterpartyId: customer.id,
+      description: order.description,
+      category,
+      ...(productAccountId ? { productAccountId } : {}),
+      ...(weightAccountId ? { weightAccountId } : {}),
+      orderUnit,
+      ...(targetQuantity !== null ? { targetQuantity } : {}),
+      ...(deliveryDate ? { deliveryDate } : {}),
+      ...(estimatedTotalTL !== null ? { estimatedTotalTL } : {}),
+      revenue: 0
+    };
+    if (c.initialAdvance !== undefined && c.initialAdvance !== null) {
+      if (typeof c.initialAdvance !== 'object' || Array.isArray(c.initialAdvance)
+        || Object.keys(c.initialAdvance).some(k => !['accountId','receivedQuantity','creditedQuantity','weightAccount','weight'].includes(k))) {
+        fail('Açılış kaporası bilgileri geçersiz.');
+      }
+      const asset = orderAssetAccount(state, c.initialAdvance.accountId);
+      const receivedQty = quantity(c.initialAdvance.receivedQuantity, asset.unit, { zero: false });
+      const hasExplicitCredit = c.initialAdvance.creditedQuantity !== undefined && c.initialAdvance.creditedQuantity !== '';
+      if (asset.unit !== orderUnit && !hasExplicitCredit) {
+        fail(`Alınan varlık (${asset.unit}) sipariş biriminden (${orderUnit}) farklı; siparişe sayılan miktarı açıkça girin.`);
+      }
+      const creditedQty = hasExplicitCredit ? quantity(c.initialAdvance.creditedQuantity, orderUnit, { zero: false }) : receivedQty;
+      if (!Number.isSafeInteger(creditedQty) || creditedQty <= 0 || creditedQty > 1e12) fail('Siparişe sayılan kapora miktarı geçersiz.');
+      entries.push(...orderAssetEntries(state, asset, receivedQty, +1, c.initialAdvance.weightAccount, c.initialAdvance.weight));
+      order.advances.push({
+        id: event.id,
+        unit: orderUnit,
+        receivedTL: orderUnit === 'TL' ? creditedQty : 0,
+        refundedTL: 0,
+        appliedTL: 0,
+        creditedQuantity: creditedQty,
+        refundedQuantity: 0,
+        appliedQuantity: 0,
+        receivedAccountId: asset.id,
+        receivedUnit: asset.unit,
+        receivedQuantity: receivedQty
+      });
+      order.availableQuantity = creditedQty;
+      order.availableTL = orderUnit === 'TL' ? creditedQty : 0;
+      Object.assign(meta, {
+        advanceId: event.id,
+        fundAccountId: asset.id,
+        receivedUnit: asset.unit,
+        receivedQuantity: receivedQty,
+        creditedQuantity: creditedQty,
+        ...(orderUnit === 'TL' ? { amountTL: creditedQty } : {})
+      });
+    }
+    return { orders: [...orders, order], entries, label: entries.length ? 'Müşteri siparişi ve kapora' : 'Müşteri siparişi', meta };
   }
   const settlement = c.type === 'sale' ? c.orderSettlement : null;
   if (c.type === 'sale' && (!settlement || Array.isArray(settlement) || typeof settlement !== 'object' || Object.keys(settlement).some(k => !['orderId','advances'].includes(k)))) fail('Sipariş bağlantısı gerekli.');
   const id = text(settlement ? settlement.orderId : c.orderId, 'Sipariş kaydı', 100);
   const original = orders.find(o => o.id === id);
   if (!original || original.status === 'cancelled' || (original.status !== 'open' && !['orderRefund','scrapAdvanceUndo'].includes(c.type))) fail('İşleme uygun açık sipariş seçin.');
-  const order = { ...original, advances: original.advances.map(a => ({ ...a })) };
-  const meta = { orderId: id, counterpartyId: order.customerId, revenue: 0 };
+  const orderUnit = original.orderUnit || 'TL';
+  const origAvailable = original.availableQuantity ?? original.availableTL ?? 0;
+  const order = { ...original, orderUnit, availableQuantity: origAvailable, advances: original.advances.map(a => ({ ...a })) };
+  const meta = { orderId: id, counterpartyId: order.customerId, orderUnit, revenue: 0 };
   const entries = [];
   let label;
   const receipt = id => order.advances.find(a => a.id === id) || fail('Avans makbuzu bu siparişe ait olmalı.');
-  const remaining = a => a.receivedTL - a.refundedTL - a.appliedTL - (a.returnedToPayableTL || 0);
+  const remaining = a => orderAdvanceRemaining(a, orderUnit);
   if (scrapAdvanceTypes.has(c.type)) {
+    if (orderUnit !== 'TL') fail('Hurda borcundan avans aktarımı yalnız TL takip birimli siparişlerde kullanılabilir.');
     const customer = assertParty(state, order.customerId, 'customer');
     if (customer.unit !== 'TL') fail('Hurda borcundan avans için aynı TL müşteri hesabı gerekli.');
     const amount = quantity(c.amountTL, 'TL', { zero: false });
@@ -381,8 +546,9 @@ function prepareOrder(state, event) {
       if (c.customerId !== customer.id) fail('Sipariş ve alış aynı müşteriye ait olmalı.');
       const capacity = scrapAdvanceSources(state, customer.id).get(c.purchaseId);
       if (!capacity || amount > capacity || amount > Math.max(0,-(state.balances[customer.id] || 0))) fail('Tutar alışın aktarılmamış tutarını veya müşteriye net borcumuzu aşıyor.');
-      order.advances.push({ id:event.id, receivedTL:amount, refundedTL:0, appliedTL:0, returnedToPayableTL:0, sourcePurchaseId:c.purchaseId });
+      order.advances.push({ id:event.id, unit:'TL', receivedTL:amount, refundedTL:0, appliedTL:0, creditedQuantity:amount, refundedQuantity:0, appliedQuantity:0, returnedToPayableTL:0, sourcePurchaseId:c.purchaseId });
       order.availableTL += amount;
+      order.availableQuantity += amount;
       if (!Number.isSafeInteger(order.availableTL) || order.availableTL > 1e12) fail('Avans toplamı sınırı aşıyor.');
       entries.push({ accountId:customer.id, delta:amount });
       Object.assign(meta,{ purchaseId:c.purchaseId, advanceId:event.id, sourceCapacityTL:capacity });
@@ -390,16 +556,56 @@ function prepareOrder(state, event) {
     } else {
       const advance = receipt(c.advanceId);
       if (!advance.sourcePurchaseId || amount > remaining(advance)) fail('Yalnız hurda borcundan ayrılmış kullanılmamış avans geri alınabilir.');
-      advance.returnedToPayableTL += amount;
+      advance.returnedToPayableTL = (advance.returnedToPayableTL || 0) + amount;
       order.availableTL -= amount;
+      order.availableQuantity -= amount;
       entries.push({ accountId:customer.id, delta:-amount });
       Object.assign(meta,{ purchaseId:advance.sourcePurchaseId, advanceId:advance.id });
       label = 'Hurda avansını müşteri borcumuza geri alma';
     }
     meta.customerBalanceBefore = state.balances[customer.id] || 0;
     meta.customerBalanceAfter = meta.customerBalanceBefore + entries[0].delta;
+  } else if (c.type === 'orderUpdate') {
+    if (original.status !== 'open') fail('Yalnız açık siparişler düzenlenebilir.');
+    const nextCategory = c.category !== undefined && c.category !== '' ? String(c.category).trim().toLowerCase() : (order.category || 'urun');
+    if (!ORDER_CATEGORIES.has(nextCategory)) fail('Geçerli bir sipariş kategorisi seçin.');
+    const nextUnit = c.orderUnit !== undefined && c.orderUnit !== '' ? orderUnitCheck(state, c.orderUnit) : orderUnit;
+    if (nextUnit !== orderUnit && (original.advances || []).length > 0) {
+      fail('Kapora alınmış siparişin takip birimi değiştirilemez.');
+    }
+    const rawProd = Object.hasOwn(c, 'productAccountId') ? c.productAccountId : (order.productAccountId || '');
+    const rawWeight = Object.hasOwn(c, 'weightAccountId') ? c.weightAccountId : (order.weightAccountId || '');
+    const { productAccountId, weightAccountId } = orderProductBinding(state, rawProd, rawWeight);
+    order.category = nextCategory;
+    order.orderUnit = nextUnit;
+    if (productAccountId) order.productAccountId = productAccountId; else delete order.productAccountId;
+    if (weightAccountId) order.weightAccountId = weightAccountId; else delete order.weightAccountId;
+    if (Object.hasOwn(c, 'description')) order.description = text(c.description, 'Sipariş açıklaması', 300);
+    if (Object.hasOwn(c, 'targetQuantity')) {
+      if (c.targetQuantity === '' || c.targetQuantity === null || c.targetQuantity === undefined) delete order.targetQuantity;
+      else order.targetQuantity = quantity(c.targetQuantity, nextUnit, { zero: false });
+    }
+    if (Object.hasOwn(c, 'deliveryDate')) {
+      if (c.deliveryDate === '' || c.deliveryDate === null || c.deliveryDate === undefined) delete order.deliveryDate;
+      else order.deliveryDate = validDate(c.deliveryDate);
+    }
+    if (Object.hasOwn(c, 'targetSpec')) {
+      const spec = optionalText(c.targetSpec, 'Hedef özellik / ayar', 80);
+      if (spec) order.targetSpec = spec; else delete order.targetSpec;
+    }
+    if (Object.hasOwn(c, 'estimatedTotalTL')) {
+      if (c.estimatedTotalTL === '' || c.estimatedTotalTL === null || c.estimatedTotalTL === undefined) delete order.estimatedTotalTL;
+      else order.estimatedTotalTL = quantity(c.estimatedTotalTL, 'TL', { zero: false });
+    }
+    meta.orderUnit = nextUnit;
+    meta.category = nextCategory;
+    meta.description = order.description;
+    if (productAccountId) meta.productAccountId = productAccountId;
+    if (weightAccountId) meta.weightAccountId = weightAccountId;
+    if (c.note) meta.note = optionalText(c.note, 'Düzenleme açıklaması');
+    label = 'Sipariş düzenleme';
   } else if (c.type === 'orderCancel') {
-    if (order.availableTL) fail('İptal öncesinde kullanılmamış avansı iade edin.');
+    if (order.availableTL || order.availableQuantity) fail('İptal öncesinde kullanılmamış avansı iade edin.');
     order.status = 'cancelled';
     order.cancelId = event.id;
     meta.note = text(c.note, 'İptal açıklaması');
@@ -408,41 +614,133 @@ function prepareOrder(state, event) {
     if (c.counterpartyType !== 'customer' || c.counterpartyId !== order.customerId) fail('Nihai satış siparişteki müşteriye bağlanmalı.');
     if (!Array.isArray(settlement.advances) || settlement.advances.length > 100) fail('Mahsup edilecek avans satırlarını seçin.');
     const seen = new Set();
+    let totalAppliedTL = 0;
     meta.advanceAllocations = settlement.advances.map(row => {
-      if (!row || typeof row !== 'object' || Array.isArray(row) || Object.keys(row).some(k => !['advanceId','amountTL'].includes(k)) || seen.has(row.advanceId)) fail('Her avans makbuzunu bir kez seçin.');
+      if (!row || typeof row !== 'object' || Array.isArray(row) || seen.has(row.advanceId)) fail('Her avans makbuzunu bir kez seçin.');
       const advance = receipt(row.advanceId);
-      const amount = quantity(row.amountTL, 'TL', { zero: false });
-      if (amount > remaining(advance)) fail('Mahsup tutarı kullanılabilir avansı aşıyor.');
-      advance.appliedTL += amount;
-      order.availableTL -= amount;
+      if (orderUnit === 'TL' && !Object.hasOwn(row, 'appliedQuantity') && !Object.hasOwn(row, 'appliedValueTL')) {
+        if (Object.keys(row).some(k => !['advanceId','amountTL'].includes(k))) fail('Avans mahsup alanları geçersiz.');
+        const amount = quantity(row.amountTL, 'TL', { zero: false });
+        if (amount > remaining(advance)) fail('Mahsup tutarı kullanılabilir avansı aşıyor.');
+        advance.appliedTL += amount;
+        if (advance.appliedQuantity !== undefined) advance.appliedQuantity += amount;
+        order.availableTL -= amount;
+        order.availableQuantity -= amount;
+        totalAppliedTL += amount;
+        seen.add(row.advanceId);
+        return { advanceId: advance.id, amountTL: amount };
+      }
+      if (Object.keys(row).some(k => !['advanceId','appliedQuantity','appliedValueTL'].includes(k))) fail('Çok birimli avans mahsup alanları geçersiz.');
+      const appliedQty = quantity(row.appliedQuantity, orderUnit, { zero: false });
+      if (appliedQty > remaining(advance)) fail('Mahsup miktarı kullanılabilir kaporayı aşıyor.');
+      const appliedValTL = orderUnit === 'TL' && (row.appliedValueTL === undefined || row.appliedValueTL === '')
+        ? appliedQty
+        : quantity(row.appliedValueTL, 'TL', { zero: false });
+      advance.appliedQuantity = (advance.appliedQuantity ?? advance.appliedTL ?? 0) + appliedQty;
+      if (orderUnit === 'TL') {
+        advance.appliedTL = (advance.appliedTL || 0) + appliedQty;
+        order.availableTL -= appliedQty;
+      }
+      order.availableQuantity -= appliedQty;
+      totalAppliedTL += appliedValTL;
+      if (!Number.isSafeInteger(totalAppliedTL) || totalAppliedTL > 1e12) fail('Mahsup TL toplamı sınırı aşıyor.');
       seen.add(row.advanceId);
-      return { advanceId: advance.id, amountTL: amount };
+      return { advanceId: advance.id, appliedQuantity: appliedQty, appliedValueTL: appliedValTL, amountTL: appliedValTL, unit: orderUnit };
     });
-    meta.advanceAppliedTL = original.availableTL - order.availableTL;
+    meta.advanceAppliedTL = totalAppliedTL;
     order.status = 'fulfilled';
     order.saleId = event.id;
-  } else {
-    const fund = moneyAccount(state, c.accountId);
-    if (fund.unit !== 'TL') fail('TL sipariş avansı için TL kasa veya banka seçin.');
-    const amount = quantity(c.amountTL, 'TL', { zero: false });
-    if (c.type === 'orderAdvance') {
-      order.advances.push({ id: event.id, receivedTL: amount, refundedTL: 0, appliedTL: 0 });
+  } else if (c.type === 'orderAdvance') {
+    const isV18 = Object.hasOwn(c, 'receivedQuantity') || Object.hasOwn(c, 'creditedQuantity') || orderUnit !== 'TL';
+    if (!isV18) {
+      const fund = moneyAccount(state, c.accountId);
+      if (fund.unit !== 'TL') fail('TL sipariş avansı için TL kasa veya banka seçin.');
+      const amount = quantity(c.amountTL, 'TL', { zero: false });
+      order.advances.push({ id: event.id, unit: 'TL', receivedTL: amount, refundedTL: 0, appliedTL: 0, creditedQuantity: amount, refundedQuantity: 0, appliedQuantity: 0 });
       order.availableTL += amount;
+      order.availableQuantity += amount;
       if (!Number.isSafeInteger(order.availableTL) || order.availableTL > 1e12) fail('Avans toplamı sınırı aşıyor.');
       entries.push({ accountId: fund.id, delta: amount });
       label = 'Sipariş avansı';
       meta.advanceId = event.id;
+      meta.amountTL = amount;
+      meta.fundAccountId = fund.id;
     } else {
-      const advance = receipt(c.advanceId);
+      const asset = orderAssetAccount(state, c.accountId);
+      const receivedQty = quantity(c.receivedQuantity, asset.unit, { zero: false });
+      const hasExplicitCredit = c.creditedQuantity !== undefined && c.creditedQuantity !== '';
+      if (asset.unit !== orderUnit && !hasExplicitCredit) {
+        fail(`Alınan varlık (${asset.unit}) sipariş biriminden (${orderUnit}) farklı; siparişe sayılan miktarı açıkça girin.`);
+      }
+      const creditedQty = hasExplicitCredit ? quantity(c.creditedQuantity, orderUnit, { zero: false }) : receivedQty;
+      order.availableQuantity += creditedQty;
+      if (orderUnit === 'TL') order.availableTL += creditedQty;
+      if (!Number.isSafeInteger(order.availableQuantity) || order.availableQuantity > 1e12) fail('Avans toplamı sınırı aşıyor.');
+      order.advances.push({
+        id: event.id,
+        unit: orderUnit,
+        receivedTL: orderUnit === 'TL' ? creditedQty : 0,
+        refundedTL: 0,
+        appliedTL: 0,
+        creditedQuantity: creditedQty,
+        refundedQuantity: 0,
+        appliedQuantity: 0,
+        receivedAccountId: asset.id,
+        receivedUnit: asset.unit,
+        receivedQuantity: receivedQty
+      });
+      entries.push(...orderAssetEntries(state, asset, receivedQty, +1, c.weightAccount, c.weight));
+      label = 'Sipariş kaporası';
+      meta.advanceId = event.id;
+      meta.fundAccountId = asset.id;
+      meta.receivedUnit = asset.unit;
+      meta.receivedQuantity = receivedQty;
+      meta.creditedQuantity = creditedQty;
+      if (orderUnit === 'TL') meta.amountTL = creditedQty;
+      if (c.note) meta.note = optionalText(c.note, 'Kapora açıklaması');
+    }
+  } else {
+    const isV18 = Object.hasOwn(c, 'refundedQuantity') || Object.hasOwn(c, 'creditedQuantity') || orderUnit !== 'TL';
+    const advance = receipt(c.advanceId);
+    if (!isV18) {
+      const fund = moneyAccount(state, c.accountId);
+      if (fund.unit !== 'TL') fail('TL sipariş avansı için TL kasa veya banka seçin.');
+      const amount = quantity(c.amountTL, 'TL', { zero: false });
       if (amount > remaining(advance)) fail('İade tutarı kullanılmamış avansı aşıyor.');
       advance.refundedTL += amount;
+      if (advance.refundedQuantity !== undefined) advance.refundedQuantity += amount;
       order.availableTL -= amount;
+      order.availableQuantity -= amount;
       entries.push({ accountId: fund.id, delta: -amount });
       label = 'Sipariş avansı iadesi';
       meta.advanceId = advance.id;
+      meta.amountTL = amount;
+      meta.fundAccountId = fund.id;
+    } else {
+      const asset = orderAssetAccount(state, c.accountId);
+      const refundedQty = quantity(c.refundedQuantity, asset.unit, { zero: false });
+      const hasExplicitCredit = c.creditedQuantity !== undefined && c.creditedQuantity !== '';
+      if (asset.unit !== orderUnit && !hasExplicitCredit) {
+        fail(`İade edilen varlık (${asset.unit}) sipariş biriminden (${orderUnit}) farklı; kapatılan kapora miktarını açıkça girin.`);
+      }
+      const creditedQty = hasExplicitCredit ? quantity(c.creditedQuantity, orderUnit, { zero: false }) : refundedQty;
+      if (creditedQty > remaining(advance)) fail('Kapatılan kapora miktarı makbuzdaki kullanılmamış tutarı aşıyor.');
+      advance.refundedQuantity = (advance.refundedQuantity ?? advance.refundedTL ?? 0) + creditedQty;
+      if (orderUnit === 'TL') {
+        advance.refundedTL = (advance.refundedTL || 0) + creditedQty;
+        order.availableTL -= creditedQty;
+      }
+      order.availableQuantity -= creditedQty;
+      entries.push(...orderAssetEntries(state, asset, refundedQty, -1, c.weightAccount, c.weight));
+      label = 'Sipariş kaporası iadesi';
+      meta.advanceId = advance.id;
+      meta.fundAccountId = asset.id;
+      meta.refundedUnit = asset.unit;
+      meta.refundedQuantity = refundedQty;
+      meta.creditedQuantity = creditedQty;
+      if (orderUnit === 'TL') meta.amountTL = creditedQty;
+      if (c.note) meta.note = optionalText(c.note, 'İade açıklaması');
     }
-    meta.amountTL = amount;
-    meta.fundAccountId = fund.id;
   }
   return { orders: orders.map(o => o === original ? order : o), meta, entries, label };
 }
@@ -493,7 +791,15 @@ export function eventActor(event) {
     || !['employee', 'owner'].includes(role) || text(name, 'İşlem sahibi') !== name) fail('İşlem sahibi bilgisi geçersiz.');
   if (role === 'employee' && !['sale', 'purchase'].includes(event.command.type) && !isWorkerCustomerCreation(event.command)) fail('Bu işlem yönetici yetkisi gerektirir.');
   if (['stocktake', 'close'].includes(event.command.type) && event.command.approvedBy !== name) fail('Sayım onayı işlem sahibiyle eşleşmiyor.');
-  return { id, name, role };
+  const result = { id, name, role };
+  if (audit.submittedBy && typeof audit.submittedBy === 'object' && !Array.isArray(audit.submittedBy)) {
+    const sid = audit.submittedBy.id, sname = audit.submittedBy.name;
+    if (typeof sid !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sid)
+      || text(sname, 'Tezgâh çalışanı') !== sname) fail('Tezgâh çalışanı bilgisi geçersiz.');
+    result.submittedBy = { id: sid, name: sname };
+    if (audit.wasEdited === true) result.wasEdited = true;
+  }
+  return result;
 }
 
 // Legacy scalar trades could name a customer even when paid entirely in cash.
@@ -585,14 +891,15 @@ export function priorScrapChoices(state, saleId, resolveParty = scrapCustomerRes
 }
 
 export function applyEvent(previous, event, replayContext, validationMode, exchangeAppliedTL = 0) {
-  if ((event?.schemaVersion === 17) !== isSupplierCommand(event?.command)) fail('Toptancı işlemi için geçerli olay sürümü gerekli.');
+  if ((event?.schemaVersion === 17 && !isSupplierCommand(event?.command)) || (isSupplierCommand(event?.command) && ![17, 18].includes(event?.schemaVersion))) fail('Toptancı işlemi için geçerli olay sürümü gerekli.');
   if (event?.schemaVersion === 10) {
     // Validate optional data before applying any stock, cash or revision changes.
-    if (![3, 5, 6, 7, 8, 11].includes(event.tradeVersion) || !event.command) fail('Fiyatlı satışın temel olay sürümü geçersiz.');
+    if (![3, 5, 6, 7, 8, 11, 18].includes(event.tradeVersion) || !event.command) fail('Fiyatlı satışın temel olay sürümü geçersiz.');
     const base = underlyingSaleCommand(event.command);
     let expectedVersion = financialVersion(base, previous);
     if (event.tradeVersion === 8 && usesInventory(base)) expectedVersion = 8;
     if (event.tradeVersion === 11 && orderFeature(base)) expectedVersion = 11;
+    if (event.tradeVersion === 18 && usesV18OrderFeature(base)) expectedVersion = 18;
     if (event.tradeVersion !== expectedVersion) fail('Satış biçimi kayıtlı temel olay sürümüyle eşleşmiyor.');
     const sale = event.command.type === 'amend' ? event.command.replacement : event.command;
     const snapshots = salePriceSnapshot(sale);
@@ -615,8 +922,8 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
   }
   if ((event.schemaVersion === 16) !== scrapAdvanceTypes.has(event.command.type)) fail('Hurda borcu avans aktarımı için geçerli olay sürümü gerekli.');
   if (event.schemaVersion === 16) event = { ...event, schemaVersion:11 };
-  const orderItem = event.schemaVersion === 11 && usesInventory(event.command);
-  if (event.schemaVersion === 11 && Object.hasOwn(event,'saleInventoryVersion') && (event.saleInventoryVersion !== 1 || !orderItem)) {
+  const orderItem = (event.schemaVersion === 11 || (event.schemaVersion === 18 && orderFeature(event.command))) && usesInventory(event.command);
+  if ((event.schemaVersion === 11 || (event.schemaVersion === 18 && orderFeature(event.command))) && Object.hasOwn(event,'saleInventoryVersion') && (event.saleInventoryVersion !== 1 || !orderItem)) {
     fail('Sipariş satışının tekil ürün sürümü geçersiz.');
   }
   // Early order-only ledgers had no serialized stock. The first combined writer
@@ -626,12 +933,12 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
     if (!usesInventory(event.command)) fail('Tekil ürün için geçersiz olay sürümü.');
     event = { ...event, schemaVersion: event.command.type === 'saleReturn' ? 9 : financialVersion(event.command, s) };
   }
-  if (event.schemaVersion !== undefined && ![2, 3, 4, 5, 6, 7, 9, 11, 12, 14, 17].includes(event.schemaVersion)) fail('Desteklenmeyen olay sürümü.');
-  if ((event.schemaVersion === 11 && !orderFeature(event.command)) || (orderTypes.has(event.command.type) && event.schemaVersion !== 11)) fail('Sipariş işlemi için güncel olay sürümü gerekli.');
-  if (event.schemaVersion === 11 && event.audit?.actor?.role === 'employee') fail('Sipariş işlemi için yönetici gerekli.');
+  if (event.schemaVersion !== undefined && ![2, 3, 4, 5, 6, 7, 9, 11, 12, 14, 17, 18].includes(event.schemaVersion)) fail('Desteklenmeyen olay sürümü.');
+  if ((event.schemaVersion === 11 && !orderFeature(event.command)) || (orderTypes.has(event.command.type) && ![11, 18].includes(event.schemaVersion))) fail('Sipariş işlemi için güncel olay sürümü gerekli.');
+  if ((event.schemaVersion === 11 || (event.schemaVersion === 18 && orderFeature(event.command))) && event.audit?.actor?.role === 'employee') fail('Sipariş işlemi için yönetici gerekli.');
   if ((event.schemaVersion === 12) !== (event.command.type === 'linkScrapPurchase')) fail('Hurda alış bağlantısı için olay sürümü geçersiz.');
   if (event.schemaVersion === 9 && (event.command.type !== 'saleReturn' || !Object.hasOwn(event.command, 'outgoing'))) fail('Karma iade karşılıkları gerekli.');
-  if (![7, 9, 14, 17].includes(event.schemaVersion) && supplierUnitFeature(event.command, s)) fail('Bağlı toptancı veya saf gümüş için güncel olay sürümü gerekli.');
+  if (![7, 9, 14, 17, 18].includes(event.schemaVersion) && supplierUnitFeature(event.command, s)) fail('Bağlı toptancı veya saf gümüş için güncel olay sürümü gerekli.');
   if (event.schemaVersion === 7 && !supplierUnitFeature(event.command, s)) fail('Bu işlem için desteklenmeyen olay sürümü.');
   if (event.schemaVersion === 4 && !['close', 'settlement', 'saleReturn'].includes(event.command.type)) fail('Bu işlem için desteklenmeyen olay sürümü.');
   if (event.schemaVersion === 5 && legacyEventVersion(event.command, s) !== 5) fail('Bu işlem için desteklenmeyen olay sürümü.');
@@ -711,10 +1018,13 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
   } else {
     if (!s.initialized) fail('Önce başlangıç devrini onaylayın.');
     if (c.date !== s.date) fail('İşlem yalnız açık iş gününe yazılabilir. Ekranı yenileyin.');
-    if (event.schemaVersion === 11) orderChange = prepareOrder(s, event);
-    if (event.schemaVersion === 17) {
-      supplierChange = prepareSupplier(s,event,{stockLines,moneyAccount,partyProfile,optionalText});
+    if (event.schemaVersion === 11 || (event.schemaVersion === 18 && orderFeature(c))) orderChange = prepareOrder(s, event);
+    if (event.schemaVersion === 17 || (event.schemaVersion === 18 && isSupplierCommand(c))) {
+      supplierChange = prepareSupplier(s,event,{stockLines,moneyAccount,partyProfile,optionalText,isReplay:Boolean(replayContext)});
       ({entries,meta,label} = supplierChange);
+      if (supplierChange.addAccounts?.length) {
+        for (const acc of supplierChange.addAccounts) { s.accounts.push(acc); indexAddAccount(s.accounts, acc); }
+      }
       if (supplierChange.addAccount) { s.accounts.push(supplierChange.addAccount); indexAddAccount(s.accounts, supplierChange.addAccount); }
       else if (supplierChange.accounts) s.accounts = supplierChange.accounts;
     } else if (orderTypes.has(c.type)) {
@@ -783,10 +1093,21 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
       if (typeof c.physical !== 'boolean') fail('Fiziki kasa veya banka/diğer hesap seçin.');
       if (unit === 'SILVER' && !c.physical) fail('Saf gümüş için fiziki kasa veya cari hesap kullanın.');
       if (getAccountIndex(s.accounts).assetUnitNameTr.has(`${unit}\0${name.toLocaleLowerCase('tr')}`)) fail('Bu ad ve birimde ödeme hesabı zaten var.');
-      const a = { id: `fund-${event.id}`, name, unit, physical: c.physical, countPolicy: c.physical ? ['HAS', 'SILVER'].includes(unit) ? 'periodic' : 'daily' : 'none', countGroup: c.physical && unit === 'HAS' ? 'ana-terazi' : 'gunluk', kind: 'asset', retired: false, isSaleable: false, isPurchasable: false, pairedGroups: [], owner: 'işletme', location: c.physical ? 'dükkân' : 'finansal hesap' };
+      const a = { id: `fund-${event.id}`, name, unit, physical: c.physical, countPolicy: c.physical ? unit === 'HAS' ? 'periodic' : 'daily' : 'none', countGroup: c.physical && unit === 'HAS' ? 'ana-terazi' : 'gunluk', kind: 'asset', retired: false, isSaleable: false, isPurchasable: false, pairedGroups: [], owner: 'işletme', location: c.physical ? 'dükkân' : 'finansal hesap' };
       s.accounts.push(a); indexAddAccount(s.accounts, a);
       entries = [{ accountId: a.id, delta: quantity(c.opening, unit) }];
-      label = 'Ödeme hesabı açılışı'; meta = { accountId: a.id, note: 'Özgün birim bakiyesiyle yeni ödeme hesabı açıldı.' };
+      const createdSupplierUnitIds = [];
+      if (event.schemaVersion === 18 && c.autoSupplierUnits === true) {
+        for (const firm of supplierFirms(s)) {
+          const firmIds = new Set(supplierAccountIds(s, firm.id));
+          if (s.accounts.some(other => firmIds.has(other.id) && other.unit === unit)) continue;
+          const unitAcc = { id: `supplier-unit-${event.id}-${firm.id}-${unit}`, name: firm.name, unit, physical: false, kind: 'receivable', partyType: 'supplier', supplierId: firm.id, phone: firm.phone, taxId: firm.taxId, address: firm.address, owner: 'işletme', location: 'cari hesap' };
+          s.accounts.push(unitAcc); indexAddAccount(s.accounts, unitAcc);
+          entries.push({ accountId: unitAcc.id, delta: 0 });
+          createdSupplierUnitIds.push(unitAcc.id);
+        }
+      }
+      label = 'Ödeme hesabı açılışı'; meta = { accountId: a.id, ...(createdSupplierUnitIds.length ? { createdAccountIds: createdSupplierUnitIds } : {}), note: 'Özgün birim bakiyesiyle yeni ödeme hesabı açıldı.' };
     } else if (c.type === 'account') {
       const parent = Object.hasOwn(c, 'parentAccountId') ? account(s, text(c.parentAccountId, 'Ana toptancı hesabı', 160)) : null;
       if (parent && (parent.kind !== 'receivable' || parent.partyType !== 'supplier' || parent.parentAccountId)) fail('Alt hesap için ana toptancı hesabını seçin.');
@@ -812,10 +1133,10 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
         const result = stockLines(s, c.items, -1, true, event.schemaVersion);
         entries = result.entries; lines = result.lines; total = result.total;
       }
-      if ([6, 7, 11].includes(event.schemaVersion)) {
+      if ([6, 7, 11, 18].includes(event.schemaVersion)) {
         const applied = orderChange?.meta.advanceAppliedTL || 0;
-        if (applied > total) fail('Avans mahsubu satış bedelini aşamaz.');
-        const exchange = exchangeTrade(s, c, total - exchangeAppliedTL, false, event.schemaVersion === 7, applied);
+        if (applied > total && event.schemaVersion !== 18) fail('Avans mahsubu satış bedelini aşamaz.');
+        const exchange = exchangeTrade(s, c, total - exchangeAppliedTL, false, [7, 18].includes(event.schemaVersion), applied);
         entries.push(...exchange.entries);
         label = 'Karma satış'; meta = { revenue: total, lines, scrapValue: 0, scrapLines: [], costKnown: false, ...exchange.meta, note: note('İşlem açıklaması') };
       } else {
@@ -1028,9 +1349,10 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
       entries = original.entries.map(e => ({ ...e, delta: -e.delta }));
       label = original.type === 'linkScrapPurchase' ? 'Hurda alış bağlantısı iptali' : 'Bağlı ters kayıt'; meta = { originalId: original.id, ...(original.meta.counterpartyId ? { counterpartyId: original.meta.counterpartyId } : {}), revenue: -(original.meta.revenue || 0), purchaseTotal: -(original.meta.purchaseTotal || 0), expense: -(original.meta.expense || 0), note: text(c.note, 'İptal/ters kayıt gerekçesi') };
     } else if (c.type === 'stocktake') {
-      if (![3, 6, 7].includes(event.schemaVersion)) fail('Dönemsel tartım için güncel sürüm gerekli.');
+      if (![3, 6, 7, 18].includes(event.schemaVersion)) fail('Dönemsel tartım için güncel sürüm gerekli.');
       const selected = Object.keys(c.counts || {});
-      const allowed = getAccountIndex(s.accounts).physicalAccounts.filter(a => !a.retired && ([6, 7].includes(event.schemaVersion) ? currentCountPolicy(a) : a.countPolicy) === 'periodic');
+      const policy = a => event.schemaVersion === 18 ? currentCountPolicy(a) : [6, 7].includes(event.schemaVersion) ? (a.unit === 'SILVER' ? a.countPolicy : currentCountPolicy(a)) : a.countPolicy;
+      const allowed = getAccountIndex(s.accounts).physicalAccounts.filter(a => !a.retired && policy(a) === 'periodic');
       if (!selected.length || typeof c.counts !== 'object' || Array.isArray(c.counts) || selected.some(id => !allowed.some(a => a.id === id))) fail('Yalnız tartılan dönemsel gram hesaplarını seçin; en az bir tartım gerekli.');
       const rows = [];
       for (const id of selected) {
@@ -1045,7 +1367,7 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
     } else if (c.type === 'close') {
       const modern = event.schemaVersion >= 3;
       if (modern && s.nominalUnconfirmed) fail('Gün kapanışından önce gram altının mevcut toplamını açıkça onaylayın.');
-      const policy = a => [6, 7].includes(event.schemaVersion) ? currentCountPolicy(a) : a.countPolicy;
+      const policy = a => event.schemaVersion === 18 ? currentCountPolicy(a) : [6, 7].includes(event.schemaVersion) ? (a.unit === 'SILVER' ? a.countPolicy : currentCountPolicy(a)) : a.countPolicy;
       const allowed = getAccountIndex(s.accounts).physicalAccounts.filter(a => !modern || (!a.retired && policy(a) === 'daily'));
       if (!c.counts || typeof c.counts !== 'object' || Array.isArray(c.counts) || Object.keys(c.counts).some(id => !allowed.some(a => a.id === id))) fail('Günlük sayım hesapları geçersiz. Terazi gramları için dönemsel tartım formunu kullanın.');
       const countRows = [];
@@ -1079,7 +1401,7 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
   }
   if (supplierChange?.firms) s.supplierFirms = supplierChange.firms;
   let editableCommand;
-  if(event.schemaVersion===17 && ['supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierReturn'].includes(c.type)) editableCommand=structuredClone(c);
+  if([17,18].includes(event.schemaVersion) && ['supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierReturn'].includes(c.type)) editableCommand=structuredClone(c);
   if (!orderChange && editableTypes.has(c.type) && !(c.type === 'sale' && !c.items)) {
     editableCommand = structuredClone(c);
     if (c.type === 'sale') {
@@ -1104,7 +1426,11 @@ export function workdaySummary(state, date = state.date) {
   if (!state.initialized) fail('Önce başlangıç devrini onaylayın.');
   validDate(date);
   if (date < state.journal[0].date || date > state.date) fail('Özet tarihi başlangıç ile açık iş günü arasında olmalı.');
-  const created = new Map(state.journal.filter(e => ['account', 'fundAccount', 'stockAccount', 'supplierUnit'].includes(e.type) && e.meta?.accountId).map(e => [e.meta.accountId, e.date]));
+  const created = new Map();
+  for (const e of state.journal) {
+    if (['account', 'fundAccount', 'stockAccount', 'supplierUnit'].includes(e.type) && e.meta?.accountId) created.set(e.meta.accountId, e.date);
+    if (Array.isArray(e.meta?.createdAccountIds)) for (const id of e.meta.createdAccountIds) created.set(id, e.date);
+  }
   const rows = new Map(state.accounts.filter(a => !created.has(a.id) || created.get(a.id) <= date).map(a => [a.id, { accountId: a.id, unit: a.unit, opening: 0, incoming: 0, outgoing: 0, adjustment: 0, closing: 0 }]));
   const adjIds = new Set();
   const totals = { sales: 0, purchases: 0 };

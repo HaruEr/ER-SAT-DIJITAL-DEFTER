@@ -331,9 +331,10 @@ test('T5-8. Turkish folding matches tr-TR uppercased XSS strings safely via text
       method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     });
   };
-  const owner = await (await send('/api/auth/setup', null, { name: 'Sahip', password: 'example-owner-test-2026' })).json();
-  const emp = await (await send('/api/auth/employees', owner.token, { name: 'Tezgahtar', password: 'example-worker-test-2026' })).json();
-  const worker = await (await send('/api/auth/login', null, { id: emp.id, password: 'example-worker-test-2026' })).json();
+  const owner = await (await send('/api/auth/setup', null, { name: 'Sahip', pin: '102030' })).json();
+  const emp = await (await send('/api/auth/employees', owner.token, { name: 'Tezgahtar', pin: '405060' })).json();
+  const worker = await (await send('/api/auth/login', null, { id: emp.id, pin: '405060' })).json();
+  assert.equal((await send('/api/auth/change-pin', worker.token, { currentPin: '405060', newPin: '708090' })).status, 200);
   const st = await (await send('/api/state', owner.token)).json();
   const openRes = await (await send('/api/command', owner.token, {
     id: randomUUID(), revision: st.revision,
@@ -452,9 +453,10 @@ async function bootLiveServerPart2(t, { withManyStocks = false } = {}) {
     return { status: res.status, data: await res.json() };
   };
 
-  const owner = (await req('/api/auth/setup', null, { name: 'Patron', password: 'example-owner-test-2026' })).data;
-  const empInfo = (await req('/api/auth/employees', owner.token, { name: 'Tezgahtar', password: 'example-emp-test-2026' })).data;
-  const emp = (await req('/api/auth/login', null, { id: empInfo.id, password: 'example-emp-test-2026' })).data;
+  const owner = (await req('/api/auth/setup', null, { name: 'Patron', pin: '112233' })).data;
+  const empInfo = (await req('/api/auth/employees', owner.token, { name: 'Tezgahtar', pin: '445566' })).data;
+  const emp = (await req('/api/auth/login', null, { id: empInfo.id, pin: '445566' })).data;
+  await req('/api/auth/change-pin', emp.token, { currentPin: '445566', newPin: '778899' });
 
   let st = (await req('/api/state', owner.token)).data;
   const balances = Object.fromEntries(st.accounts.filter(a => !a.retired).map(a => [

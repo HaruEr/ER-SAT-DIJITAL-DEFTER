@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { Repository, BACKUP_MAX_BYTES } from './repository.mjs';
-import { DomainError, fail } from './domain.mjs';
+import { DomainError, fail, isWorkerCustomerCreation } from './domain.mjs';
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const diagnosticCodes = new Set(['EACCES', 'EPERM', 'ENOENT', 'ENOSPC', 'EIO', 'EMFILE', 'ENFILE', 'ERR_SQLITE_ERROR', 'SQLITE_BUSY', 'SQLITE_LOCKED', 'SQLITE_CORRUPT', 'SQLITE_FULL', 'SQLITE_CANTOPEN', 'SQLITE_IOERR', 'BACKUP_HISTORY_INVALID', 'STORED_HISTORY_INVALID']);
 const operations = new Map(['state', 'summary', 'backup', 'command', 'restore', 'recovery'].map(name => [`/api/${name}`, name]));
@@ -116,30 +116,44 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
         token = downloads.consume(url.searchParams.get('ticket'), operation, requestedWorkspace);
       }
       if (url.pathname === '/api/auth/users' && req.method === 'GET') {
-        return json(200, { setup: identities.needsSetup(), users: identities.listUsers() });
+        const currentActor = identities.session(token);
+        const canList = Boolean(currentActor && currentActor.role === 'owner' && !currentActor.mustChangePin);
+        return json(200, { setup: identities.needsSetup(), users: canList ? identities.listUsers() : [] });
       }
       const authAction = url.pathname.slice('/api/auth/'.length);
       if (url.pathname.startsWith('/api/auth/')) {
         if (authAction === 'session' && req.method === 'GET') return json(200, requireSession(identities, token));
-        if (req.method !== 'POST' || !['setup','login','logout','employees','disable'].includes(authAction)) {
+        if (req.method !== 'POST' || !['setup','login','logout','employees','disable','change-pin','reset-pin','rename'].includes(authAction)) {
           return json(404, { error: 'İşlem bulunamadı.' });
         }
-        if (['employees','disable','logout'].includes(authAction)) {
+        if (['employees','disable','reset-pin','rename','logout','change-pin'].includes(authAction)) {
           const actor = requireSession(identities, token);
-          if (authAction !== 'logout' && actor.role !== 'owner') deny();
+          if (['employees','disable','reset-pin','rename'].includes(authAction) && (actor.role !== 'owner' || actor.mustChangePin)) deny();
         }
         if (req.headers['content-type']?.split(';')[0].trim() !== 'application/json') return json(415, { error: 'JSON içeriği gerekli.' });
         const data = await readJson(8192);
         if (!data) return;
         if (authAction === 'logout') { identities.logout(token); return json(200, { ok: true }); }
+        if (authAction === 'change-pin') return json(200, { actor: await identities.changePin(token, data) });
+        if (authAction === 'reset-pin') return json(200, await identities.resetEmployeePin(token, data));
+        if (authAction === 'rename') return json(200, { user: identities.renameUser(token, data) });
         if (authAction === 'employees') return json(201, await identities.createEmployee(token, data));
         if (authAction === 'disable') { identities.disableUser(token, data.id); return json(200, { ok: true }); }
-        const id = authAction === 'setup' ? (await identities.initializeOwner(data)).id : data.id;
-        const session = await identities.login(id, data.password);
-        if (!session) return json(401, { error: 'Giriş başarısız. Kullanıcı ve parolayı kontrol edip daha sonra yeniden deneyin.' });
+        const pin = data.pin ?? data.password;
+        let session;
+        if (authAction === 'setup') {
+          const owner = await identities.initializeOwner(data);
+          session = await identities.login(owner.id, pin);
+        } else if (typeof data.id === 'string' && data.id.trim()) {
+          session = await identities.login(data.id, pin);
+        } else {
+          session = await identities.loginByName(data.name, pin);
+        }
+        if (!session) return json(401, { error: 'Giriş başarısız. Kullanıcı adı ve 6 haneli PIN kodunu kontrol edip yeniden deneyin.' });
         return json(authAction === 'setup' ? 201 : 200, session);
       }
       let actor = requireSession(identities, token);
+      if (actor.mustChangePin) return json(403, { error: 'Devam etmek için geçici PIN kodunuzu değiştirmeniz gerekiyor.', code: 'PIN_CHANGE_REQUIRED' });
       const revokeForRestore = () => {
         if (requireSession(identities, token).role !== 'owner') deny();
         // Invalidate before financial COMMIT: a process crash must not preserve a stale writer.
@@ -147,8 +161,57 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
       };
       const worker = actor.role === 'employee';
       if (actor.role !== 'owner' && !worker) deny();
-      if (worker && !(req.method === 'POST' && operation === 'command') &&
-          !(req.method === 'GET' && ['/api/checkout','/api/customers'].includes(url.pathname))) deny();
+      if (worker && !(req.method === 'POST' && (operation === 'command' || url.pathname === '/api/pending-approvals')) &&
+          !(req.method === 'GET' && ['/api/checkout','/api/customers','/api/pending-approvals'].includes(url.pathname))) deny();
+      if (req.method === 'GET' && url.pathname === '/api/pending-approvals') {
+        const repository = repo(requestedWorkspace);
+        const userNamesById = new Map(identities.listUsers().map(u => [u.id, u.name]));
+        if (worker) {
+          const items = repository.listPending({ status: 'all', submittedById: actor.id, limit: 30, userNamesById });
+          return json(200, { items });
+        }
+        const status = url.searchParams.get('status') || 'pending';
+        const submittedById = url.searchParams.get('employeeId') || '';
+        const type = url.searchParams.get('type') || 'all';
+        const startDate = url.searchParams.get('startDate') || '';
+        const endDate = url.searchParams.get('endDate') || '';
+        const summaryOnly = url.searchParams.get('summary') === '1';
+        const pendingCount = repository.pendingCount();
+        if (summaryOnly) return json(200, { pendingCount });
+        const items = repository.listPending({ status, submittedById, type, startDate, endDate, limit: 200, userNamesById, includeComparison: true });
+        const analytics = repository.employeeAnalytics({ submittedById, startDate, endDate, userNamesById });
+        const knownEmployees = new Map();
+        for (const u of identities.listUsers()) if (u.id !== actor.id) knownEmployees.set(u.id, u.name);
+        for (const emp of analytics.byEmployee) if (!knownEmployees.has(emp.id)) knownEmployees.set(emp.id, emp.name);
+        const employees = [...knownEmployees.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, 'tr'));
+        return json(200, { pendingCount, items, analytics, employees });
+      }
+      if (req.method === 'POST' && ['/api/pending-approvals', '/api/pending-approvals/approve', '/api/pending-approvals/reject'].includes(url.pathname)) {
+        if (!req.headers['content-type']?.startsWith('application/json')) return json(415, { error: 'JSON içeriği gerekli.' });
+        const data = await readJson(2 * 1024 * 1024);
+        if (!data) return;
+        actor = requireSession(identities, token);
+        const repository = repo(requestedWorkspace);
+        if (url.pathname === '/api/pending-approvals') {
+          if (data.command?.type === 'dailyCount') {
+            const submitted = repository.submitPending(data, { actor });
+            return json(201, submitted);
+          }
+          requireWorkerTrade(data.command);
+          if (data.command?.type === 'account') fail('Yeni müşteri kartı doğrudan kaydedilir.');
+          requireWorkerAccounts(data.command, repository.state({ compact: true }));
+          const submitted = repository.submitPending(data, { actor });
+          return json(201, submitted);
+        }
+        if (actor.role !== 'owner') deny();
+        if (url.pathname === '/api/pending-approvals/approve') {
+          const compact = url.searchParams.get('view') === 'compact';
+          const result = repository.approvePending({ id: data.id, commandOverride: data.command || null, revision: data.revision, actor }, { compact });
+          result.state.pendingApprovalCount = repository.pendingCount();
+          return json(200, result);
+        }
+        return json(200, repository.rejectPending({ id: data.id, reason: data.reason, actor }));
+      }
       if (req.method === 'POST' && url.pathname === '/api/download-ticket') {
         if (req.headers['content-type']?.split(';')[0].trim() !== 'application/json') return json(415, { error: 'JSON içeriği gerekli.' });
         const data = await readJson(1024);
@@ -159,7 +222,7 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
       // Defer opening financial files until write authorization is decided.
       const repository = operation === 'command' ? null : repo(requestedWorkspace);
       if (req.method === 'GET' && url.pathname === '/api/item-photo') return json(200, repository.itemPhoto(url.searchParams.get('code')));
-      if (req.method === 'GET' && url.pathname === '/api/checkout') return json(200, checkoutState(repository.state({ compact: true })));
+      if (req.method === 'GET' && url.pathname === '/api/checkout') return json(200, checkoutState(repository.state({ compact: true }), { hidePrivatePools: worker }));
       if (req.method === 'GET' && url.pathname === '/api/customers') {
         const state = repository.state({ compact:true });
         if (url.searchParams.has('id')) return json(200, customerDetail(state, url.searchParams.get('id')));
@@ -170,7 +233,11 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
         return json(200, customerChoices(state, url.searchParams.get('q') || '', { limit, meta }));
       }
       const compact = url.searchParams.get('view') === 'compact';
-      if (req.method === 'GET' && url.pathname === '/api/state') return json(200, repository.state({ compact }));
+      if (req.method === 'GET' && url.pathname === '/api/state') {
+        const st = repository.state({ compact });
+        if (compact) st.pendingApprovalCount = repository.pendingCount();
+        return json(200, st);
+      }
       if (req.method === 'GET' && url.pathname === '/api/suppliers') {
         const limit = url.searchParams.get('limit');
         if (limit !== null && !/^\d+$/.test(limit)) fail('Geçerli sayfa boyutu seçin.');
@@ -181,7 +248,7 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
       if (req.method === 'GET' && url.pathname === '/api/journal') {
         const limit = url.searchParams.get('limit');
         if (limit !== null && !/^\d+$/.test(limit)) fail('Geçerli defter sayfa boyutu seçin.');
-        return json(200, repository.journalPage({ scope: url.searchParams.get('scope') || 'today', q: url.searchParams.get('q') || '', type: url.searchParams.get('type') || 'all', limit: limit === null ? 50 : Number(limit), cursor: url.searchParams.get('cursor') || undefined, startDate: url.searchParams.get('startDate') || '', endDate: url.searchParams.get('endDate') || '', accountId: url.searchParams.get('accountId') || '', scrapForSale:url.searchParams.get('scrapForSale') || '', scrapForAdvance:url.searchParams.get('scrapForAdvance') || '' }));
+        return json(200, repository.journalPage({ scope: url.searchParams.get('scope') || 'today', q: url.searchParams.get('q') || '', type: url.searchParams.get('type') || 'all', limit: limit === null ? 50 : Number(limit), cursor: url.searchParams.get('cursor') || undefined, startDate: url.searchParams.get('startDate') || '', endDate: url.searchParams.get('endDate') || '', accountId: url.searchParams.get('accountId') || '', unit: url.searchParams.get('unit') || '', status: url.searchParams.get('status') || 'all', scrapForSale:url.searchParams.get('scrapForSale') || '', scrapForAdvance:url.searchParams.get('scrapForAdvance') || '' }));
       }
       if (req.method === 'GET' && url.pathname === '/api/account-statement') return json(200, repository.accountStatement({ accountId: url.searchParams.get('accountId') || '', startDate: url.searchParams.get('startDate') || '', endDate: url.searchParams.get('endDate') || '' }));
       if (req.method === 'GET' && url.pathname === '/api/recovery') return json(200, repository.recoveryInfo());
@@ -232,10 +299,19 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
       if (!data) return;
       actor = requireSession(identities, token);
       if (url.pathname === '/api/command') {
-        if (worker) requireWorkerTrade(data.command);
+        if (worker) {
+          if (!isWorkerCustomerCreation(data.command)) {
+            return json(403, { error: 'Çalışan satış ve alış işlemleri doğrudan deftere işlenemez; Yönetici Onay Kuyruğuna gönderilmelidir.', code: 'APPROVAL_REQUIRED' });
+          }
+          requireWorkerTrade(data.command);
+        }
         const repository = repo(requestedWorkspace);
+        if (!worker && data.command?.type === 'close' && repository.pendingCount() > 0) {
+          return json(409, { error: 'Onay bekleyen çalışan işlemleri var. Gün kapanışından önce Onay Bekleyenler ekranından tüm bildirimleri onaylayın veya reddedin.', code: 'PENDING_APPROVALS_EXIST' });
+        }
         if (worker) requireWorkerAccounts(data.command, repository.state({ compact: true }));
         const result = repository.execute(data, { compact: compact || worker, actor });
+        if (!worker && compact && result?.state) result.state.pendingApprovalCount = repository.pendingCount();
         if (worker) {
           const account = data.command.type === 'account' ? result.state.accounts.find(a => a.id === 'cari-' + data.id) : null;
           return json(200, { id:data.id, revision:result.state.revision, duplicate:result.duplicate,

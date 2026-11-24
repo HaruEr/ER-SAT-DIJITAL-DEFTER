@@ -33,8 +33,8 @@ test('Faz 8 sign-in and employee accounts in a real browser', { skip, timeout: 1
       assert.deepEqual(state, { fits: true, glass: true, drift: ['defter-bg-drift'], minHeight: '0px', layerVisible: true });
     });
 
-    await t.test('sign-in behaviour is unchanged: wrong password clears the field and shows the error', async () => {
-      await evaluate(`(() => { document.querySelector('#password').value = 'yanlış parola deneme'; document.querySelector('#login').requestSubmit(); return true; })()`);
+    await t.test('sign-in behaviour is unchanged: wrong PIN clears the field and shows the error', async () => {
+      await evaluate(`(() => { document.querySelector('#user').value = ${JSON.stringify(OWNER_NAME)}; document.querySelector('#password').value = '000000'; document.querySelector('#login').requestSubmit(); return true; })()`);
       await until(`document.querySelector('#feedback').textContent.length > 0`, 5000);
       const state = await evaluate(`({ password: document.querySelector('#password').value, path: location.pathname, feedback: document.querySelector('#feedback').getAttribute('role') })`);
       assert.deepEqual(state, { password: '', path: '/', feedback: 'alert' });
@@ -62,7 +62,7 @@ test('Faz 8 sign-in and employee accounts in a real browser', { skip, timeout: 1
         return {
           names: cards.map(c => c.querySelector('strong').textContent),
           initials: cards.map(c => c.querySelector('.employee-avatar').textContent),
-          action: cards[0]?.querySelector('button')?.getAttribute('aria-label'),
+          action: cards[0]?.querySelector('button[aria-label*="erişimi kapat"]')?.getAttribute('aria-label'),
           formShown: getComputedStyle(document.querySelector('#disable')).display !== 'none',
           formInPage: Boolean(document.querySelector('#disable select option')),
           cardFits: document.querySelector('main.access-card').getBoundingClientRect().height < 900
@@ -75,7 +75,8 @@ test('Faz 8 sign-in and employee accounts in a real browser', { skip, timeout: 1
       await evaluate(`(() => {
         const f = document.querySelector('#employee');
         f.querySelector('[name="name"]').value = 'Deneme Kasiyer';
-        f.querySelector('[name="password"]').value = 'deneme kasiyer parolası 123';
+        f.querySelector('[name="pin"]').value = '654321';
+        f.querySelector('[name="pinConfirm"]').value = '654321';
         f.requestSubmit();
         return true;
       })()`);
@@ -103,7 +104,8 @@ test('Faz 8 sign-in and employee accounts in a real browser', { skip, timeout: 1
 
     await t.test('the disabled employee can no longer sign in (same server rule)', async () => {
       const result = await evaluate(`(async () => {
-        const users = await (await fetch('/api/auth/users')).json();
+        const session = JSON.parse(sessionStorage.getItem('defter-session'));
+        const users = await (await fetch('/api/auth/users', { headers: { Authorization: 'Bearer ' + session.token } })).json();
         return users.users.map(u => u.name);
       })()`);
       assert.equal(result.includes('Deneme Kasiyer'), false);
