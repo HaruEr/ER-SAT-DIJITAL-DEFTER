@@ -262,6 +262,23 @@ async function createEmployeeCheckout({
           .map(a => ({ id: a.id, name: a.name, unit: a.unit }))
       };
     }
+    if (parsed.pathname === '/api/pending-approvals') {
+      if ((init.method || 'GET').toUpperCase() === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ items: repo.listPending({ status: 'all', submittedById: empActor.id }) }) };
+      }
+      const body = JSON.parse(init.body || '{}');
+      calls.push(body);
+      if (failControl.mode === '503') {
+        failControl.mode = 'ok';
+        return { ok: false, status: 503, json: async () => ({ error: 'Sunucu meşgul' }) };
+      }
+      try {
+        const res = repo.submitPending(body, { actor: empActor });
+        return { ok: true, status: 201, json: async () => res };
+      } catch (err) {
+        return { ok: false, status: err.status || 400, json: async () => ({ error: err.message }) };
+      }
+    }
     if (parsed.pathname === '/api/command') {
       const body = JSON.parse(init.body || '{}');
       calls.push(body);
@@ -989,6 +1006,7 @@ test('Paket4 F3: Employee checkout pricing(row) canonicalizes unsigned & signed 
       { label: 'İşçilik', amountTL: '100.25' }
     ]);
     assert.equal(pricingLine.costTL, undefined);
+    repo.approvePending({ id: calls[0].id, revision: repo.state().revision, actor: { id: '00000000-0000-4000-8000-000000000001', name: 'Patron', role: 'owner' } });
     assert.equal(repo.state().journal.at(-1).meta.lines[0].pricing.components[0].amountTL, -2550);
 
     // Zero quotedTL stays '0'
@@ -1031,7 +1049,7 @@ test('Paket4 F4 & G: Strict employee isolation, access.css layout rules, and str
   // Runtime fetch boundary check
   const env = await createEmployeeCheckout();
   try {
-    const allowed = new Set(['/api/auth/session', '/api/checkout', '/api/customers', '/api/command']);
+    const allowed = new Set(['/api/auth/session', '/api/checkout', '/api/customers', '/api/command', '/api/pending-approvals']);
     for (const p of env.fetchPaths) {
       assert.ok(allowed.has(p), `Unexpected employee fetch path: ${p}`);
     }

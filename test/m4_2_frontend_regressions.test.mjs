@@ -347,6 +347,19 @@ async function createEmployeeCheckout(t, { repoOverride = null, withCodec = true
       const meta = parsed.searchParams.get('meta') === '1';
       return { ok: true, status: 200, json: async () => customerChoices(st, q, { limit, meta }) };
     }
+    if (parsed.pathname === '/api/pending-approvals') {
+      if ((init.method || 'GET').toUpperCase() === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ items: repo.listPending({ status: 'all', submittedById: empActor.id }) }) };
+      }
+      const env = JSON.parse(init.body || '{}');
+      commands.push(env);
+      try {
+        const res = repo.submitPending(env, { actor: empActor });
+        return { ok: true, status: 201, json: async () => res };
+      } catch (err) {
+        return { ok: false, status: err.status || 400, json: async () => ({ error: err.message }) };
+      }
+    }
     if (parsed.pathname === '/api/command') {
       const env = JSON.parse(init.body || '{}');
       commands.push(env);

@@ -28,7 +28,7 @@ test('fresh installation has no business records in either workspace and setup i
       if (state[key]) assert.equal(state[key].length, 0, key);
     }
   }
-  const setup = await fetch(base + '/api/auth/setup', {method:'POST', headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Second',password:'No-second-owner-12345'})});
+  const setup = await fetch(base + '/api/auth/setup', {method:'POST', headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Second',pin:'123456'})});
   assert.notEqual(setup.status, 201);
 });
 
@@ -42,7 +42,8 @@ test('synthetic seed creates distinct directories and never initializes normal d
     assert.equal(result.status, 0, result.stderr);
     const output = JSON.parse(result.stdout.trim());
     assert.ok(output.directory.startsWith(parent));
-    assert.ok(output.password.length >= 24);
+    assert.match(output.pin, /^\d{6}$/);
+    assert.match(output.employeePin, /^\d{6}$/);
     const repository = new Repository(join(output.directory, 'demo.sqlite'), 'demo');
     try {
       const state = repository.state();

@@ -110,8 +110,7 @@ test('Paket 5A: accounts & stocks Split View, detail tabs, and >50 pagination', 
     const firstBtn = document.querySelector('[data-account-detail]');
     firstBtn.click();
     await tick(40);
-    assert.ok(document.querySelector('.workbench-split')?.classList.contains('has-detail'));
-    assert.equal(document.querySelector('#account-detail')?.hidden, false);
+    assert.ok(document.querySelector('dialog.defter-drawer #account-detail'), 'Customer detail opens in wide Drawer');
 
     // Tabs switch detail panes cleanly
     document.querySelector('[data-detail-tab="orders"]').click();
@@ -121,7 +120,7 @@ test('Paket 5A: accounts & stocks Split View, detail tabs, and >50 pagination', 
     assert.equal(document.querySelector('#statement-filter')?.hidden, false);
 
     document.querySelector('#statement-back').click();
-    assert.equal(document.querySelector('.workbench-split')?.classList.contains('has-detail'), false);
+    assert.equal(document.querySelector('dialog.defter-modal #account-detail'), null);
 
     // Stocks tabs
     document.querySelector('#navigation [data-view="stocks"]').click();
@@ -185,8 +184,7 @@ test('Paket 5A (R1): customer search, #account-clear reset, 50-record pagination
     const cigdemId = cigdemBtn.dataset.accountDetail;
     cigdemBtn.click();
     await tick(40);
-    assert.equal(document.querySelector('.workbench-split')?.classList.contains('has-detail'), true);
-    assert.equal(document.querySelector('#account-detail')?.hidden, false);
+    assert.ok(document.querySelector('dialog.defter-drawer #account-detail'), 'Customer detail opens in wide Drawer');
     assert.equal(document.querySelectorAll('#account-list .account-card.is-selected').length, 1);
     assert.equal(document.querySelector('[data-account-detail][aria-current="true"]')?.dataset.accountDetail, cigdemId);
 

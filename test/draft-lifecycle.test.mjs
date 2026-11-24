@@ -115,6 +115,34 @@ async function createEnvironment({
           })
       };
     }
+    if (parsed.pathname === '/api/pending-approvals') {
+      if ((options?.method || 'GET').toUpperCase() === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ items: repo.listPending({ status: 'all', submittedById: actorId }) }) };
+      }
+      const envelope = JSON.parse(options.body);
+      commands.push(envelope);
+      if (networkControl.failCount > 0) {
+        networkControl.failCount--;
+        if (networkControl.statusOverride >= 400) {
+          return {
+            ok: false,
+            status: networkControl.statusOverride,
+            json: async () => ({
+              error: networkControl.statusOverride === 409
+                ? 'Kayıt sürümü uyuşmazlığı (409 REVISION_CONFLICT).'
+                : 'Geçici sunucu hatası.'
+            })
+          };
+        }
+        throw new Error('Sentetik ağ hatası');
+      }
+      try {
+        const res = repo.submitPending(envelope, { actor: { id: actorId, name: actorId, role } });
+        return { ok: true, status: 201, json: async () => res };
+      } catch (err) {
+        return { ok: false, status: err.status || 400, json: async () => ({ error: err.message }) };
+      }
+    }
     if (parsed.pathname === '/api/command') {
       const envelope = JSON.parse(options.body);
       commands.push(envelope);

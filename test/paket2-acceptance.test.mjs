@@ -211,7 +211,7 @@ test('R1.2: Daily closing persistent alert banner remains indefinitely until exp
   assert.equal(notice.hidden, true);
 });
 
-test('R1.1 & R1.2: app.js inform() routes routine success to Toast and critical/closing alerts to persistent Banner', t => {
+test('R1.1 & R1.2: app.js inform() routes all routine and error notices to auto-dismissing Toast', t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   const { dom, UI, doc } = setupTestDom(indexHtml);
   const notice = doc.getElementById('notice');
@@ -220,42 +220,31 @@ test('R1.1 & R1.2: app.js inform() routes routine success to Toast and critical/
   dom.window.eval(appSource + '\nwindow.__inform = inform;');
   const inform = dom.window.__inform;
 
-  // 1. Initial state: pre-existing error banner
+  // 1. Error inform fires an error Toast (role="alert", auto-dismisses at 6000ms) and keeps #notice hidden
   inform('Önceki hata mesajı', true);
-  assert.equal(notice.hidden, false);
-  assert.equal(notice.getAttribute('role'), 'alert');
-
-  // 2. Routine success inform: must clear banner and fire Toast
-  inform('Satış kaydı başarıyla oluşturuldu.');
-  assert.equal(notice.hidden, true, 'Notice banner must be cleared on routine success');
-
+  assert.equal(notice.hidden, true);
   const region = doc.getElementById('defter-toast-region');
+  assert.equal(region.children.length, 1);
+  assert.equal(region.children[0].classList.contains('defter-toast--error'), true);
+  assert.equal(region.children[0].getAttribute('role'), 'alert');
+  t.mock.timers.tick(6000);
+  assert.equal(region.children.length, 0, 'Error toast auto-dismisses at 6000ms');
+
+  // 2. Routine success inform fires a success Toast (auto-dismisses at 4000ms)
+  inform('Satış kaydı başarıyla oluşturuldu.');
+  assert.equal(notice.hidden, true);
   assert.equal(region.children.length, 1, 'Toast must appear for routine success');
   assert.equal(region.children[0].querySelector('.defter-toast-body').textContent, 'Satış kaydı başarıyla oluşturuldu.');
-
-  // Auto-dismisses at 4000ms
   t.mock.timers.tick(4000);
   assert.equal(region.children.length, 0, 'Routine success toast auto-dismisses at 4000ms');
 
-  // 3. 409 Revision Conflict: must show persistent banner, no toast
+  // 3. 409 Revision Conflict error also routes to error Toast
   inform('409 Revizyon çakışması: Başka sekmede işlem yapıldı.', true);
-  assert.equal(notice.hidden, false);
-  assert.equal(notice.getAttribute('role'), 'alert');
-  assert.equal(region.children.length, 0, 'No toast must be created for 409 conflict');
-
-  // Banner persists past 4000ms and 60000ms
-  t.mock.timers.tick(60000);
-  assert.equal(notice.hidden, false, 'Critical banner must persist past 60s');
-
-  // 4. Daily closing persistent notification (persistent: true)
-  inform('Gün kapandı. Dosya yedeği doğrulandı: defter-2026-11-16.sqlite', false, { persistent: true });
-  assert.equal(notice.hidden, false, 'Persistent closing banner must be visible');
-  assert.equal(notice.getAttribute('role'), 'status');
-  t.mock.timers.tick(60000);
-  assert.equal(notice.hidden, false, 'Persistent closing banner must persist indefinitely');
-
-  UI.clearBanner(notice);
   assert.equal(notice.hidden, true);
+  assert.equal(region.children.length, 1);
+  assert.equal(region.children[0].classList.contains('defter-toast--error'), true);
+  t.mock.timers.tick(6000);
+  assert.equal(region.children.length, 0);
 });
 
 // ============================================================================
@@ -455,19 +444,20 @@ test('R1.4: Server-side 403 enforcement strictly blocks employee from accessing 
   const { api } = await serverFixture(t);
 
   // 1. Setup owner
-  const setupRes = await api('/api/auth/setup', null, { name: 'Patron', password: 'synthetic-owner-pass-2026' });
+  const setupRes = await api('/api/auth/setup', null, { name: 'Patron', pin: '112233' });
   assert.equal(setupRes.status, 201);
   const owner = await setupRes.json();
 
   // 2. Create employee
-  const createEmpRes = await api('/api/auth/employees', owner.token, { name: 'Tezgâhtar', password: 'synthetic-worker-pass-2026' });
+  const createEmpRes = await api('/api/auth/employees', owner.token, { name: 'Tezgâhtar', pin: '445566' });
   assert.equal(createEmpRes.status, 201);
   const empProfile = await createEmpRes.json();
 
-  // 3. Employee login
-  const loginRes = await api('/api/auth/login', null, { id: empProfile.id, password: 'synthetic-worker-pass-2026' });
+  // 3. Employee login + mandatory first-login PIN change
+  const loginRes = await api('/api/auth/login', null, { id: empProfile.id, pin: '445566' });
   assert.equal(loginRes.status, 200);
   const worker = await loginRes.json();
+  assert.equal((await api('/api/auth/change-pin', worker.token, { currentPin: '445566', newPin: '778899' })).status, 200);
 
   // 4. Initialize store ledger with sensitive financial balances
   const initial = await (await api('/api/state', owner.token)).json();
@@ -520,12 +510,13 @@ test('R1.4: Employee GET /api/checkout and POST /api/command never leak store ba
   const { api } = await serverFixture(t);
 
   // Setup owner & employee
-  const setupRes = await api('/api/auth/setup', null, { name: 'Patron', password: 'synthetic-owner-pass-2026' });
+  const setupRes = await api('/api/auth/setup', null, { name: 'Patron', pin: '112233' });
   const owner = await setupRes.json();
-  const createEmpRes = await api('/api/auth/employees', owner.token, { name: 'Tezgâhtar', password: 'synthetic-worker-pass-2026' });
+  const createEmpRes = await api('/api/auth/employees', owner.token, { name: 'Tezgâhtar', pin: '445566' });
   const empProfile = await createEmpRes.json();
-  const loginRes = await api('/api/auth/login', null, { id: empProfile.id, password: 'synthetic-worker-pass-2026' });
+  const loginRes = await api('/api/auth/login', null, { id: empProfile.id, pin: '445566' });
   const worker = await loginRes.json();
+  assert.equal((await api('/api/auth/change-pin', worker.token, { currentPin: '445566', newPin: '778899' })).status, 200);
 
   // Ledger with sensitive capital (5,000,000 TL) and supplier
   const initial = await (await api('/api/state', owner.token)).json();
@@ -542,9 +533,14 @@ test('R1.4: Employee GET /api/checkout and POST /api/command never leak store ba
   assert.equal(checkoutRes.status, 200, 'Employee checkout endpoint must be accessible');
   const checkoutData = await checkoutRes.json();
 
-  // Check top-level keys
-  const expectedKeys = ['date', 'initialized', 'inventoryItems', 'payments', 'products', 'revision', 'stocks'];
+  // Check top-level keys (includes blind countItems catalog with zero balances)
+  const expectedKeys = ['countItems', 'date', 'initialized', 'inventoryItems', 'payments', 'products', 'revision', 'stocks'];
   assert.deepEqual(Object.keys(checkoutData).sort(), expectedKeys, 'Checkout keys must strictly match expected whitelist');
+  assert.ok(Array.isArray(checkoutData.countItems), 'countItems must be an array');
+  for (const ci of checkoutData.countItems) {
+    assert.deepEqual(Object.keys(ci).sort(), ['group', 'id', 'name', 'unit'], `countItem ${ci.id} must omit balances/expected`);
+    assert.equal(['bilezik22', 'taki14', 'taki22'].includes(ci.id), false, `Private pool ${ci.id} must never appear in countItems`);
+  }
 
   // Verify NO balances, capital, journal or supplier data are present
   assert.equal(checkoutData.balances, undefined, 'Store balances must NOT be exposed in checkout');
@@ -566,7 +562,7 @@ test('R1.4: Employee GET /api/checkout and POST /api/command never leak store ba
   assert.equal(rawJson.includes('5000000'), false, 'Sensitive store cash balance must not leak into checkout payload');
   assert.equal(rawJson.includes('750000'), false, 'Supplier debt balance must not leak into checkout payload');
 
-  // 2. Employee executes a customer sale
+  // 2. Employee cannot bypass approval queue via POST /api/command, and POST /api/pending-approvals never leaks balances
   const saleCommand = {
     type: 'sale',
     date: '2026-11-16',
@@ -575,15 +571,23 @@ test('R1.4: Employee GET /api/checkout and POST /api/command never leak store ba
     received: [{ accountId: 'nakit', quantity: '4500', valueTL: '4500' }]
   };
 
-  const saleRes = await api('/api/command', worker.token, { id: 'worker-sale-1', revision: 2, command: saleCommand });
-  assert.equal(saleRes.status, 200);
+  const directSaleRes = await api('/api/command', worker.token, { id: 'worker-sale-direct', revision: 2, command: saleCommand });
+  assert.equal(directSaleRes.status, 403, 'Employee sale via /api/command must be blocked by Maker-Checker gate');
+  assert.equal((await directSaleRes.json()).code, 'APPROVAL_REQUIRED');
+
+  const saleRes = await api('/api/pending-approvals', worker.token, { id: 'worker-sale-1', revision: 2, command: saleCommand });
+  assert.equal(saleRes.status, 201);
   const saleResult = await saleRes.json();
 
-  // Response must be strictly limited to confirmation metadata: { id, revision, duplicate }
-  assert.deepEqual(Object.keys(saleResult).sort(), ['duplicate', 'id', 'revision'], 'Sale result must omit ledger totals and journal');
+  // Response must be strictly limited to submission metadata (no ledger totals, balances, or journal)
+  assert.deepEqual(Object.keys(saleResult).sort(), ['duplicate', 'id', 'status', 'submittedAt', 'summary'], 'Pending result must omit ledger totals and journal');
   assert.equal(saleResult.id, 'worker-sale-1');
-  assert.equal(saleResult.revision, 3);
+  assert.equal(saleResult.status, 'pending');
   assert.equal(saleResult.duplicate, false);
+  const saleRaw = JSON.stringify(saleResult);
+  assert.equal(saleRaw.includes('Gizli Toptancı Ltd.'), false);
+  assert.equal(saleRaw.includes('5000000'), false);
+  assert.equal(saleRaw.includes('750000'), false);
 });
 
 test('R1.4: Employee checkout UI notification channel restricts status messages to operational confirmation and suppresses administrative financial data', async () => {
@@ -596,16 +600,19 @@ test('R1.4: Employee checkout UI notification channel restricts status messages 
   };
   dom.window.sessionStorage.setItem('defter-sale-retry-worker-1-demo', JSON.stringify(pendingData));
 
-  let commandCalled = false;
+  let approvalCalled = false;
   dom.window.DefterSession = {
     current: () => ({ actor: { id: 'worker-1', name: 'Tezgâhtar', role: 'employee' } }),
     api: async (url, body) => {
-      if (url.includes('command')) {
-        commandCalled = true;
-        return { id: 'sale-tx-991', revision: 4, duplicate: false };
+      if (url.includes('pending-approvals') && body) {
+        approvalCalled = true;
+        return { id: 'sale-tx-991', status: 'pending', duplicate: false };
+      }
+      if (url.includes('pending-approvals')) {
+        return { items: [] };
       }
       if (url.includes('checkout')) {
-        return { initialized: true, date: '2026-11-16', revision: 4, products: [], inventoryItems: [], payments: [], stocks: [] };
+        return { initialized: true, date: '2026-11-16', revision: 4, products: [], inventoryItems: [], payments: [], stocks: [], countItems: [] };
       }
       return {};
     }
@@ -621,11 +628,11 @@ test('R1.4: Employee checkout UI notification channel restricts status messages 
   // Allow async sendPending -> api -> status to settle
   await new Promise(resolve => setTimeout(resolve, 50));
 
-  assert.ok(commandCalled, 'sendPending() in checkout.js must call api(command)');
+  assert.ok(approvalCalled, 'sendPending() in checkout.js must call api(pending-approvals) for employee trade');
   const statusEl = dom.window.document.getElementById('status');
   assert.equal(statusEl.getAttribute('role'), 'status');
   assert.equal(statusEl.getAttribute('aria-live'), 'polite');
-  assert.equal(statusEl.textContent, 'İşlem kaydedildi. Kayıt sale-tx-991');
+  assert.equal(statusEl.textContent, 'İşlem bildirimi yönetici onayına gönderildi. Bildirim sale-tx-991');
 
   // Verify that financial balances, profit/loss, and store capital never leak into the status channel
   assert.doesNotMatch(statusEl.textContent, /kasa|mevcut|bakiye|sermaye|kar|borç|has gr/i);
