@@ -492,18 +492,20 @@ export async function createIsolatedApp({
     seedAlternateWorkspaceLedger(join(dataDir, 'dukkan.sqlite'), 'dukkan');
   }
 
-  const ownerPassword = randomBytes(18).toString('base64url');
-  const employeePassword = randomBytes(18).toString('base64url');
+  const ownerPassword = String(Math.floor(100000 + Math.random() * 900000));
+  const employeePassword = String(Math.floor(100000 + Math.random() * 900000));
 
   const identities = new IdentityStore(dataDir);
   let owner, employee;
   try {
-    owner = await identities.initializeOwner({ name: 'E2E Yönetici', password: ownerPassword });
+    owner = await identities.initializeOwner({ name: 'E2E Yönetici', pin: ownerPassword });
     const session = await identities.login(owner.id, ownerPassword);
     employee = await identities.createEmployee(session.token, {
       name: 'E2E Tezgâh Çalışanı',
-      password: employeePassword
+      pin: '111111'
     });
+    const empSession = await identities.login(employee.id, '111111');
+    await identities.changePin(empSession.token, { currentPin: '111111', newPin: employeePassword });
   } finally {
     identities.close();
   }

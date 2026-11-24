@@ -21,9 +21,9 @@ test('supplier UI commands use real core for accountless identity, HAS purchase 
  submit:async(command,message,effect)=>{commands.push(command);post(randomUUID(),command);memory.delete(effect.supplierDraftKey);api.update(repo.state({compact:true}));return true;}};
  api=renderSupplierWorkspace(root,ctx);t.after(()=>{api.destroy();dom.window.close();});
  root.querySelector('[data-create-firm]').click();root.querySelector('form').elements.name.value='Sentetik tedarikçi';root.querySelector('form').requestSubmit();await tick();
- const firm=repo.state().supplierParties.find(f=>f.name==='Sentetik tedarikçi');assert.deepEqual(firm.accounts,[]);
- root.querySelector('[data-open-firm="'+firm.id+'"]').click();root.querySelector('[data-add-supplier-unit]').click();root.querySelector('form').elements.unit.value='HAS';root.querySelector('form').requestSubmit();await tick();
- const native=repo.state().supplierParties.find(f=>f.id===firm.id).accounts[0];
+ const firm=repo.state().supplierParties.find(f=>f.name==='Sentetik tedarikçi');assert.ok(firm.accounts.some(a=>a.unit==='HAS'),'autoUnits creates HAS');
+ root.querySelector('[data-open-firm="'+firm.id+'"]').click();
+ const native=repo.state().supplierParties.find(f=>f.id===firm.id).accounts.find(a=>a.unit==='HAS');
  root.querySelector('[data-supplier-task="purchase"]').click();let form=root.querySelector('form');
  const fill=(group,field,value)=>{const input=form.querySelector('[data-group="'+group+'"] [data-field="'+field+'"]');input.value=value;input.dispatchEvent(new dom.window.Event(input.tagName==='SELECT'?'change':'input',{bubbles:true}));};
  fill('items','accountId','ceyrek');fill('items','quantity','10');fill('charges','accountId',native.id);fill('charges','quantity','16.530');

@@ -68,7 +68,7 @@ test('Faz 6 micro-interactions in a real browser', { skip, timeout: 120000 }, as
       await goTo('transaction');
       await sleep(300);
       await move({ x: 5, y: 5 });
-      const gold = await evaluate(`(() => { const b = [...document.querySelectorAll('#main .button')].find(el => !el.matches('.secondary, .text, .danger') && el.offsetParent); b.id ||= 'gui-gold-probe'; return '#' + b.id; })()`);
+      const gold = await evaluate(`(() => { const b = [...document.querySelectorAll('#main .button')].find(el => !el.matches('.secondary, .text, .danger') && el.offsetParent); b.id ||= 'gui-gold-probe'; b.scrollIntoView({ block: 'center', behavior: 'instant' }); return '#' + b.id; })()`);
       const point = await centre(gold);
       await move(point);
       // Poll instead of fixed sleeps: under full-suite load a frame can land late.

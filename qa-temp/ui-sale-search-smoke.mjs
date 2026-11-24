@@ -158,7 +158,8 @@ test('employee checkout shows unreserved stock and caps search without hiding an
   find('yuzuk');
   assert.equal(get('[data-product]').options.length,12);
   assert.match(get('[data-available]').textContent,/1 adet/);
-  assert.match(get('[data-pool]').selectedOptions[0].textContent,/0,001 gr/);
+  assert.equal(get('[data-pool]').selectedOptions[0].textContent,'14 ayar');
+  assert.doesNotMatch(get('[data-pool]').selectedOptions[0].textContent,/0,001 gr/);
   find('TR-24');
   assert.equal(get('[data-product]').selectedOptions[0].dataset.code,'Y-24');
   assert.equal(get('[data-weight]').value,'1.000');

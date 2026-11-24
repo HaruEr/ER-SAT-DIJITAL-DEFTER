@@ -2,7 +2,7 @@
 import {mkdtempSync,writeFileSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
-import {randomBytes} from 'node:crypto';
+import {randomInt} from 'node:crypto';
 import {Repository} from '../repository.mjs';
 import {IdentityStore} from '../identity.mjs';
 import {INITIAL_ACCOUNTS,currentCountPolicy,decimal} from '../domain.mjs';
@@ -53,7 +53,11 @@ write('developer-order',{type:'customerOrder',customerId:'cari-developer-custome
 write('developer-advance',{type:'orderAdvance',orderId:'developer-order',accountId:'nakit',amountTL:'25'});
 write('developer-offset',{type:'supplierOffset',supplierId:firms.D05.supplierId,fromAccountId:firms.D05.accounts.USD,fromQuantity:'1',toAccountId:firms.D05.accounts.HAS,toQuantity:'1',sourceUses:[{sourceId:'D05-usd-source',quantity:'1'}],targetUses:[{purchaseId:'D05-purchase',quantity:'1'}],note:'Sentetik manuel mahsup'});
 const state=r.state();writeFileSync(join(directory,'uat-baseline.json'),JSON.stringify({version:'supplier-uat-v1',date:state.date,revision:state.revision,firms,balances:state.balances},null,2));r.close();
-const identities=new IdentityStore(directory),password=randomBytes(24).toString('base64url');
-const owner=await identities.initializeOwner({name:'UAT Yönetici',password});
-const session=await identities.login(owner.id,password);await identities.createEmployee(session.token,{name:'UAT Çalışan',password});identities.close();
-console.log(JSON.stringify({directory,version:'supplier-uat-v1',revision:state.revision,password}));
+const identities=new IdentityStore(directory),pin=String(randomInt(100000,1000000)),employeePin=String(randomInt(100000,1000000));
+const owner=await identities.initializeOwner({name:'UAT Yönetici',pin});
+const session=await identities.login(owner.id,pin);
+const emp=await identities.createEmployee(session.token,{name:'UAT Çalışan',pin:'111111'});
+const empSession=await identities.login(emp.id,'111111');
+await identities.changePin(empSession.token,{currentPin:'111111',newPin:employeePin});
+identities.close();
+console.log(JSON.stringify({directory,version:'supplier-uat-v1',revision:state.revision,pin,employeePin,password:pin}));

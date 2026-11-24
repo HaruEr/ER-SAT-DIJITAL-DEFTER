@@ -107,7 +107,7 @@ check('customer purchase route selects the new customer and never offers supplie
 
 check('supplier creation stays in its unitless owner workflow and never selects a customer', async c => {
   await c.nav('suppliers');await c.click('[data-create-firm]');c.set('[name="name"]','Yeni Firma');await c.submit('[data-supplier-form="create"]');
-  const created=c.repo.state().supplierParties.find(a=>a.name==='Yeni Firma');assert.ok(created);assert.equal(created.accounts.length,0);
+  const created=c.repo.state().supplierParties.find(a=>a.name==='Yeni Firma');assert.ok(created);assert.ok(created.accounts.length>=7);
   assert.equal(c.activeView(),'suppliers');assert.equal(c.d.querySelector('#sale-form'),null);
   await c.click('[data-open-firm="'+created.id+'"]');await c.click('[data-supplier-task="purchase"]');
   assert.ok(c.find('[data-supplier-form="purchase"]'));assert.equal(c.d.querySelector('#f-counterpartyId'),null);
@@ -152,7 +152,7 @@ check('return context never jumps into another workspace or attaches a different
   assert.equal(c.d.querySelector('[data-return-operation]'), null, 'Demo return context must not be actionable in another ledger');
   await c.nav('suppliers'); await c.click('[data-create-firm]'); c.set('[name="name"]', 'Bağımsız firma'); await c.submit('[data-supplier-form="create"]');
   assert.equal(c.activeView(), 'suppliers'); assert.equal(c.d.querySelector('#sale-form'), null);
-  assert.equal(c.repos.dukkan.state().supplierParties.find(a => a.name === 'Bağımsız firma').accounts.length, 0);
+  assert.ok(c.repos.dukkan.state().supplierParties.find(a => a.name === 'Bağımsız firma').accounts.length >= 7);
   assert.ok(!c.repo.state().supplierParties.some(a => a.name === 'Bağımsız firma'));
   c.set('#workspace', 'demo'); await tick(); await c.nav('transaction'); await c.click('[data-tab="purchase"]');
   assert.equal(c.find('[data-item-field="value"]').value, '120');
@@ -172,7 +172,7 @@ check('an unrelated supplier creation cannot consume a pending customer return c
   await c.prepareTrade('purchase'); await c.click('[data-create-party]');
   await c.nav('suppliers'); await c.click('[data-create-firm]'); c.set('[name="name"]', 'Bağımsız toptancı'); await c.submit('[data-supplier-form="create"]');
   assert.equal(c.activeView(), 'suppliers'); assert.equal(c.d.querySelector('#sale-form'), null);
-  assert.equal(c.repo.state().supplierParties.find(a => a.name === 'Bağımsız toptancı').accounts.length, 0);
+  assert.ok(c.repo.state().supplierParties.find(a => a.name === 'Bağımsız toptancı').accounts.length >= 7);
   await c.nav('transaction'); await c.click('[data-tab="purchase"]');
   assert.equal(c.find('[data-item-field="value"]').value, '120');
   assert.ok([...c.find('#f-counterpartyId').options].every(option => !option.textContent.includes('Bağımsız toptancı')));

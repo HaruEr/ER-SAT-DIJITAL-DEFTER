@@ -58,7 +58,7 @@ try{
   await open('closing');assert.equal(d.querySelector('#stocktake-form').closest('section').hidden,true);
   d.querySelector('[data-count-mode="periodic"]').click();assert.equal(d.querySelector('#close-form').closest('section').hidden,true);
   await open('summary');assert.match(d.querySelector('h1').textContent,/Günlük İşletme Özeti/);assert.ok(d.querySelector('#summary-kind'));
-  await open('journal');assert.match(d.querySelector('h1').textContent,/Günlük İşlemler/);assert.ok(d.querySelector('#journal-type').options.length<=9);
+  await open('journal');assert.match(d.querySelector('h1').textContent,/Günlük İşlemler/);assert.ok(d.querySelector('#journal-type').options.length<=20);assert.ok(d.querySelector('#journal-type option[value="supplier"]'));
   const saleArticle=[...d.querySelectorAll('.journal-item')].find(article=>article.textContent.includes(saleId));assert.ok(saleArticle);
   saleArticle.querySelector('[data-edit-transaction]').click();await tick();
   assert.match(d.querySelector('h1').textContent,/İşlemi Düzenle/);

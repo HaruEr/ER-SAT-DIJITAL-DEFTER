@@ -795,15 +795,22 @@ function buildTestCases(opts) {
       label: 'supplier purchase form open'
     });
     await cdp.clickSelector('[data-group="items"] [data-add-row]');
-    await cdp.clickSelector('[data-group="charges"] [data-add-row]');
     const itemRows = await cdp.evaluate("document.querySelectorAll('[data-group=\"items\"] [data-row]').length");
-    const chargeRows = await cdp.evaluate("document.querySelectorAll('[data-group=\"charges\"] [data-row]').length");
     assert.ok(itemRows >= 2, `Expected >= 2 item rows after clicking [data-add-row], got ${itemRows}`);
-    assert.ok(chargeRows >= 2, `Expected >= 2 charge rows after clicking [data-add-row], got ${chargeRows}`);
     for (let i = 1; i <= itemRows; i++) {
       const itemCombo = await getComboboxContractInfo(cdp, `[data-group="items"] [data-row]:nth-of-type(${i}) select[data-field="accountId"]`);
       assert.equal(itemCombo.comboboxFound, true, `Supplier purchase item row ${i} must have Combobox`);
     }
+    if (await cdp.evaluate("Boolean(document.querySelector('form[data-supplier-form=\"purchase\"] [data-wizard-next]'))")) {
+      await searchAndSelectCombobox(cdp, '[data-group="items"] [data-row]:nth-of-type(1) select[data-field="accountId"]', 'ceyrek', 'ÇEYREK');
+      await cdp.typeText('1', { selector: '[data-group="items"] [data-row]:nth-of-type(1) input[data-field="quantity"]', clear: true });
+      await cdp.clickSelector('[data-group="items"] [data-row]:nth-of-type(2) [data-remove-row]');
+      await cdp.clickSelector('form[data-supplier-form="purchase"] [data-wizard-next]');
+      await cdp.until("document.querySelector('[data-group=\"charges\"]')?.closest('section')?.hidden === false", { label: 'purchase wizard step 2 visible' });
+    }
+    await cdp.clickSelector('[data-group="charges"] [data-add-row]');
+    const chargeRows = await cdp.evaluate("document.querySelectorAll('[data-group=\"charges\"] [data-row]').length");
+    assert.ok(chargeRows >= 2, `Expected >= 2 charge rows after clicking [data-add-row], got ${chargeRows}`);
     for (let i = 1; i <= chargeRows; i++) {
       const chargeCombo = await getComboboxContractInfo(cdp, `[data-group="charges"] [data-row]:nth-of-type(${i}) select[data-field="accountId"]`);
       assert.equal(chargeCombo.comboboxFound, true, `Supplier purchase charge row ${i} must have Combobox`);
@@ -2363,6 +2370,10 @@ function buildTestCases(opts) {
     }
     await searchAndSelectCombobox(cdp, '[data-group="items"] select[data-field="accountId"]', 'ceyrek', 'ÇEYREK');
     await cdp.typeText('2', { selector: '[data-group="items"] input[data-field="quantity"]', clear: true });
+    if (await cdp.evaluate("Boolean(document.querySelector('form[data-supplier-form=\"purchase\"] [data-wizard-next]:not([hidden])'))")) {
+      await cdp.clickSelector('form[data-supplier-form="purchase"] [data-wizard-next]');
+      await cdp.until("document.querySelector('[data-group=\"charges\"]')?.closest('section')?.hidden === false", { label: 'T3-5 step 2 visible' });
+    }
 
     if (!(await cdp.evaluate("Boolean(document.querySelector('[data-group=\"charges\"] [data-row]'))"))) {
       await cdp.clickSelector('[data-group="charges"] [data-add-row]');
@@ -2373,6 +2384,10 @@ function buildTestCases(opts) {
     const hasDisambig = await cdp.evaluate("Boolean(document.querySelector('.amount-disambiguation'))");
     assert.equal(hasDisambig, true, 'Expected .amount-disambiguation for ambiguous 2.500 HAS charge quantity');
     await cdp.clickSelector('[data-amount-choice="decimal"]');
+    if (await cdp.evaluate("Boolean(document.querySelector('form[data-supplier-form=\"purchase\"] [data-wizard-next]:not([hidden])'))")) {
+      await cdp.clickSelector('form[data-supplier-form="purchase"] [data-wizard-next]');
+      await cdp.until("document.querySelector('form[data-supplier-form=\"purchase\"] button[type=\"submit\"]')?.hidden === false", { label: 'T3-5 step 3 submit visible' });
+    }
     await cdp.clickSelector('form[data-supplier-form="purchase"] button[type="submit"]');
     await cdp.until("document.querySelector('[data-supplier-status]')?.textContent.includes('kaydedildi') || document.querySelector('#defter-toast-region')?.textContent.includes('kaydedildi')", {
       timeoutMs: 10000,
@@ -2581,6 +2596,10 @@ function buildTestCases(opts) {
     }
     await searchAndSelectCombobox(cdp, '[data-group="items"] select[data-field="accountId"]', 'ceyrek', 'ÇEYREK');
     await cdp.typeText('1', { selector: '[data-group="items"] input[data-field="quantity"]', clear: true });
+    if (await cdp.evaluate("Boolean(document.querySelector('form[data-supplier-form=\"purchase\"] [data-wizard-next]:not([hidden])'))")) {
+      await cdp.clickSelector('form[data-supplier-form="purchase"] [data-wizard-next]');
+      await cdp.until("document.querySelector('[data-group=\"charges\"]')?.closest('section')?.hidden === false", { label: 'T4-3 step 2 visible' });
+    }
     if (!(await cdp.evaluate("Boolean(document.querySelector('[data-group=\"charges\"] [data-row]'))"))) {
       await cdp.clickSelector('[data-group="charges"] [data-add-row]');
     }
@@ -2607,6 +2626,10 @@ function buildTestCases(opts) {
     assert.equal(restoredSup.itemAcc, 'ceyrek', 'Supplier purchase draft item must restore after F5');
     assert.equal(restoredSup.itemQty, '1', 'Supplier purchase draft quantity must restore after F5');
     assert.equal(restoredSup.chargeQty, '4950', 'Supplier purchase draft charge quantity must restore after F5');
+    while (await cdp.evaluate("Boolean(document.querySelector('form[data-supplier-form=\"purchase\"] [data-wizard-next]:not([hidden])'))")) {
+      await cdp.clickSelector('form[data-supplier-form="purchase"] [data-wizard-next]');
+      await cdp.waitForDoubleRaf();
+    }
     await cdp.clickSelector('form[data-supplier-form="purchase"] button[type="submit"]');
     await cdp.until("document.querySelector('[data-supplier-status]')?.textContent.includes('kaydedildi') || document.querySelector('#defter-toast-region')?.textContent.includes('kaydedildi')", {
       timeoutMs: 10000,

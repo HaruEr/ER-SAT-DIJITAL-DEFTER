@@ -73,7 +73,7 @@ check('new supplier identity is unitless and does not adopt another firm purchas
   await c.nav('suppliers');await c.click('[data-open-firm="'+c.supplier+'"]');await c.click('[data-supplier-task="purchase"]');c.set('[name="note"]','Önceki firmanın taslağı');
   await c.click('[data-back-suppliers]');await c.click('[data-create-firm]');c.set('[name="name"]','Yeni Firma');c.set('[name="phone"]','05550000003');
   c.d.querySelector('[data-supplier-form="create"]').requestSubmit();await tick();
-  const created=c.repo.state().supplierParties.find(a=>a.name==='Yeni Firma');assert.ok(created);assert.equal(created.accounts.length,0);
+  const created=c.repo.state().supplierParties.find(a=>a.name==='Yeni Firma');assert.ok(created);assert.ok(created.accounts.length>=7);
   await c.click('[data-open-firm="'+created.id+'"]');await c.click('[data-supplier-task="purchase"]');assert.equal(c.d.querySelector('[name="note"]').value,'');
   await c.click('[data-back-suppliers]');await c.click('[data-open-firm="'+c.supplier+'"]');await c.click('[data-supplier-task="purchase"]');assert.equal(c.d.querySelector('[name="note"]').value,'Önceki firmanın taslağı');assert.equal(c.calls.length,1);
 });

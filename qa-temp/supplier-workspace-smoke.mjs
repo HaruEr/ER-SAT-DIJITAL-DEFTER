@@ -17,7 +17,7 @@ function fixture(t,extra={}){
 }
 test('lists independent accountless firms without inventing a TL account and escapes names',t=>{
  const f=fixture(t),card=f.root.querySelector('[data-firm-card="firm-empty"]');
- assert.match(card.textContent,/İnci <img src=x>/);assert.match(card.textContent,/Henüz hesap birimi yok/);assert.doesNotMatch(card.textContent,/0 TL/);assert.equal(f.root.querySelector('img'),null);
+ assert.match(card.textContent,/İnci <img src=x>/);assert.match(card.textContent,/Tüm bakiyeler sıfır/);assert.doesNotMatch(card.textContent,/0 TL/);assert.equal(f.root.querySelector('img'),null);
 });
 test('search handles Turkish names and preserves the query through updates',t=>{
  const f=fixture(t),search=f.root.querySelector('[data-supplier-search]');
@@ -28,10 +28,10 @@ test('search handles Turkish names and preserves the query through updates',t=>{
 test('detail separates native balances and exposes exactly six business tasks',t=>{
  const f=fixture(t);f.root.querySelector('[data-open-firm="firm-multi"]').click();
  const tasks=[...f.root.querySelectorAll('[data-supplier-task]')];
- assert.deepEqual(tasks.map(b=>b.textContent),['Ürün Al','Ödeme Yap','Hesap Mahsup Et','Ürün İade Et','Hareketleri İncele','Ekstre / Mutabakat']);
+ assert.deepEqual(tasks.map(b=>b.textContent),['Ürün Al','Ödeme Yap','Hesap Mahsup Et','Firmalar Arası Virman','Ürün İade Et','Hareketleri İncele','Ekstre / Mutabakat']);
  assert.match(f.root.querySelector('[data-balance="has"]').textContent,/Borcumuz.*−15000 HAS/);
  assert.match(f.root.querySelector('[data-balance="usd"]').textContent,/Alacağımız.*\+900 USD/);
- assert.match(f.root.querySelector('[data-balance="tl"]').textContent,/Bakiyesi sıfır.*0 TL/);
+ assert.equal(f.root.querySelector('[data-balance="tl"]'),null,'zero-balance unit hidden on summary card');
  assert.doesNotMatch(f.root.textContent,/Toplam HAS/);
  assert.equal(f.dom.window.document.activeElement,f.root.querySelector('[data-firm-heading]'));
 });
@@ -64,10 +64,10 @@ test('firm and unit forms send explicit identity commands without a default open
  f.root.querySelector('[data-create-firm]').click();
  const form=f.root.querySelector('[data-supplier-form]');
  form.elements.name.value='Yeni Firma';form.requestSubmit();await new Promise(r=>setTimeout(r,0));
- assert.equal(sent[0].type,'supplierFirm');assert.equal(sent[0].name,'Yeni Firma');assert.equal('unit' in sent[0],false);assert.equal('opening' in sent[0],false);
- f.root.querySelector('[data-open-firm="firm-empty"]').click();f.root.querySelector('[data-add-supplier-unit]').click();
- const unit=f.root.querySelector('form');unit.elements.unit.value='HAS';unit.requestSubmit();await new Promise(r=>setTimeout(r,0));
- assert.equal(sent[1].supplierId,'firm-empty');assert.equal(sent[1].unit,'HAS');assert.equal('opening' in sent[1],false);
+ assert.equal(sent[0].type,'supplierFirm');assert.equal(sent[0].name,'Yeni Firma');assert.equal(sent[0].autoUnits,true);assert.equal('unit' in sent[0],false);assert.equal('opening' in sent[0],false);
+ f.api.selectParty('firm-empty',{task:'unit'});
+ const unit=f.root.querySelector('form');unit.elements.unit.value='other';unit.elements.unit.dispatchEvent(new f.dom.window.Event('change',{bubbles:true}));unit.elements.currencyCode.value='JPY';unit.requestSubmit();await new Promise(r=>setTimeout(r,0));
+ assert.equal(sent[1].supplierId,'firm-empty');assert.equal(sent[1].unit,'JPY');assert.equal('opening' in sent[1],false);
 });
 test('purchase keeps manual physical quantity and native obligation independent with optional TL',async t=>{
  const sent=[],f=fixture(t,{submit:async c=>{sent.push(c);return false;}});
@@ -115,7 +115,7 @@ test('submit passes opaque draft identity and cleanup cannot resurrect a confirm
 
 test('unit creation supports explicit three-letter currency without inventing a balance',async t=>{
  const sent=[],f=fixture(t,{submit:async c=>{sent.push(c);return false;}});
- f.root.querySelector('[data-open-firm="firm-empty"]').click();f.root.querySelector('[data-add-supplier-unit]').click();
+ f.api.selectParty('firm-empty',{task:'unit'});
  const form=f.root.querySelector('form');form.elements.unit.value='other';form.elements.unit.dispatchEvent(new f.dom.window.Event('change',{bubbles:true}));
  form.elements.currencyCode.value='cad';form.requestSubmit();await new Promise(r=>setTimeout(r,0));assert.equal(sent[0].unit,'CAD');
 });
