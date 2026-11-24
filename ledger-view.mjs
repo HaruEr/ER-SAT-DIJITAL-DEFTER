@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { projectSupplierParties, projectSupplierDetail } from './supplier-view.mjs';
-import { supplierDocuments, supplierFirms, supplierAccountIds } from './supplier-ledger.mjs';
+import { supplierDocuments, supplierFirms, supplierAccountIds, ledgerActiveSupplierUnits } from './supplier-ledger.mjs';
 import { purchaseCostOffer } from './inventory.mjs';
 import { applyEvent, emptyState, fail, validDate, currentCountPolicy, priorScrapChoices, scrapCustomerResolver, scrapAdvanceSources, getAccountIndex } from './domain.mjs';
 
@@ -152,21 +152,31 @@ export function projectLedger(ledger, compact = false) {
   });
 }
 
-const types = new Set(['all', 'linkScrapPurchase', 'customerOrder', 'orderAdvance', 'orderRefund', 'orderCancel', 'scrapAdvanceTransfer', 'scrapAdvanceUndo', 'opening', 'nominalOpening', 'account', 'accountUpdate', 'fundAccount', 'fundUpdate', 'stockAccount', 'stockUpdate', 'sale', 'saleReturn', 'purchase', 'stock', 'movement', 'collection', 'transfer', 'settlement', 'reverse', 'stocktake', 'close', 'registerItem', 'releaseItem', 'itemCostSource']);
-export const typeGroups = { money: ['movement','transfer','settlement'], inventory: ['stock','stocktake','registerItem','releaseItem','itemCostSource'], setup: ['opening','nominalOpening','account','accountUpdate','fundAccount','fundUpdate','stockAccount','stockUpdate','close'] };
-for(const type of ['supplierFirm','supplierFirmUpdate','supplierUnit','supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierReturn','supplierReverse','supplierLegacyReceiptLink'])types.add(type);
+const types = new Set(['all', 'linkScrapPurchase', 'customerOrder', 'orderUpdate', 'orderAdvance', 'orderRefund', 'orderCancel', 'scrapAdvanceTransfer', 'scrapAdvanceUndo', 'opening', 'nominalOpening', 'account', 'accountUpdate', 'fundAccount', 'fundUpdate', 'stockAccount', 'stockUpdate', 'sale', 'saleReturn', 'purchase', 'stock', 'movement', 'collection', 'transfer', 'settlement', 'reverse', 'stocktake', 'close', 'registerItem', 'releaseItem', 'itemCostSource']);
+const supplierEventTypes = ['supplierFirm','supplierFirmUpdate','supplierUnit','supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierTransfer','supplierReturn','supplierReverse','supplierLegacyReceiptLink'];
+export const typeGroups = {
+  money: ['movement','transfer','settlement'],
+  inventory: ['stock','stocktake','registerItem','releaseItem','itemCostSource'],
+  setup: ['opening','nominalOpening','account','accountUpdate','fundAccount','fundUpdate','stockAccount','stockUpdate','close'],
+  supplier: [...supplierEventTypes],
+  orders: ['customerOrder','orderUpdate','orderAdvance','orderRefund','orderCancel','scrapAdvanceTransfer','scrapAdvanceUndo'],
+  reverse: ['reverse','supplierReverse']
+};
+for(const type of supplierEventTypes)types.add(type);
 typeGroups.purchases=['purchase','supplierPurchase'];
 // Match the existing browser journal's Turkish and accent-insensitive search.
 export const normalizeSearch = value => value.toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ı/g, 'i');
-export function normalizeJournalOptions({ scope = 'today', q = '', type = 'all', limit = 50, cursor, startDate = '', endDate = '', accountId = '', scrapForSale = '', scrapForAdvance = '' } = {}) {
+export function normalizeJournalOptions({ scope = 'today', q = '', type = 'all', limit = 50, cursor, startDate = '', endDate = '', accountId = '', unit = '', status = 'all', scrapForSale = '', scrapForAdvance = '' } = {}) {
   if (!['today', 'all'].includes(scope) || (!types.has(type) && !Object.hasOwn(typeGroups, type)) || typeof q !== 'string' || q.length > 160 || !Number.isInteger(limit) || limit < 1 || limit > 100 || (cursor !== undefined && (typeof cursor !== 'string' || cursor.length > 512))) fail('Geçerli defter filtresi ve 1–100 arası sayfa boyutu seçin.');
   if (typeof startDate !== 'string' || typeof endDate !== 'string' || typeof accountId !== 'string' || accountId.length > 160) fail('Geçerli tarih aralığı ve hesap seçin.');
+  if (typeof unit !== 'string' || (unit && !/^(TL|HAS|SILVER|GRAM|ADET|[A-Z]{3})$/.test(unit))) fail('Geçerli birim filtresi seçin.');
+  if (!['all', 'active', 'reversed'].includes(status)) fail('Geçerli kayıt durumu filtresi seçin.');
   if (typeof scrapForAdvance !== 'string' || scrapForAdvance.length > 100 || (scrapForAdvance && (scrapForSale || type !== 'purchase' || scope !== 'all'))) fail('Hurda avansı için müşteri ve tüm alışlar filtresi gerekli.');
   if (typeof scrapForSale !== 'string' || scrapForSale.length > 100 || (scrapForSale && (type !== 'purchase' || scope !== 'all'))) fail('Önceki hurda alışları için tüm geçmişte alış filtresini seçin.');
   if (startDate) validDate(startDate);
   if (endDate) validDate(endDate);
   if (startDate && endDate && startDate > endDate) fail('Başlangıç tarihi bitiş tarihinden sonra olamaz.');
-  return { scope, q: normalizeSearch(q.trim()), type, limit, cursor, startDate, endDate, accountId, ...(scrapForSale && {scrapForSale}), ...(scrapForAdvance && {scrapForAdvance}) };
+  return { scope, q: normalizeSearch(q.trim()), type, limit, cursor, startDate, endDate, accountId, ...(unit && { unit }), ...(status !== 'all' && { status }), ...(scrapForSale && {scrapForSale}), ...(scrapForAdvance && {scrapForAdvance}) };
 }
 
 export function selectedAccountForState(state, accountId) {
@@ -232,8 +242,8 @@ export function parseJournalCursor(cursor, revision, filterHash) {
   return decoded.offset;
 }
 
-export function journalFilterHash({ scope, q, type, limit, startDate = '', endDate = '', accountId = '', scrapForSale = '', scrapForAdvance = '' }) {
-  const range = { ...(startDate ? { startDate } : {}), ...(endDate ? { endDate } : {}), ...(accountId ? { accountId } : {}), ...(scrapForSale && {scrapForSale}), ...(scrapForAdvance && {scrapForAdvance}) };
+export function journalFilterHash({ scope, q, type, limit, startDate = '', endDate = '', accountId = '', unit = '', status = 'all', scrapForSale = '', scrapForAdvance = '' }) {
+  const range = { ...(startDate ? { startDate } : {}), ...(endDate ? { endDate } : {}), ...(accountId ? { accountId } : {}), ...(unit ? { unit } : {}), ...(status && status !== 'all' ? { status } : {}), ...(scrapForSale && {scrapForSale}), ...(scrapForAdvance && {scrapForAdvance}) };
   return createHash('sha256').update(JSON.stringify({ scope, q, type, limit, ...range })).digest('hex');
 }
 
@@ -262,25 +272,29 @@ export function buildJournalReturnInfo(state, items, isReversedFn, returnsForSal
   return returnInfo;
 }
 
-export function projectJournal(ledger, { scope, q, type, limit, cursor, startDate = '', endDate = '', accountId = '', scrapForSale = '', scrapForAdvance = '' }) {
+export function projectJournal(ledger, { scope, q, type, limit, cursor, startDate = '', endDate = '', accountId = '', unit = '', status = 'all', scrapForSale = '', scrapForAdvance = '' }) {
   const inheritParty = accountId ? selectedAccount(ledger, accountId).kind === 'receivable' : false;
   const revision = ledger.state.revision;
   // Preserve existing cursors when none of the new optional filters is selected.
-  const filterHash = journalFilterHash({ scope, q, type, limit, startDate, endDate, accountId, scrapForSale, scrapForAdvance });
+  const filterHash = journalFilterHash({ scope, q, type, limit, startDate, endDate, accountId, unit, status, scrapForSale, scrapForAdvance });
   const offset = parseJournalCursor(cursor, revision, filterHash);
   const day = ledger.byDate.get(ledger.state.date) || blankTotals();
   let selected = scope === 'today' ? day.items : ledger.state.journal;
-  const filtered = q || type !== 'all' || startDate || endDate || accountId;
+  const filtered = q || type !== 'all' || startDate || endDate || accountId || unit || (status && status !== 'all');
   const resolveParty = scrapCustomerResolver(ledger.state);
   const advanceChoices = scrapForAdvance ? scrapAdvanceSources(ledger.state,scrapForAdvance) : null;
   const scrapChoices = scrapForSale ? priorScrapChoices(ledger.state,scrapForSale,resolveParty) : advanceChoices;
   if (filtered) {
     const names = new Map(ledger.state.accounts.map(account => [account.id, account.name]));
+    const unitAccountIds = unit ? new Set(ledger.state.accounts.filter(a => a.unit === unit).map(a => a.id)) : null;
     const searchCache = ledger.searchCache;
     selected = selected.filter(entry => {
       if (scrapChoices && !scrapChoices.has(entry.id)) return false;
       if ((startDate && entry.date < startDate) || (endDate && entry.date > endDate) || (accountId && !matchesJournalAccount(ledger, entry, accountId, inheritParty, resolveParty))) return false;
       if (type !== 'all' && !(typeGroups[type] || [type]).includes(entry.type)) return false;
+      if (unitAccountIds && !entry.entries.some(row => unitAccountIds.has(row.accountId))) return false;
+      if (status === 'active' && (['reverse', 'supplierReverse'].includes(entry.type) || ledger.reversed.has(entry.id))) return false;
+      if (status === 'reversed' && !['reverse', 'supplierReverse'].includes(entry.type) && !ledger.reversed.has(entry.id)) return false;
       if (!q) return true;
       let text = searchCache.get(entry.id);
       if (text === undefined) {
@@ -439,11 +453,13 @@ function resolveEntrySupplierOwners(entry, firmIds, owners, byIdLookup, visited 
 
 function projectHotSupplierParties(hot) {
   const firms = supplierFirms(hot.state);
+  const availableUnits = ledgerActiveSupplierUnits(hot.state);
   return firms.map(firm => {
     const ids = new Set(supplierAccountIds(hot.state, firm.id));
     const accounts = hot.state.accounts.filter(a => ids.has(a.id)).map(a => ({ id: a.id, name: a.name, unit: a.unit, balance: hot.state.balances[a.id] || 0 }));
     const lastEvent = hot.supplierLastEvents.get(firm.id);
-    return { ...firm, accounts, ...(lastEvent && { lastEvent }) };
+    const givenScrapBalances = hot.supplierGivenScrap?.get(firm.id) || {};
+    return { ...firm, accounts, availableUnits, givenScrapBalances, ...(lastEvent && { lastEvent }) };
   });
 }
 
@@ -457,8 +473,10 @@ export function extractHotState(ledger) {
   const { journal, ...rest } = ledger.state;
   const day = ledger.byDate.get(ledger.state.date) || blankTotals();
   const supplierLastEvents = new Map();
+  const supplierGivenScrap = new Map();
   for (const party of projectSupplierParties(ledger.state)) {
     if (party.lastEvent) supplierLastEvents.set(party.id, party.lastEvent);
+    if (party.givenScrapBalances && Object.keys(party.givenScrapBalances).length) supplierGivenScrap.set(party.id, party.givenScrapBalances);
   }
   const inventoryPurchaseEntries = new Map();
   for (const item of ledger.state.inventoryItems || []) {
@@ -489,6 +507,7 @@ export function extractHotState(ledger) {
       flowByUnit: structuredClone(day.flowByUnit)
     },
     supplierLastEvents,
+    supplierGivenScrap,
     inventoryPurchaseEntries,
     accountCreatedDates,
     accountCreatedSeq,
@@ -513,6 +532,7 @@ export function applyHotState(hot, nextState, newEntries, lookupById, startSeq) 
     return found?.entry || found;
   };
   let supplierLastEvents = hot.supplierLastEvents;
+  let supplierGivenScrap = hot.supplierGivenScrap || new Map();
   let inventoryPurchaseEntries = hot.inventoryPurchaseEntries;
   let accountCreatedDates = hot.accountCreatedDates;
   let accountCreatedSeq = hot.accountCreatedSeq;
@@ -588,6 +608,7 @@ export function applyHotState(hot, nextState, newEntries, lookupById, startSeq) 
     openingDate: hot.openingDate || newEntries[0]?.date || null,
     today: nextToday,
     supplierLastEvents,
+    supplierGivenScrap,
     inventoryPurchaseEntries,
     accountCreatedDates,
     accountCreatedSeq,
@@ -610,6 +631,7 @@ export function serializeHotSnapshot(hot) {
     openingDate: hot.openingDate,
     today: hot.today,
     supplierLastEvents: [...hot.supplierLastEvents.entries()],
+    supplierGivenScrap: [...(hot.supplierGivenScrap || new Map()).entries()],
     inventoryPurchaseEntries: [...hot.inventoryPurchaseEntries.entries()],
     accountCreatedDates: [...hot.accountCreatedDates.entries()],
     accountCreatedSeq: [...hot.accountCreatedSeq.entries()],
@@ -624,6 +646,7 @@ export function restoreHotSnapshot(parsed) {
     openingDate: parsed.openingDate ?? null,
     today: parsed.today,
     supplierLastEvents: new Map(parsed.supplierLastEvents || []),
+    supplierGivenScrap: new Map(parsed.supplierGivenScrap || []),
     inventoryPurchaseEntries: new Map(parsed.inventoryPurchaseEntries || []),
     accountCreatedDates: new Map(parsed.accountCreatedDates || []),
     accountCreatedSeq: new Map(parsed.accountCreatedSeq || []),

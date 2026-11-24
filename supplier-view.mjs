@@ -1,10 +1,10 @@
 import { fail, validDate, supplierAmendmentPreview } from './domain.mjs';
-import { supplierFirms, resolveSupplierFirm, supplierAccountIds, supplierDocuments } from './supplier-ledger.mjs';
+import { supplierFirms, resolveSupplierFirm, supplierAccountIds, supplierDocuments, ledgerActiveSupplierUnits, supplierGivenScrapBalances } from './supplier-ledger.mjs';
 
 function belongs(entry, id, accounts, byId, visited = new Set()) {
   if (!entry || visited.has(entry.id)) return false;
   visited.add(entry.id);
-  if (entry.meta?.supplierId === id || entry.meta?.counterpartyId === id || entry.entries.some(row => accounts.has(row.accountId))) return true;
+  if (entry.meta?.supplierId === id || entry.meta?.fromSupplierId === id || entry.meta?.toSupplierId === id || entry.meta?.counterpartyId === id || entry.entries.some(row => accounts.has(row.accountId))) return true;
   return ['reverse', 'supplierReverse', 'supplierReturn', 'supplierAmend'].includes(entry.type)
     && belongs(byId.get(entry.meta?.originalId), id, accounts, byId, visited);
 }
@@ -15,12 +15,13 @@ function accountRows(state, id) {
 }
 
 export function projectSupplierParties(state) {
-  const parties = supplierFirms(state).map(firm => ({...firm, accounts:accountRows(state,firm.id)}));
+  const availableUnits = ledgerActiveSupplierUnits(state);
+  const parties = supplierFirms(state).map(firm => ({...firm, accounts:accountRows(state,firm.id), availableUnits, givenScrapBalances: supplierGivenScrapBalances(state, firm.id)}));
   const byFirm = new Map(parties.map(firm=>[firm.id,firm]));
   const owners = new Map(parties.flatMap(firm=>firm.accounts.map(a=>[a.id,firm.id])));
   const eventOwners = new Map();
   for (const entry of state.journal) {
-    const ids = new Set([entry.meta?.supplierId,entry.meta?.counterpartyId,...entry.entries.map(row=>owners.get(row.accountId))].filter(id=>byFirm.has(id)));
+    const ids = new Set([entry.meta?.supplierId,entry.meta?.fromSupplierId,entry.meta?.toSupplierId,entry.meta?.counterpartyId,...entry.entries.map(row=>owners.get(row.accountId))].filter(id=>byFirm.has(id)));
     if (['reverse','supplierReverse','supplierReturn','supplierAmend'].includes(entry.type)) {
       for (const id of eventOwners.get(entry.meta?.originalId)||[]) ids.add(id);
     }
@@ -94,9 +95,13 @@ export function projectSupplierDetail(state, {supplierId, startDate='', endDate=
     const preview=supplierAmendmentPreview(state,editOriginalId);
     amendment={originalId:editOriginalId,documents:supplierDocuments(preview,supplierId),balances:preview.balances};
   }
-  const created = new Map(state.journal.filter(entry=>['account','supplierUnit'].includes(entry.type) && entry.meta?.accountId).map(entry=>[entry.meta.accountId,entry.date]));
+  const created = new Map();
+  for (const entry of state.journal) {
+    if (['account','supplierUnit'].includes(entry.type) && entry.meta?.accountId) created.set(entry.meta.accountId, entry.date);
+    if (Array.isArray(entry.meta?.createdAccountIds)) for (const id of entry.meta.createdAccountIds) created.set(id, entry.date);
+  }
   const periodStatements = endDate ? statements.filter(row=>!created.has(row.accountId) || created.get(row.accountId)<=endDate) : statements;
-  return structuredClone({revision:state.revision, supplier, accounts, startDate,endDate, statements:periodStatements, ...(includeDocuments&&{documents:supplierDocuments(state,supplierId)}),
+  return structuredClone({revision:state.revision, supplier, accounts, availableUnits: ledgerActiveSupplierUnits(state), givenScrapBalances: supplierGivenScrapBalances(state, supplierId), startDate,endDate, statements:periodStatements, ...(includeDocuments&&{documents:supplierDocuments(state,supplierId)}),
     ...(amendment&&{amendment}),
     events:events.slice(offset,next),total:events.length,
     ...(next < events.length && {nextCursor:Buffer.from(JSON.stringify({revision:state.revision,scope,offset:next})).toString('base64url')})});

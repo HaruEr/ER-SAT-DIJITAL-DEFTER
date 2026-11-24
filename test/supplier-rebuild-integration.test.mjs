@@ -85,9 +85,9 @@ test('native supplier write is atomic, idempotent and revision protected through
 
 test('employee cannot issue supplier commands or reuse an owner command key',async t=>{
   const c=await fixture(t);
-  const created=await c.post('/api/auth/employees',{name:'Sentetik çalışan',password:'synthetic-worker-password'});assert.equal(created.status,201);
+  const created=await c.post('/api/auth/employees',{name:'Sentetik çalışan',pin:'405060'});assert.equal(created.status,201);
   const person=await created.json();
-  const login=await fetch(c.base+'/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:person.id,password:'synthetic-worker-password'})});
+  const login=await fetch(c.base+'/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:person.id,pin:'405060'})});
   assert.equal(login.status,200);const {token}=await login.json(),before=snapshot(c.repo);
   const anonymous=await fetch(c.base+'/api/suppliers?supplierId=supplier-firm');assert.equal(anonymous.status,401);
   const employeeRead=await fetch(c.base+'/api/suppliers?supplierId=supplier-firm',{headers:{Authorization:'Bearer '+token}});assert.equal(employeeRead.status,403);
