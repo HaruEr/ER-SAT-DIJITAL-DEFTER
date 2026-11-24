@@ -34,6 +34,8 @@
           <div class="sidebar-label" id="nav-daily">GÜNLÜK ÇALIŞMA</div>
           <button type="button" data-view="overview" title="Günün Görünümü"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 11 12 3l9 8M5 10v11h14V10M9 21v-8h6v8"/></svg></span> Günün Görünümü</button>
           <button type="button" data-view="transaction" title="İşlem Ekranı"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h15m-4-4 4 4-4 4M20 17H5m4-4-4 4 4 4"/></svg></span> İşlem Ekranı</button>
+          <button type="button" data-view="orders" title="Siparişler"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 4h12a2 2 0 0 1 2 2v14l-4-2-4 2-4-2-4 2V6a2 2 0 0 1 2-2Zm3 5h6m-6 4h6"/></svg></span> Siparişler</button>
+          <button type="button" data-view="approvals" title="Onay Bekleyenler &amp; Çalışan İşlemleri"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span> Onay Bekleyenler <span class="nav-badge" id="approvals-badge" hidden>0</span></button>
           <button type="button" data-view="closing" title="Sayım ve Kapanış"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 4H5v17h14V4h-3M8 3h8v4H8zM8 14l3 3 5-6"/></svg></span> Sayım ve Kapanış</button>
         </div>
         <div class="nav-group" role="group" aria-labelledby="nav-accounts">
@@ -50,7 +52,7 @@
           <button type="button" data-view="backup" title="Yedek ve Çalışma Alanı"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 4h13l3 3v14H4V4Zm4 0v6h8V4M8 21v-7h8v7"/></svg></span> Yedek ve Çalışma Alanı</button>
         </div>
       </nav>
-      <div class="sidebar-bottom"><span class="status-dot" aria-hidden="true"></span> <span id="session-name">Yönetici</span><small><a href="/users">Çalışan hesapları</a></small><button id="logout" type="button" class="button secondary compact">Oturumu kapat</button></div>
+      <div class="sidebar-bottom"><span class="status-dot" aria-hidden="true"></span> <span id="session-name">Yönetici</span><small><a href="/users">Çalışan hesapları</a></small><button id="logout" type="button" class="button secondary compact" title="Oturumu kapat" aria-label="Oturumu kapat"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4m7 14 5-5-5-5m5 5H9"/></svg></span><span class="logout-label">Oturumu kapat</span></button></div>
     </aside>
     <div class="workspace">
       <header class="topbar">

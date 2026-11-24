@@ -53,11 +53,16 @@
     clear();
     sessionStorage.setItem(key, JSON.stringify(session));
   }
+  function updateActor(actor) {
+    const existing = current();
+    if (!existing || !actor) return;
+    sessionStorage.setItem(key, JSON.stringify({ ...existing, actor }));
+  }
   function finishRestore() {
     sessionStorage.setItem('defter-restore-complete','1');
     lock();
   }
-  window.DefterSession = { current, clear, lock, api, store, finishRestore, applyTheme: applySharedTheme };
+  window.DefterSession = { current, clear, lock, api, store, updateActor, finishRestore, applyTheme: applySharedTheme };
   if (location.pathname !== '/owner') {
     document.querySelector('#theme-toggle')?.addEventListener('click', () => {
       applySharedTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
@@ -65,14 +70,18 @@
   }
   if (location.pathname === '/') return;
   const session = current();
-  const expected = location.pathname === '/checkout' ? 'employee' : 'owner';
-  if (!session || session.expiresAt <= Date.now() || session.actor?.role !== expected) { lock(); return; }
+  const allowedRoles = location.pathname === '/checkout' ? ['employee', 'owner'] : ['owner'];
+  if (!session || session.expiresAt <= Date.now() || !allowedRoles.includes(session.actor?.role)) { lock(); return; }
+  if (session.actor?.mustChangePin) { document.body.hidden = true; location.replace('/'); return; }
   async function verify() {
     try {
       const actor = await api('/api/auth/session');
-      if (actor.role !== expected || actor.id !== session.actor.id) return lock();
+      if (!allowedRoles.includes(actor.role) || actor.id !== session.actor.id) return lock();
+      if (actor.mustChangePin) { updateActor(actor); document.body.hidden = true; location.replace('/'); return; }
       const label = document.querySelector('#session-name');
       if (label) label.textContent = actor.name;
+      const backOwner = document.querySelector('#back-to-owner');
+      if (backOwner) backOwner.hidden = actor.role !== 'owner';
     } catch { lock(); }
   }
   void verify();
