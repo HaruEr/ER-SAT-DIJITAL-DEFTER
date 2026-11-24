@@ -6,7 +6,9 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { IdentityStore, IdentityError } from '../identity.mjs';
 
-const password = 'Sentetik mağaza parolası';
+const password = '482910';
+const workerTempPin = '123456';
+const workerNewPin = '654321';
 function fixture(t) {
   const directory = mkdtempSync(join(tmpdir(), 'identity-'));
   let now = 10000000;
@@ -82,7 +84,7 @@ test('failures are generic and repeated guessing is limited until the window lap
   const { store, advance } = fixture(t);
   const owner = await store.initializeOwner({ name: 'Sahip', password });
   assert.equal(await store.login('a38d735c-1448-4996-a528-dfeaef9146c2', password), null);
-  for (let i = 0; i < 5; i++) assert.equal(await store.login(owner.id, 'incorrect'), null);
+  for (let i = 0; i < 5; i++) assert.equal(await store.login(owner.id, '999999'), null);
   assert.equal(await store.login(owner.id, password), null);
   advance(60001);
   assert.equal((await store.login(owner.id, password)).actor.id, owner.id);
@@ -91,11 +93,54 @@ test('failures are generic and repeated guessing is limited until the window lap
 test('invalid inputs never create an account or issue a token', async t => {
   const { store } = fixture(t);
   await assert.rejects(store.initializeOwner({ name: '', password }), { name: 'IdentityError', status: 400 });
-  await assert.rejects(store.initializeOwner({ name: 'Sahip', password: 'short' }));
-  await assert.rejects(store.initializeOwner({ name: 'Sahip', password: 'a'.repeat(1025) }));
+  await assert.rejects(store.initializeOwner({ name: 'Sahip', password: '12345' }));
+  await assert.rejects(store.initializeOwner({ name: 'Sahip', password: '1234567' }));
+  await assert.rejects(store.initializeOwner({ name: 'Sahip', password: 'abcdef' }));
+  await assert.rejects(store.initializeOwner({ name: 'Sahip', password: 'Sentetik mağaza parolası' }));
   const { owner } = await ownerSession(store);
-  for (const invalid of [null, {}, 'a'.repeat(1025)]) assert.equal(await store.login(owner.id, invalid), null);
+  for (const invalid of [null, {}, '12345', 'abcdef', 'Sentetik mağaza parolası']) assert.equal(await store.login(owner.id, invalid), null);
   for (const invalid of [null, {}, 'x'.repeat(1000)]) assert.equal(store.session(invalid), null);
+});
+
+test('mandatory first-login PIN change, self-service changePin, and owner resetEmployeePin', async t => {
+  const { store } = fixture(t);
+  const { token: ownerToken, owner } = await ownerSession(store);
+  assert.equal(owner.mustChangePin, false);
+
+  const emp = await store.createEmployee(ownerToken, { name: 'Kasiyer', pin: workerTempPin });
+  assert.equal(emp.mustChangePin, true);
+
+  const empSession = await store.login(emp.id, workerTempPin);
+  assert.equal(empSession.actor.mustChangePin, true);
+
+  // Cannot reuse temporary PIN as new PIN
+  await assert.rejects(store.changePin(empSession.token, { currentPin: workerTempPin, newPin: workerTempPin }), { status: 400 });
+  // Wrong current PIN returns 401
+  await assert.rejects(store.changePin(empSession.token, { currentPin: '000000', newPin: workerNewPin }), { status: 401 });
+
+  // Valid PIN change clears mustChangePin
+  const updated = await store.changePin(empSession.token, { currentPin: workerTempPin, newPin: workerNewPin });
+  assert.equal(updated.mustChangePin, false);
+  assert.equal(await store.login(emp.id, workerTempPin), null);
+  const empSession2 = await store.login(emp.id, workerNewPin);
+  assert.equal(empSession2.actor.mustChangePin, false);
+
+  // Owner resets employee PIN -> revokes active employee sessions and sets mustChangePin = true
+  await store.resetEmployeePin(ownerToken, { id: emp.id, newPin: '777888' });
+  assert.equal(store.session(empSession.token), null);
+  assert.equal(store.session(empSession2.token), null);
+  assert.equal(await store.login(emp.id, workerNewPin), null);
+  const afterReset = await store.login(emp.id, '777888');
+  assert.equal(afterReset.actor.mustChangePin, true);
+
+  // Owner changes own PIN with old PIN verification
+  const ownerUpdated = await store.changePin(ownerToken, { currentPin: password, newPin: '334455' });
+  assert.equal(ownerUpdated.role, 'owner');
+  assert.equal(await store.login(owner.id, password), null);
+  assert.equal((await store.login(owner.id, '334455')).actor.id, owner.id);
+  // loginByName supports Turkish case-insensitive match and rejects unknown usernames
+  assert.equal((await store.loginByName('  sahip ', '334455')).actor.id, owner.id);
+  assert.equal(await store.loginByName('Bilinmeyen Kişi', '334455'), null);
 });
 
 test('will not attach identity records to a financial or foreign SQLite database', t => {

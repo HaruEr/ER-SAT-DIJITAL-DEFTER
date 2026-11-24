@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomInt } from 'node:crypto';
 
 const sessions = new Map();
 export async function authenticateTestOwner(server) {
   const { address, port } = server.address();
   assert.equal(address, '127.0.0.1');
   const origin = 'http://127.0.0.1:' + port;
-  const password = randomUUID();
+  const password = String(randomInt(100000, 1000000));
   const response = await globalThis.fetch(origin + '/api/auth/setup', {
     method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: 'Sentetik yönetici', password })

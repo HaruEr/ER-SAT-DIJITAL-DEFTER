@@ -35,17 +35,42 @@ export class DownloadTickets {
   }
 }
 
+export const PRIVATE_WEIGHT_POOLS = new Set(['bilezik22', 'taki14', 'taki22']);
+const SARRAFIYE_IDS = new Set(['ceyrek', 'yarim', 'ziynet', 'cumhuriyet', 'resat']);
+
+export function workerCountCatalog(state) {
+  const items = [];
+  for (const a of state.accounts || []) {
+    if (a.kind !== 'asset' || !a.physical || a.retired) continue;
+    if (!['ADET', 'GRAM'].includes(a.unit)) continue;
+    if (PRIVATE_WEIGHT_POOLS.has(a.id)) continue;
+    if (a.id === 'gramToplam' && state.nominalUnconfirmed) continue;
+    const group = a.scrap ? 'hurda'
+      : a.id === 'gramToplam' ? 'gram'
+      : SARRAFIYE_IDS.has(a.id) ? 'sarrafiye'
+      : 'urun';
+    items.push({ id: a.id, name: a.name, unit: a.unit, group });
+  }
+  return items;
+}
+
+export function allowedWorkerCountIds(state) {
+  return new Set(workerCountCatalog(state).map(item => item.id));
+}
+
 function paymentSources(state) {
   return state.accounts.filter(a => a.kind === 'asset' && !a.retired && !['GRAM','ADET'].includes(a.unit));
 }
-export function checkoutState(state) {
+export function checkoutState(state, { hidePrivatePools = true } = {}) {
   const free = id => Math.max(0, (state.balances[id] || 0) - (state.inventoryReserved?.[id] || 0));
   const available = state.accounts.filter(a => !a.retired && (a.isSaleable || a.isPurchasable));
   return {
     initialized: state.initialized, date: state.date, revision: state.revision,
     payments: paymentSources(state).map(({ id, name, unit }) => ({ id, name, unit })),
-    stocks: state.accounts.filter(a => a.kind === 'asset' && a.physical && !a.retired && ['GRAM','ADET'].includes(a.unit))
+    stocks: state.accounts
+      .filter(a => a.kind === 'asset' && a.physical && !a.retired && ['GRAM','ADET'].includes(a.unit) && (!hidePrivatePools || !PRIVATE_WEIGHT_POOLS.has(a.id)))
       .map(({id,name,unit}) => ({id,name,unit,quantity:state.balances[id] || 0,freeQuantity:free(id)})),
+    countItems: workerCountCatalog(state),
     inventoryItems: (state.inventoryItems || []).filter(i => i.status === 'available')
       .map(({ code, barcode, description, accountId, weightAccount, actualWeight, status }) =>
         ({ code, barcode, description, accountId, weightAccount, actualWeight, status })),
@@ -55,6 +80,7 @@ export function checkoutState(state) {
       canBuy: a.isPurchasable && !(a.id === 'gramToplam' && state.nominalUnconfirmed),
       weights: a.pairedGroups.map(id => {
         const pool = state.accounts.find(account => account.id === id);
+        if (hidePrivatePools && PRIVATE_WEIGHT_POOLS.has(id)) return { id, name: pool.name };
         return { id, name: pool.name, quantity: state.balances[id] || 0, freeQuantity: free(id) };
       })
     }))

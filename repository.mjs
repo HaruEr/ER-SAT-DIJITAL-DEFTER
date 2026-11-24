@@ -4,7 +4,8 @@ import { isSupplierCommand, supplierAccountIds, supplierDocuments } from './supp
 import { underlyingSaleCommand } from './sale-pricing.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { replay, fail, text, eventVersion, eventActor, applyEvent, validDate, workdaySummary as computeWorkdaySummary } from './domain.mjs';
+import { replay, fail, text, quantity, eventVersion, eventActor, applyEvent, validDate, workdaySummary as computeWorkdaySummary } from './domain.mjs';
+import { allowedWorkerCountIds, workerCountCatalog } from './editor-access.mjs';
 import { exportLedgerArchive, importLedgerArchive } from './archive.mjs';
 import {
   LEDGER_CACHE_MAX_BYTES,
@@ -97,7 +98,48 @@ export class Repository {
         a TEXT NOT NULL,
         b TEXT NOT NULL,
         PRIMARY KEY(a, b)
-      );`);
+      );
+      CREATE TABLE IF NOT EXISTS pending_submissions(
+        id TEXT PRIMARY KEY NOT NULL,
+        workspace TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+        date TEXT NOT NULL,
+        type TEXT NOT NULL CHECK(type IN ('sale','purchase','dailyCount')),
+        submitted_by_id TEXT NOT NULL,
+        submitted_by_name TEXT NOT NULL,
+        submitted_at TEXT NOT NULL,
+        command_json TEXT NOT NULL,
+        approved_command_json TEXT,
+        summary_json TEXT NOT NULL,
+        reviewed_by_id TEXT,
+        reviewed_by_name TEXT,
+        reviewed_at TEXT,
+        was_edited INTEGER NOT NULL DEFAULT 0 CHECK(was_edited IN (0, 1)),
+        rejection_reason TEXT,
+        approved_event_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_ps_status ON pending_submissions(status, submitted_at);
+      CREATE INDEX IF NOT EXISTS idx_ps_worker_date ON pending_submissions(submitted_by_id, date, status);`);
+    const psSchema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='pending_submissions'").get();
+    if (psSchema?.sql && !psSchema.sql.includes("'dailyCount'")) {
+      this.db.exec(`BEGIN IMMEDIATE;
+        ALTER TABLE pending_submissions RENAME TO pending_submissions_old;
+        CREATE TABLE pending_submissions(
+          id TEXT PRIMARY KEY NOT NULL, workspace TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+          date TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('sale','purchase','dailyCount')),
+          submitted_by_id TEXT NOT NULL, submitted_by_name TEXT NOT NULL, submitted_at TEXT NOT NULL,
+          command_json TEXT NOT NULL, approved_command_json TEXT, summary_json TEXT NOT NULL,
+          reviewed_by_id TEXT, reviewed_by_name TEXT, reviewed_at TEXT,
+          was_edited INTEGER NOT NULL DEFAULT 0 CHECK(was_edited IN (0, 1)),
+          rejection_reason TEXT, approved_event_id TEXT
+        );
+        INSERT INTO pending_submissions SELECT * FROM pending_submissions_old;
+        DROP TABLE pending_submissions_old;
+        CREATE INDEX IF NOT EXISTS idx_ps_status ON pending_submissions(status, submitted_at);
+        CREATE INDEX IF NOT EXISTS idx_ps_worker_date ON pending_submissions(submitted_by_id, date, status);
+        COMMIT;`);
+    }
   }
   events({ stream = false } = {}) {
     const rows = this.db.prepare('SELECT body FROM events ORDER BY seq').iterate();
@@ -393,7 +435,7 @@ export class Repository {
     return this.#hotJournalPage(owned.data, normalized);
   }
   #hotJournalPage(hot, normalized) {
-    const { scope, q, type, limit, cursor, startDate = '', endDate = '', accountId = '', scrapForSale = '', scrapForAdvance = '' } = normalized;
+    const { scope, q, type, limit, cursor, startDate = '', endDate = '', accountId = '', unit = '', status = 'all', scrapForSale = '', scrapForAdvance = '' } = normalized;
     const inheritParty = accountId ? selectedAccountForState(hot.state, accountId).kind === 'receivable' : false;
     const revision = hot.state.revision;
     const filterHash = journalFilterHash(normalized);
@@ -417,6 +459,19 @@ export class Repository {
         ? 'seq IN (SELECT seq FROM ledger_journal_accounts WHERE account_id = ?)'
         : 'seq IN (SELECT seq FROM ledger_journal_accounts WHERE account_id = ? AND match_kind = 0)');
       params.push(accountId);
+    }
+    if (unit) {
+      const unitAccIds = hot.state.accounts.filter(a => a.unit === unit).map(a => a.id);
+      if (!unitAccIds.length) { clauses.push('0 = 1'); }
+      else {
+        clauses.push(`seq IN (SELECT seq FROM ledger_journal_accounts WHERE match_kind = 0 AND account_id IN (${unitAccIds.map(() => '?').join(',')}))`);
+        params.push(...unitAccIds);
+      }
+    }
+    if (status === 'active') {
+      clauses.push("type NOT IN ('reverse', 'supplierReverse') AND id NOT IN (SELECT original_id FROM ledger_journal WHERE type IN ('reverse', 'supplierReverse') AND original_id IS NOT NULL)");
+    } else if (status === 'reversed') {
+      clauses.push("(type IN ('reverse', 'supplierReverse') OR id IN (SELECT original_id FROM ledger_journal WHERE type IN ('reverse', 'supplierReverse') AND original_id IS NOT NULL))");
     }
     if (q) { clauses.push('INSTR(search_text, ?) > 0'); params.push(q); }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
@@ -625,11 +680,15 @@ export class Repository {
       return { workspace: this.workspace, revision, canRestore };
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
-  execute({ id, revision, command }, { compact = false, actor = null } = {}) {
+  execute({ id, revision, command }, { compact = false, actor = null, submittedBy = null, wasEdited = false } = {}) {
     text(id, 'İşlem anahtarı', 100);
     if (!command || typeof command !== 'object') fail('İşlem içeriği gerekli.');
     if (actor && ['stocktake', 'close'].includes(command.type)) command = { ...command, approvedBy: actor.name };
-    const audit = actor && { version: 1, actor: { id: actor.id, name: actor.name, role: actor.role } };
+    const audit = actor && {
+      version: 1,
+      actor: { id: actor.id, name: actor.name, role: actor.role },
+      ...(submittedBy ? { submittedBy: { id: submittedBy.id, name: submittedBy.name }, ...(wasEdited ? { wasEdited: true } : {}) } : {})
+    };
     if (audit) eventActor({ audit, command });
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -786,6 +845,330 @@ export class Repository {
       }
       return this.#project(remembered.mode, remembered.data, compact);
     } catch (e) { this.#cache = null; if (this.db.isTransaction) this.db.exec('ROLLBACK'); throw e; }
+  }
+  pendingCount() {
+    return this.db.prepare("SELECT COUNT(*) AS c FROM pending_submissions WHERE status='pending'").get().c;
+  }
+  #summarizeTrade(state, command) {
+    if (!command || typeof command !== 'object' || !['sale', 'purchase'].includes(command.type)) {
+      fail('Yalnız satış veya alış işlemleri onaya gönderilebilir.');
+    }
+    const schemaVersion = eventVersion(command, state);
+    const previewEvent = { id: 'dry-run-pending', schemaVersion, timestamp: new Date().toISOString(), command };
+    if (schemaVersion === 10) previewEvent.tradeVersion = eventVersion(underlyingSaleCommand(command), state);
+    if ((schemaVersion === 11 || previewEvent.tradeVersion === 11) && usesInventory(command)) previewEvent.saleInventoryVersion = 1;
+    const nextState = applyEvent(state, previewEvent);
+    const entry = nextState.journal.at(-1);
+    const byId = new Map(state.accounts.map(a => [a.id, a]));
+    const customer = entry.meta.counterpartyId ? byId.get(entry.meta.counterpartyId) : null;
+    const lines = (entry.meta.lines || []).map(l => {
+      const acc = byId.get(l.accountId);
+      const wg = l.weightAccount ? byId.get(l.weightAccount) : null;
+      return {
+        accountId: l.accountId,
+        name: acc?.name || l.accountId,
+        unit: acc?.unit || 'ADET',
+        quantity: l.quantity,
+        weightAccount: l.weightAccount || null,
+        weightAccountName: wg?.name || null,
+        weight: l.weight || 0,
+        value: l.value
+      };
+    });
+    const totalTL = lines.reduce((sum, l) => sum + l.value, 0);
+    const totalGram = lines.reduce((sum, l) => sum + (l.weightAccount ? l.weight : (l.unit === 'GRAM' ? l.quantity : 0)), 0);
+    const mapAlloc = arr => (arr || []).map(r => {
+      const a = byId.get(r.accountId);
+      return { accountId: r.accountId, name: a?.name || r.accountId, unit: a?.unit || 'TL', quantity: r.quantity, valueTL: r.valueTL, weight: r.weight || 0 };
+    });
+    return {
+      type: command.type,
+      date: command.date,
+      customerId: customer?.id || '',
+      customerName: customer?.name || 'Peşin / isimsiz müşteri',
+      totalTL,
+      totalGram,
+      note: entry.meta.note || '',
+      lines,
+      received: mapAlloc(entry.meta.receivedLines),
+      given: mapAlloc(entry.meta.givenLines),
+      credits: mapAlloc(entry.meta.creditLines),
+      debts: mapAlloc(entry.meta.debtLines)
+    };
+  }
+  #summarizeBlindCount(state, command) {
+    if (!command || typeof command !== 'object' || command.type !== 'dailyCount') {
+      fail('Geçerli günlük sayım verisi gerekli.');
+    }
+    if (command.date !== state.date) fail('Sayım yalnız açık iş gününe gönderilebilir.');
+    if (!command.counts || typeof command.counts !== 'object' || Array.isArray(command.counts)) {
+      fail('En az bir kalemin fiziki sayımını girin.');
+    }
+    const allowed = allowedWorkerCountIds(state);
+    const catalogById = new Map(workerCountCatalog(state).map(c => [c.id, c]));
+    const reasonsInput = command.reasons && typeof command.reasons === 'object' && !Array.isArray(command.reasons) ? command.reasons : {};
+    const cleanCounts = {};
+    const cleanReasons = {};
+    const rows = [];
+    for (const [accId, rawVal] of Object.entries(command.counts)) {
+      if (!allowed.has(accId)) {
+        fail('Bu kalem çalışan sayım yetkisi dışındadır.', { status: 403 });
+      }
+      if (rawVal === null || rawVal === undefined || String(rawVal).trim() === '') continue;
+      const item = catalogById.get(accId);
+      const counted = quantity(String(rawVal), item.unit, { zero: true });
+      const rawReason = reasonsInput[accId];
+      const reason = typeof rawReason === 'string' ? rawReason.trim().slice(0, 160) : '';
+      cleanCounts[accId] = String(rawVal).trim();
+      if (reason) cleanReasons[accId] = reason;
+      rows.push({ accountId: accId, name: item.name, unit: item.unit, group: item.group, counted, reason });
+    }
+    if (!rows.length) fail('En az bir kalemin fiziki sayımını girin.');
+    const note = typeof command.note === 'string' ? command.note.trim().slice(0, 160) : '';
+    const cleanCommand = { type: 'dailyCount', date: state.date, counts: cleanCounts, reasons: cleanReasons, ...(note ? { note } : {}) };
+    return {
+      cleanCommand,
+      summary: {
+        type: 'dailyCount',
+        date: state.date,
+        countedCount: rows.length,
+        notedCount: rows.filter(r => r.reason).length,
+        note,
+        rows
+      }
+    };
+  }
+  submitPending({ id, revision, command }, { actor }) {
+    text(id, 'Bildirim anahtarı', 100);
+    if (!actor?.id || !actor?.name) fail('İşlem sahibi bilgisi gerekli.');
+    if (!command || typeof command !== 'object' || !['sale', 'purchase', 'dailyCount'].includes(command.type)) {
+      fail('Yalnız satış, alış veya günlük sayım işlemleri onaya gönderilebilir.');
+    }
+    const existing = this.db.prepare('SELECT * FROM pending_submissions WHERE id=?').get(id);
+    if (existing) {
+      if (existing.submitted_by_id !== actor.id) {
+        fail('Aynı bildirim anahtarı farklı kullanıcıyla kullanılamaz.');
+      }
+      const storedSummary = JSON.parse(existing.summary_json);
+      return { id: existing.id, status: existing.status, duplicate: true, submittedAt: existing.submitted_at, summary: storedSummary };
+    }
+    const currentState = this.state({ compact: false });
+    if (!currentState.initialized) fail('Defter henüz açılmamış.');
+    if (revision !== undefined && (!Number.isInteger(revision) || revision !== currentState.revision)) {
+      fail('Defter başka bir işlemle güncellendi. Ekranı yenileyip tekrar deneyin.', { status: 409, code: 'REVISION_CONFLICT' });
+    }
+    let storedCommand = command;
+    let summary;
+    if (command.type === 'dailyCount') {
+      const built = this.#summarizeBlindCount(currentState, command);
+      storedCommand = built.cleanCommand;
+      summary = built.summary;
+    } else {
+      summary = this.#summarizeTrade(currentState, command);
+    }
+    const submittedAt = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO pending_submissions(
+        id, workspace, status, date, type, submitted_by_id, submitted_by_name, submitted_at,
+        command_json, summary_json
+      ) VALUES(?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, this.workspace, storedCommand.date, storedCommand.type, actor.id, actor.name, submittedAt, JSON.stringify(storedCommand), JSON.stringify(summary));
+    return { id, status: 'pending', duplicate: false, submittedAt, summary };
+  }
+  #formatPendingRow(row, userNamesById = null, { includeComparison = false, balances = null } = {}) {
+    const currentName = userNamesById?.get(row.submitted_by_id) || row.submitted_by_name;
+    const reviewerName = row.reviewed_by_id ? (userNamesById?.get(row.reviewed_by_id) || row.reviewed_by_name) : null;
+    const summary = JSON.parse(row.summary_json);
+    let comparison = null;
+    if (includeComparison && row.type === 'dailyCount' && balances) {
+      const rows = (summary.rows || []).map(r => {
+        const expected = balances[r.accountId] || 0;
+        const difference = r.counted - expected;
+        return { ...r, expected, difference };
+      });
+      comparison = {
+        rows,
+        diffCount: rows.filter(r => r.difference !== 0).length,
+        matchCount: rows.filter(r => r.difference === 0).length
+      };
+    }
+    return {
+      id: row.id,
+      workspace: row.workspace,
+      status: row.status,
+      date: row.date,
+      type: row.type,
+      submittedBy: { id: row.submitted_by_id, name: currentName },
+      submittedAt: row.submitted_at,
+      command: JSON.parse(row.approved_command_json || row.command_json),
+      originalCommand: JSON.parse(row.command_json),
+      summary,
+      ...(comparison ? { comparison } : {}),
+      reviewedBy: row.reviewed_by_id ? { id: row.reviewed_by_id, name: reviewerName } : null,
+      reviewedAt: row.reviewed_at || null,
+      wasEdited: Boolean(row.was_edited),
+      rejectionReason: row.rejection_reason || '',
+      approvedEventId: row.approved_event_id || null
+    };
+  }
+  listPending({ status = 'pending', submittedById = '', type = 'all', startDate = '', endDate = '', limit = 100, userNamesById = null, includeComparison = false } = {}) {
+    const where = [];
+    const params = [];
+    if (status === 'approved_direct') { where.push("status='approved' AND was_edited=0"); }
+    else if (status === 'approved_edited') { where.push("status='approved' AND was_edited=1"); }
+    else if (['pending', 'approved', 'rejected'].includes(status)) { where.push('status=?'); params.push(status); }
+    if (submittedById) { where.push('submitted_by_id=?'); params.push(submittedById); }
+    if (['sale', 'purchase', 'dailyCount'].includes(type)) { where.push('type=?'); params.push(type); }
+    if (startDate) { validDate(startDate); where.push('date>=?'); params.push(startDate); }
+    if (endDate) { validDate(endDate); where.push('date<=?'); params.push(endDate); }
+    const sql = `SELECT * FROM pending_submissions${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY submitted_at DESC LIMIT ?`;
+    params.push(Math.min(500, Math.max(1, Number(limit) || 100)));
+    const balances = includeComparison ? this.state({ compact: true }).balances : null;
+    return this.db.prepare(sql).all(...params).map(r => this.#formatPendingRow(r, userNamesById, { includeComparison, balances }));
+  }
+  employeeAnalytics({ submittedById = '', startDate = '', endDate = '', userNamesById = null } = {}) {
+    const where = [];
+    const params = [];
+    if (startDate) { validDate(startDate); where.push('date>=?'); params.push(startDate); }
+    if (endDate) { validDate(endDate); where.push('date<=?'); params.push(endDate); }
+    const allRows = this.db.prepare(`SELECT * FROM pending_submissions${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY submitted_at DESC`).all(...params);
+    const sarrafiyeIds = new Set(['ceyrek', 'yarim', 'ziynet', 'cumhuriyet', 'resat']);
+    const gramIds = new Set(['gramToplam', 'hurda24']);
+    const classifyLine = l => {
+      if (l.accountId === 'bilezikAdet' || l.weightAccount === 'bilezik22' || l.accountId === 'bilezik22') return 'bilezik';
+      if (l.weightAccount === 'taki14' || l.accountId === 'taki14') return 'taki14';
+      if (l.weightAccount === 'taki22' || l.accountId === 'taki22') return 'taki22';
+      if (sarrafiyeIds.has(l.accountId)) return 'sarrafiye';
+      if (gramIds.has(l.accountId)) return 'gram';
+      return 'diger';
+    };
+    const makeCategories = () => ({
+      bilezik: { key: 'bilezik', label: 'Bilezik (22 Ayar)', pieces: 0, gram: 0, totalTL: 0, products: new Map() },
+      taki22: { key: 'taki22', label: '22 Ayar Ürün / Takı', pieces: 0, gram: 0, totalTL: 0, products: new Map() },
+      taki14: { key: 'taki14', label: '14 Ayar Ürün / Takı', pieces: 0, gram: 0, totalTL: 0, products: new Map() },
+      sarrafiye: { key: 'sarrafiye', label: 'Sarrafiye', pieces: 0, gram: 0, totalTL: 0, products: new Map() },
+      gram: { key: 'gram', label: 'Gram Altın', pieces: 0, gram: 0, totalTL: 0, products: new Map() },
+      diger: { key: 'diger', label: 'Diğer / Hurda / Saat', pieces: 0, gram: 0, totalTL: 0, products: new Map() }
+    });
+    const makeBucket = (id, name) => ({
+      id, name,
+      pendingCount: 0, approvedCount: 0, approvedDirectCount: 0, approvedEditedCount: 0, rejectedCount: 0,
+      saleCount: 0, saleTotalTL: 0, saleTotalGram: 0,
+      purchaseCount: 0, purchaseTotalTL: 0, purchaseTotalGram: 0,
+      salesByCategory: makeCategories(),
+      purchasesByCategory: makeCategories()
+    });
+    const addToBucket = (bucket, row, summary) => {
+      if (row.status === 'pending') { bucket.pendingCount++; return; }
+      if (row.status === 'rejected') { bucket.rejectedCount++; return; }
+      bucket.approvedCount++;
+      if (row.was_edited) bucket.approvedEditedCount++; else bucket.approvedDirectCount++;
+      if (row.type === 'dailyCount') return;
+      const isSale = row.type === 'sale';
+      if (isSale) { bucket.saleCount++; bucket.saleTotalTL += summary.totalTL; bucket.saleTotalGram += summary.totalGram; }
+      else { bucket.purchaseCount++; bucket.purchaseTotalTL += summary.totalTL; bucket.purchaseTotalGram += summary.totalGram; }
+      const catMap = isSale ? bucket.salesByCategory : bucket.purchasesByCategory;
+      for (const l of summary.lines || []) {
+        const cat = catMap[classifyLine(l)];
+        const pieces = l.unit === 'ADET' ? l.quantity : 0;
+        const gram = l.weightAccount ? l.weight : (l.unit === 'GRAM' ? l.quantity : 0);
+        cat.pieces += pieces;
+        cat.gram += gram;
+        cat.totalTL += l.value;
+        const prodKey = `${l.accountId}:${l.weightAccount || ''}`;
+        if (!cat.products.has(prodKey)) {
+          cat.products.set(prodKey, { accountId: l.accountId, name: l.name, weightAccountName: l.weightAccountName || '', unit: l.unit, pieces: 0, gram: 0, totalTL: 0 });
+        }
+        const p = cat.products.get(prodKey);
+        p.pieces += pieces; p.gram += gram; p.totalTL += l.value;
+      }
+    };
+    const serializeBucket = b => {
+      const decided = b.approvedCount + b.rejectedCount;
+      const serializeCats = cats => Object.values(cats).map(c => ({
+        key: c.key, label: c.label, pieces: c.pieces, gram: c.gram, totalTL: c.totalTL,
+        products: [...c.products.values()].sort((a, x) => x.totalTL - a.totalTL || x.gram - a.gram)
+      }));
+      return {
+        id: b.id, name: b.name,
+        pendingCount: b.pendingCount, approvedCount: b.approvedCount,
+        approvedDirectCount: b.approvedDirectCount, approvedEditedCount: b.approvedEditedCount,
+        rejectedCount: b.rejectedCount,
+        approvalRatePct: decided ? Math.round((b.approvedCount * 100) / decided) : null,
+        directAccuracyPct: b.approvedCount ? Math.round((b.approvedDirectCount * 100) / b.approvedCount) : null,
+        saleCount: b.saleCount, saleTotalTL: b.saleTotalTL, saleTotalGram: b.saleTotalGram,
+        purchaseCount: b.purchaseCount, purchaseTotalTL: b.purchaseTotalTL, purchaseTotalGram: b.purchaseTotalGram,
+        salesByCategory: serializeCats(b.salesByCategory),
+        purchasesByCategory: serializeCats(b.purchasesByCategory)
+      };
+    };
+    const empMap = new Map();
+    const totals = makeBucket('all', 'Tüm Çalışanlar');
+    for (const row of allRows) {
+      const empName = userNamesById?.get(row.submitted_by_id) || row.submitted_by_name;
+      if (!empMap.has(row.submitted_by_id)) empMap.set(row.submitted_by_id, makeBucket(row.submitted_by_id, empName));
+      const summary = JSON.parse(row.summary_json);
+      addToBucket(empMap.get(row.submitted_by_id), row, summary);
+      if (!submittedById || row.submitted_by_id === submittedById) addToBucket(totals, row, summary);
+    }
+    const byEmployee = [...empMap.values()].map(serializeBucket)
+      .sort((a, b) => b.saleTotalTL - a.saleTotalTL || b.approvedCount - a.approvedCount || a.name.localeCompare(b.name, 'tr'));
+    return { totals: serializeBucket(totals), byEmployee };
+  }
+  approvePending({ id, commandOverride = null, revision, actor }, { compact = false } = {}) {
+    text(id, 'Bildirim anahtarı', 100);
+    if (!actor || actor.role !== 'owner') fail('Onay için yönetici oturumu gerekli.', { status: 403 });
+    const row = this.db.prepare('SELECT * FROM pending_submissions WHERE id=?').get(id);
+    if (!row) fail('Onay bekleyen bildirim bulunamadı.', { status: 404 });
+    if (row.status === 'approved') {
+      return { ok: true, id, approvedEventId: row.approved_event_id, wasEdited: Boolean(row.was_edited), duplicate: true, state: this.state({ compact }) };
+    }
+    if (row.status !== 'pending') fail('Bu bildirim daha önce reddedilmiş.', { status: 409 });
+    if (row.type === 'dailyCount') {
+      const storedCommand = JSON.parse(row.command_json);
+      const reviewedAt = new Date().toISOString();
+      this.db.prepare(`
+        UPDATE pending_submissions
+        SET status='approved', reviewed_by_id=?, reviewed_by_name=?, reviewed_at=?, was_edited=0
+        WHERE id=?
+      `).run(actor.id, actor.name, reviewedAt, id);
+      const st = this.state({ compact });
+      return { ok: true, id, type: 'dailyCount', counts: storedCommand.counts || {}, reasons: storedCommand.reasons || {}, note: storedCommand.note || '', duplicate: false, state: st };
+    }
+    const currentState = this.state({ compact: false });
+    const storedCommand = JSON.parse(row.command_json);
+    const wasEdited = Boolean(commandOverride && typeof commandOverride === 'object');
+    const finalCommand = { ...(wasEdited ? commandOverride : storedCommand), date: currentState.date };
+    if (!['sale', 'purchase'].includes(finalCommand.type)) fail('Onaylanan işlem satış veya alış olmalı.');
+    const approvedSummary = this.#summarizeTrade(currentState, finalCommand);
+    const eventId = `approve-${id}`;
+    const execResult = this.execute(
+      { id: eventId, revision, command: finalCommand },
+      { compact, actor, submittedBy: { id: row.submitted_by_id, name: row.submitted_by_name }, wasEdited }
+    );
+    const reviewedAt = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE pending_submissions
+      SET status='approved', approved_command_json=?, summary_json=?,
+          reviewed_by_id=?, reviewed_by_name=?, reviewed_at=?, was_edited=?, approved_event_id=?
+      WHERE id=?
+    `).run(JSON.stringify(finalCommand), JSON.stringify(approvedSummary), actor.id, actor.name, reviewedAt, wasEdited ? 1 : 0, eventId, id);
+    return { ok: true, id, approvedEventId: eventId, wasEdited, duplicate: execResult.duplicate, state: execResult.state };
+  }
+  rejectPending({ id, reason, actor }) {
+    text(id, 'Bildirim anahtarı', 100);
+    if (!actor || actor.role !== 'owner') fail('Red işlemi için yönetici oturumu gerekli.', { status: 403 });
+    const cleanReason = text(reason, 'Red gerekçesi', 160);
+    const row = this.db.prepare('SELECT * FROM pending_submissions WHERE id=?').get(id);
+    if (!row) fail('Onay bekleyen bildirim bulunamadı.', { status: 404 });
+    if (row.status !== 'pending') fail('Yalnızca onay bekleyen bildirimler reddedilebilir.', { status: 409 });
+    const reviewedAt = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE pending_submissions
+      SET status='rejected', rejection_reason=?, reviewed_by_id=?, reviewed_by_name=?, reviewed_at=?
+      WHERE id=?
+    `).run(cleanReason, actor.id, actor.name, reviewedAt, id);
+    return { ok: true, id, status: 'rejected', rejectionReason: cleanReason };
   }
   close() {
     if (this.#snapshotDirty && this.#cache) {
