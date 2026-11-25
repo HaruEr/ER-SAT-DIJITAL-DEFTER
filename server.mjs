@@ -10,6 +10,7 @@ import { BlockList, isIP } from 'node:net';
 import { DatabaseSync } from 'node:sqlite';
 import { Repository, BACKUP_MAX_BYTES } from './repository.mjs';
 import { DomainError, fail, isWorkerCustomerCreation } from './domain.mjs';
+import { CloudflareAccessError, createCloudflareAccessVerifier, normalizeCfEmail, normalizeCfTeamDomain, validateCfAud } from './cloudflare-access.mjs';
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const diagnosticCodes = new Set(['EACCES', 'EPERM', 'ENOENT', 'ENOSPC', 'EIO', 'EMFILE', 'ENFILE', 'ERR_SQLITE_ERROR', 'SQLITE_BUSY', 'SQLITE_LOCKED', 'SQLITE_CORRUPT', 'SQLITE_FULL', 'SQLITE_CANTOPEN', 'SQLITE_IOERR', 'BACKUP_HISTORY_INVALID', 'STORED_HISTORY_INVALID']);
 const operations = new Map(['state', 'summary', 'backup', 'command', 'restore', 'recovery'].map(name => [`/api/${name}`, name]));
@@ -44,7 +45,7 @@ const staticFiles = new Map([
   ['/vendor/pdfmake/vfs_fonts.js', ['vendor/pdfmake/vfs_fonts.js', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']]
 ]);
-const PROXY_MARKER_RE = /^(?:forwarded$|x-forwarded-|x-real-ip$|tailscale-|x-store-proxy-secret$)/i;
+const PROXY_MARKER_RE = /^(?:forwarded$|x-forwarded-|x-real-ip$|tailscale-|cf-|x-store-proxy-secret$)/i;
 const CONTROL_OR_INVISIBLE_RE = /[\s\r\n\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/;
 const LOGIN_ENTRY_RE = /^[^\s,*\r\n\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]{1,254}$/;
 const DNS_HOST_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
@@ -230,16 +231,56 @@ export function validateServerDeployConfig(config = {}) {
     return validatedLocal;
   }
 
+  const ownerAuthProvider = config.ownerAuthProvider === undefined ? 'tailscale' : config.ownerAuthProvider;
+  if (ownerAuthProvider !== 'tailscale' && ownerAuthProvider !== 'cloudflare-access') {
+    throw new Error('OWNER_AUTH_PROVIDER yalnız "tailscale" veya "cloudflare-access" olabilir.');
+  }
+  const storeIpHeader = config.storeIpHeader === undefined ? 'x-real-ip' : config.storeIpHeader;
+  if (storeIpHeader !== 'x-real-ip' && storeIpHeader !== 'cf-connecting-ip') {
+    throw new Error('STORE_IP_HEADER yalnız "x-real-ip" veya "cf-connecting-ip" olabilir.');
+  }
+
+  let cfTeam = null;
+  let ownerCfAud = null;
+  let cfVerifierOptions = null;
+  if (ownerAuthProvider === 'cloudflare-access') {
+    cfTeam = normalizeCfTeamDomain(config.ownerCfTeamDomain, 'OWNER_CF_TEAM_DOMAIN');
+    ownerCfAud = validateCfAud(config.ownerCfAud, 'OWNER_CF_AUD');
+    const rawOpts = {};
+    if (config.jwksProvider !== undefined) rawOpts.jwksProvider = config.jwksProvider;
+    if (config.cfJwksCacheTtlMs !== undefined) rawOpts.cacheTtlMs = config.cfJwksCacheTtlMs;
+    if (config.cfMinRefreshIntervalMs !== undefined) rawOpts.minRefreshIntervalMs = config.cfMinRefreshIntervalMs;
+    if (config.cfJwksTimeoutMs !== undefined) rawOpts.fetchTimeoutMs = config.cfJwksTimeoutMs;
+    if (config.cfClockSkewSeconds !== undefined) rawOpts.clockSkewSeconds = config.cfClockSkewSeconds;
+    if (config.cfNow !== undefined) rawOpts.now = config.cfNow;
+    createCloudflareAccessVerifier({
+      cfTeamDomain: cfTeam.issuer,
+      cfAud: ownerCfAud,
+      ...rawOpts
+    });
+    cfVerifierOptions = Object.freeze(rawOpts);
+  }
+
   const rawLogins = toEntryList(config.ownerAllowedLogins, 'OWNER_ALLOWED_LOGINS');
   if (!rawLogins.length || rawLogins.length > 100) {
-    throw new Error('OWNER_ALLOWED_LOGINS 1 ile 100 arasında geçerli Tailscale kullanıcısı içermeli.');
+    throw new Error(ownerAuthProvider === 'cloudflare-access'
+      ? 'OWNER_ALLOWED_LOGINS 1 ile 100 arasında geçerli e-posta adresi içermeli.'
+      : 'OWNER_ALLOWED_LOGINS 1 ile 100 arasında geçerli Tailscale kullanıcısı içermeli.');
   }
   const ownerAllowedLogins = new Set();
   for (const login of rawLogins) {
-    if (typeof login !== 'string' || !LOGIN_ENTRY_RE.test(login)) {
-      throw new Error('OWNER_ALLOWED_LOGINS geçersiz kullanıcı girişi içeriyor.');
+    if (ownerAuthProvider === 'cloudflare-access') {
+      const normalizedEmail = normalizeCfEmail(login);
+      if (!normalizedEmail) {
+        throw new Error('OWNER_ALLOWED_LOGINS geçersiz e-posta adresi içeriyor.');
+      }
+      ownerAllowedLogins.add(normalizedEmail);
+    } else {
+      if (typeof login !== 'string' || !LOGIN_ENTRY_RE.test(login)) {
+        throw new Error('OWNER_ALLOWED_LOGINS geçersiz kullanıcı girişi içeriyor.');
+      }
+      ownerAllowedLogins.add(login.toLowerCase());
     }
-    ownerAllowedLogins.add(login.toLowerCase());
   }
 
   const rawOwnerHosts = toEntryList(config.ownerAllowedHosts, 'OWNER_ALLOWED_HOSTS');
@@ -266,6 +307,11 @@ export function validateServerDeployConfig(config = {}) {
   const validatedCloud = Object.freeze({
     mode: 'cloud-proxy',
     allowMasterFallback: false,
+    ownerAuthProvider,
+    ownerCfTeamDomain: cfTeam ? cfTeam.issuer : null,
+    ownerCfAud,
+    cfVerifierOptions,
+    storeIpHeader,
     ownerAllowedLogins,
     ownerAllowedHosts,
     checkoutAllowedHosts,
@@ -291,8 +337,16 @@ export function resolveServerDeployConfig(env = process.env) {
   if (mode === 'local') {
     return validateServerDeployConfig({ mode: 'local', healthzToken });
   }
+  const rawProvider = env.OWNER_AUTH_PROVIDER;
+  const ownerAuthProvider = rawProvider === undefined || rawProvider === null || rawProvider === '' ? 'tailscale' : rawProvider;
+  const rawStoreIpHeader = env.STORE_IP_HEADER;
+  const storeIpHeader = rawStoreIpHeader === undefined || rawStoreIpHeader === null || rawStoreIpHeader === '' ? 'x-real-ip' : rawStoreIpHeader;
   return validateServerDeployConfig({
     mode: 'cloud-proxy',
+    ownerAuthProvider,
+    ownerCfTeamDomain: env.OWNER_CF_TEAM_DOMAIN,
+    ownerCfAud: env.OWNER_CF_AUD,
+    storeIpHeader,
     ownerAllowedLogins: parseCsvEnv(env.OWNER_ALLOWED_LOGINS),
     ownerAllowedHosts: parseCsvEnv(env.OWNER_ALLOWED_HOSTS),
     checkoutAllowedHosts: parseCsvEnv(env.CHECKOUT_ALLOWED_HOSTS),
@@ -330,7 +384,7 @@ function hasRawHeaderPrefix(req, prefixLower) {
 }
 
 function isRoleAllowedOnChannel(channel, role) {
-  if (channel === 'tailscale-owner') return role === 'owner';
+  if (channel === 'tailscale-owner' || channel === 'cloudflare-owner') return role === 'owner';
   if (channel === 'store-checkout') return role === 'employee';
   return role === 'owner' || role === 'employee';
 }
@@ -417,6 +471,13 @@ function checkHealthStatus(dataDirectory, repositories, mode) {
 
 export function createApp({ dataDirectory = path.join(directory, 'data'), logger = record => console.error(JSON.stringify(record)), jsonBodyTimeoutMs = 15000, deploy = undefined } = {}) {
   const deployConfig = deploy === undefined ? validateServerDeployConfig({ mode: 'local' }) : validateServerDeployConfig(deploy);
+  const ownerCfVerifier = deployConfig.mode === 'cloud-proxy' && deployConfig.ownerAuthProvider === 'cloudflare-access'
+    ? createCloudflareAccessVerifier({
+        cfTeamDomain: deployConfig.ownerCfTeamDomain,
+        cfAud: deployConfig.ownerCfAud,
+        ...(deployConfig.cfVerifierOptions || {})
+      })
+    : null;
   mkdirSync(dataDirectory, { recursive: true });
   let identities;
   function ensureIdentities() {
@@ -561,7 +622,7 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
         try { normalizedHost = normalizeAllowedHost(rawHost); } catch { normalizedHost = null; }
         if (!normalizedHost) return json(403, { error: 'Geçersiz Host başlığı.' });
         if (deployConfig.ownerAllowedHosts.has(normalizedHost)) {
-          channel = 'tailscale-owner';
+          channel = deployConfig.ownerAuthProvider === 'cloudflare-access' ? 'cloudflare-owner' : 'tailscale-owner';
         } else if (deployConfig.checkoutAllowedHosts.has(normalizedHost)) {
           channel = 'store-checkout';
         } else {
@@ -572,8 +633,8 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
           return json(403, { error: 'Farklı kaynaktan isteğe izin verilmiyor.' });
         }
         if (channel === 'tailscale-owner') {
-          if (hasRawHeader(req, 'x-store-proxy-secret') || hasRawHeader(req, 'x-real-ip')) {
-            return json(403, { error: 'Bu kanalda mağaza vekil başlıklarına izin verilmiyor.' });
+          if (hasRawHeader(req, 'x-store-proxy-secret') || hasRawHeader(req, 'x-real-ip') || hasRawHeaderPrefix(req, 'cf-')) {
+            return json(403, { error: 'Bu kanalda mağaza vekil veya Cloudflare başlıklarına izin verilmiyor.' });
           }
           const loginValues = rawHeaderValues(req, 'tailscale-user-login');
           if (loginValues.length !== 1 || typeof loginValues[0] !== 'string' || !LOGIN_ENTRY_RE.test(loginValues[0])) {
@@ -585,15 +646,25 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
           }
           clientKey = `tailscale:${normalizedLogin}`;
           source = 'tailscale-owner';
+        } else if (channel === 'cloudflare-owner') {
+          if (hasRawHeader(req, 'x-store-proxy-secret') || hasRawHeader(req, 'x-real-ip') || hasRawHeaderPrefix(req, 'tailscale-')) {
+            return json(403, { error: 'Bu kanalda mağaza vekil veya Tailscale başlıklarına izin verilmiyor.' });
+          }
+          const cfIdentity = await ownerCfVerifier.verifyRequest(req);
+          if (!deployConfig.ownerAllowedLogins.has(cfIdentity.email)) {
+            return json(403, { error: 'Bu Cloudflare Access kullanıcısı yönetici kanalına yetkili değil.' });
+          }
+          clientKey = `cf:${cfIdentity.email}`;
+          source = 'cloudflare-owner';
         } else {
-          if (hasRawHeaderPrefix(req, 'tailscale-')) {
-            return json(403, { error: 'Bu kanalda Tailscale başlıklarına izin verilmiyor.' });
+          if (hasRawHeaderPrefix(req, 'tailscale-') || hasRawHeaderPrefix(req, 'cf-access-')) {
+            return json(403, { error: 'Bu kanalda yönetici kimlik başlıklarına izin verilmiyor.' });
           }
           const secretValues = rawHeaderValues(req, 'x-store-proxy-secret');
           if (secretValues.length !== 1 || !constantTimeTokenMatch(secretValues[0], deployConfig.storeProxySecretDigest)) {
             return json(403, { error: 'Geçersiz mağaza vekil doğrulaması.' });
           }
-          const ipValues = rawHeaderValues(req, 'x-real-ip');
+          const ipValues = rawHeaderValues(req, deployConfig.storeIpHeader);
           if (ipValues.length !== 1) {
             return json(403, { error: 'Tekil istemci IP başlığı gerekli.' });
           }
@@ -925,7 +996,7 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
       }
       return json(200, { state: repository.restore(data, { compact, beforeCommit:revokeForRestore }), reauthenticate:true });
     } catch (e) {
-      const expected = e instanceof DomainError || e instanceof IdentityError;
+      const expected = e instanceof DomainError || e instanceof IdentityError || e instanceof CloudflareAccessError;
       if (!expected) {
         // Never log raw messages, stacks, file paths, request IDs or ledger data.
         try {
