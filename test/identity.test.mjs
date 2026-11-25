@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { Worker } from 'node:worker_threads';
 import { IdentityStore, IdentityError } from '../identity.mjs';
 
 const password = '482910';
@@ -177,4 +179,260 @@ test('restore invalidates other editor connections and logins already computing 
   assert.equal(other.session(session.token),null);
   assert.equal(await inFlight,null);
   assert.deepEqual((await other.login(owner.id,password)).actor,owner);
+});
+
+function removeTempDir(dir) {
+  rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+}
+
+function createBarrierWorkerPool(workerCount) {
+  const sab = new SharedArrayBuffer(8);
+  const ctrl = new Int32Array(sab);
+  const identityUrl = new URL('../identity.mjs', import.meta.url).href;
+  const workerCode = `
+    import { parentPort, workerData } from 'node:worker_threads';
+    const { IdentityStore } = await import(workerData.identityUrl);
+    const ctrl = new Int32Array(workerData.sab);
+    parentPort.on('message', msg => {
+      if (msg?.type === 'stop') {
+        parentPort.close();
+        return;
+      }
+      if (Atomics.add(ctrl, 1, 1) + 1 === msg.count) {
+        Atomics.store(ctrl, 0, 1);
+        Atomics.notify(ctrl, 0);
+      } else {
+        while (Atomics.load(ctrl, 0) === 0) {
+          Atomics.wait(ctrl, 0, 0, 5000);
+        }
+      }
+      let store;
+      let reply;
+      try {
+        store = new IdentityStore(msg.dir);
+        reply = {
+          ok: true,
+          needsSetup: store.needsSetup(),
+          users: store.listUsers()
+        };
+      } catch (err) {
+        reply = {
+          ok: false,
+          name: err?.name,
+          code: err?.code,
+          message: err?.message
+        };
+      } finally {
+        try { store?.close(); } catch {}
+      }
+      parentPort.postMessage(reply);
+    });
+  `;
+
+  const workers = Array.from({ length: workerCount }, () =>
+    new Worker(workerCode, { eval: true, workerData: { identityUrl, sab } })
+  );
+
+  const runTrial = dir => {
+    Atomics.store(ctrl, 0, 0);
+    Atomics.store(ctrl, 1, 0);
+    return Promise.all(
+      workers.map(worker => new Promise((resolve, reject) => {
+        const cleanup = () => {
+          worker.off('message', onMsg);
+          worker.off('error', onErr);
+          worker.off('exit', onExit);
+        };
+        const onMsg = msg => {
+          cleanup();
+          resolve(msg);
+        };
+        const onErr = err => {
+          cleanup();
+          reject(err);
+        };
+        const onExit = code => {
+          cleanup();
+          reject(new Error(`Worker exited unexpectedly with code ${code}`));
+        };
+        worker.on('message', onMsg);
+        worker.on('error', onErr);
+        worker.on('exit', onExit);
+        worker.postMessage({ dir, count: workerCount });
+      }))
+    );
+  };
+
+  const close = async () => {
+    await Promise.all(workers.map(worker => new Promise(resolve => {
+      const timer = setTimeout(() => {
+        worker.terminate().finally(resolve);
+      }, 1500);
+      worker.once('exit', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      try {
+        worker.postMessage({ type: 'stop' });
+      } catch {
+        clearTimeout(timer);
+        resolve();
+      }
+    })));
+  };
+
+  return { runTrial, close };
+}
+
+test('concurrent cold-start IdentityStore initialization succeeds across 8 barrier-synchronized workers x 20 trials', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'identity-cold-pool-'));
+  const pool = createBarrierWorkerPool(8);
+  t.after(async () => {
+    await pool.close();
+    removeTempDir(root);
+  });
+
+  for (let trial = 0; trial < 20; trial++) {
+    const trialDir = join(root, `fresh-${trial}`);
+    mkdirSync(trialDir, { recursive: true });
+    const results = await pool.runTrial(trialDir);
+    assert.equal(results.length, 8);
+    assert.deepEqual(
+      results.filter(r => !r.ok),
+      [],
+      `Trial ${trial} had unexpected cold-start failures: ${JSON.stringify(results)}`
+    );
+    for (const r of results) {
+      assert.equal(r.needsSetup, true);
+      assert.deepEqual(r.users, []);
+    }
+
+    const db = new DatabaseSync(join(trialDir, 'identity.sqlite'), { readOnly: true });
+    try {
+      assert.equal(db.prepare('PRAGMA application_id').get().application_id, 1163086153);
+      assert.equal(db.prepare('PRAGMA user_version').get().user_version, 4);
+      assert.equal(String(db.prepare('PRAGMA journal_mode').get().journal_mode).toLowerCase(), 'wal');
+      assert.equal(db.prepare('PRAGMA synchronous').get().synchronous, 2);
+    } finally {
+      db.close();
+    }
+  }
+});
+
+test('concurrent v1->v4 DELETE-mode upgrade succeeds across 4 barrier-synchronized workers x 20 trials', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'identity-v1-pool-'));
+  const pool = createBarrierWorkerPool(4);
+  t.after(async () => {
+    await pool.close();
+    removeTempDir(root);
+  });
+
+  for (let trial = 0; trial < 20; trial++) {
+    const trialDir = join(root, `v1-${trial}`);
+    mkdirSync(trialDir, { recursive: true });
+    const dbFile = join(trialDir, 'identity.sqlite');
+    const ownerId = `owner-${trial}`;
+    const seedDb = new DatabaseSync(dbFile);
+    try {
+      seedDb.exec(`
+        PRAGMA journal_mode = DELETE;
+        CREATE TABLE identity_users (
+          id TEXT PRIMARY KEY NOT NULL,
+          name TEXT NOT NULL,
+          role TEXT NOT NULL CHECK(role IN ('owner', 'employee')),
+          enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+          salt BLOB NOT NULL CHECK(length(salt) = 16),
+          verifier BLOB NOT NULL CHECK(length(verifier) = 32)
+        ) STRICT;
+        CREATE TABLE login_limits (
+          bucket TEXT PRIMARY KEY NOT NULL, until_ms INTEGER NOT NULL, attempts INTEGER NOT NULL
+        ) STRICT;
+        PRAGMA application_id = 1163086153;
+        PRAGMA user_version = 1;
+      `);
+      seedDb.prepare(
+        "INSERT INTO identity_users (id, name, role, enabled, salt, verifier) VALUES (?, 'Sahip', 'owner', 1, ?, ?)"
+      ).run(ownerId, randomBytes(16), randomBytes(32));
+    } finally {
+      seedDb.close();
+    }
+
+    const seededBytes = readFileSync(dbFile);
+    assert.equal(seededBytes[18], 1);
+    assert.equal(seededBytes[19], 1);
+
+    const results = await pool.runTrial(trialDir);
+    assert.equal(results.length, 4);
+    assert.deepEqual(
+      results.filter(r => !r.ok),
+      [],
+      `Trial ${trial} had unexpected v1->v4 upgrade failures: ${JSON.stringify(results)}`
+    );
+    for (const r of results) {
+      assert.equal(r.needsSetup, false);
+      assert.deepEqual(r.users, [{ id: ownerId, name: 'Sahip' }]);
+    }
+
+    const verifyDb = new DatabaseSync(dbFile, { readOnly: true });
+    try {
+      assert.equal(verifyDb.prepare('PRAGMA application_id').get().application_id, 1163086153);
+      assert.equal(verifyDb.prepare('PRAGMA user_version').get().user_version, 4);
+      assert.equal(String(verifyDb.prepare('PRAGMA journal_mode').get().journal_mode).toLowerCase(), 'wal');
+      assert.equal(verifyDb.prepare('PRAGMA synchronous').get().synchronous, 2);
+      const genRows = verifyDb.prepare('SELECT generation FROM session_generation').all();
+      assert.equal(genRows.length, 1);
+      assert.ok(typeof genRows[0].generation === 'string' && genRows[0].generation.length > 0);
+      const userRow = verifyDb.prepare('SELECT must_change_pin FROM identity_users WHERE id = ?').get(ownerId);
+      assert.equal(userRow.must_change_pin, 0);
+    } finally {
+      verifyDb.close();
+    }
+  }
+});
+
+test('4-variant foreign DELETE-mode SQLite databases reject concurrently without mutating header [18..19] or creating WAL sidecars', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'identity-foreign-pool-'));
+  const pool = createBarrierWorkerPool(4);
+  t.after(async () => {
+    await pool.close();
+    removeTempDir(root);
+  });
+
+  const variants = [
+    ['table-no-appid', 'PRAGMA journal_mode = DELETE; CREATE TABLE foreign_tbl (id INTEGER PRIMARY KEY);'],
+    ['foreign-appid', 'PRAGMA journal_mode = DELETE; PRAGMA application_id = 999999; PRAGMA user_version = 1; CREATE TABLE custom (x TEXT);'],
+    ['empty-nonzero-uv', 'PRAGMA journal_mode = DELETE; PRAGMA user_version = 1;'],
+    ['unsupported-uv-99', 'PRAGMA journal_mode = DELETE; PRAGMA application_id = 1163086153; PRAGMA user_version = 99;']
+  ];
+
+  for (const [label, sql] of variants) {
+    const variantDir = join(root, label);
+    mkdirSync(variantDir, { recursive: true });
+    const dbFile = join(variantDir, 'identity.sqlite');
+    const db = new DatabaseSync(dbFile);
+    try {
+      db.exec(sql);
+    } finally {
+      db.close();
+    }
+
+    const beforeBytes = readFileSync(dbFile);
+    assert.equal(beforeBytes[18], 1, `${label} header[18] should start in DELETE mode`);
+    assert.equal(beforeBytes[19], 1, `${label} header[19] should start in DELETE mode`);
+
+    const results = await pool.runTrial(variantDir);
+    assert.equal(results.length, 4);
+    for (const r of results) {
+      assert.equal(r.ok, false);
+      assert.equal(r.name, 'Error');
+      assert.match(r.message, /Desteklenmeyen kimlik veritabanı/);
+    }
+
+    const afterBytes = readFileSync(dbFile);
+    assert.deepEqual(afterBytes, beforeBytes);
+    assert.equal(afterBytes[18], 1);
+    assert.equal(afterBytes[19], 1);
+    assert.equal(existsSync(`${dbFile}-wal`), false);
+    assert.equal(existsSync(`${dbFile}-shm`), false);
+  }
 });

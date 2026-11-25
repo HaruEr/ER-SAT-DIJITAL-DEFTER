@@ -5,15 +5,62 @@ import { createReportApp, validateReportConfig } from './report-server.mjs';
 
 const MAX_CONFIG_BYTES = 16 * 1024;
 const CONFIG_FIELDS = ['schemaVersion', 'enabled', 'origin', 'allowedLogins', 'dataDirectory', 'port'];
+const TAILSCALE_EXPLICIT_FIELDS = ['schemaVersion', 'enabled', 'authProvider', 'origin', 'allowedLogins', 'dataDirectory', 'port'];
+const CLOUDFLARE_CONFIG_FIELDS = ['schemaVersion', 'enabled', 'authProvider', 'origin', 'cfTeamDomain', 'cfAud', 'allowedLogins', 'dataDirectory', 'port'];
 const FAILURE = 'Rapor portalı başlatılamadı. Yerel başlangıç ayarını ve rapor portunu kontrol edin.';
 const configurationError = () => new Error('Rapor başlangıç ayarı geçersiz.');
 const startupError = () => new Error(FAILURE);
 
+function hasExactKeys(value, fields) {
+  return Object.keys(value).length === fields.length && fields.every(key => Object.hasOwn(value, key));
+}
+
 export function validateLauncherConfig(value) {
   try {
-    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== CONFIG_FIELDS.length || !CONFIG_FIELDS.every(key => Object.hasOwn(value, key)) || value.schemaVersion !== 1 || value.enabled !== true || value.port !== 4318) throw configurationError();
-    const validated = validateReportConfig(value);
-    return { schemaVersion: 1, enabled: true, origin: validated.origin, allowedLogins: [...validated.allowedLogins], dataDirectory: validated.dataDirectory, port: 4318 };
+    if (!value || typeof value !== 'object' || Array.isArray(value) || value.schemaVersion !== 1 || value.enabled !== true || value.port !== 4318) {
+      throw configurationError();
+    }
+    if (!Object.hasOwn(value, 'authProvider')) {
+      if (!hasExactKeys(value, CONFIG_FIELDS)) throw configurationError();
+      const validated = validateReportConfig(value);
+      return {
+        schemaVersion: 1,
+        enabled: true,
+        origin: validated.origin,
+        allowedLogins: [...validated.allowedLogins],
+        dataDirectory: validated.dataDirectory,
+        port: 4318
+      };
+    }
+    if (value.authProvider === 'tailscale') {
+      if (!hasExactKeys(value, TAILSCALE_EXPLICIT_FIELDS)) throw configurationError();
+      const validated = validateReportConfig(value);
+      return {
+        schemaVersion: 1,
+        enabled: true,
+        authProvider: 'tailscale',
+        origin: validated.origin,
+        allowedLogins: [...validated.allowedLogins],
+        dataDirectory: validated.dataDirectory,
+        port: 4318
+      };
+    }
+    if (value.authProvider === 'cloudflare-access') {
+      if (!hasExactKeys(value, CLOUDFLARE_CONFIG_FIELDS)) throw configurationError();
+      const validated = validateReportConfig(value);
+      return {
+        schemaVersion: 1,
+        enabled: true,
+        authProvider: 'cloudflare-access',
+        origin: validated.origin,
+        cfTeamDomain: validated.cfTeamDomain,
+        cfAud: value.cfAud,
+        allowedLogins: [...validated.allowedLogins],
+        dataDirectory: validated.dataDirectory,
+        port: 4318
+      };
+    }
+    throw configurationError();
   } catch { throw configurationError(); }
 }
 
@@ -46,10 +93,24 @@ export function readLauncherConfig(filename) {
   } catch { throw configurationError(); }
 }
 
-export function createReportLauncher(value, { createApp = createReportApp, signals = process } = {}) {
+export function createReportLauncher(value, { createApp = createReportApp, signals = process, jwksProvider = undefined } = {}) {
   const config = validateLauncherConfig(value); requireDataDirectory(config);
   let app;
-  try { app = createApp({ enabled: true, origin: config.origin, allowedLogins: config.allowedLogins, dataDirectory: config.dataDirectory }); }
+  const appOptions = {
+    enabled: true,
+    origin: config.origin,
+    allowedLogins: config.allowedLogins,
+    dataDirectory: config.dataDirectory,
+    ...(Object.hasOwn(config, 'authProvider') ? { authProvider: config.authProvider } : {}),
+    ...(config.authProvider === 'cloudflare-access'
+      ? {
+          cfTeamDomain: config.cfTeamDomain,
+          cfAud: config.cfAud,
+          ...(jwksProvider !== undefined ? { jwksProvider } : {})
+        }
+      : {})
+  };
+  try { app = createApp(appOptions); }
   catch { throw startupError(); }
   let startPromise, closePromise, stopped = false;
   const onSignal = () => { void close().catch(() => { console.error(FAILURE); process.exitCode = 1; }); };

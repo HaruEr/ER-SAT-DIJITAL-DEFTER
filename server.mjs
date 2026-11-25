@@ -1,13 +1,16 @@
 import { IdentityStore, IdentityError } from './identity.mjs';
 import { deny, requireSession, DownloadTickets, checkoutState, customerChoices, customerDetail, requireWorkerTrade, requireWorkerAccounts } from './editor-access.mjs';
 import http from 'node:http';
-import { createReadStream, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, constants as fsConstants, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { BlockList, isIP } from 'node:net';
+import { DatabaseSync } from 'node:sqlite';
 import { Repository, BACKUP_MAX_BYTES } from './repository.mjs';
 import { DomainError, fail, isWorkerCustomerCreation } from './domain.mjs';
+import { CloudflareAccessError, createCloudflareAccessVerifier, normalizeCfEmail, normalizeCfTeamDomain, validateCfAud } from './cloudflare-access.mjs';
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const diagnosticCodes = new Set(['EACCES', 'EPERM', 'ENOENT', 'ENOSPC', 'EIO', 'EMFILE', 'ENFILE', 'ERR_SQLITE_ERROR', 'SQLITE_BUSY', 'SQLITE_LOCKED', 'SQLITE_CORRUPT', 'SQLITE_FULL', 'SQLITE_CANTOPEN', 'SQLITE_IOERR', 'BACKUP_HISTORY_INVALID', 'STORED_HISTORY_INVALID']);
 const operations = new Map(['state', 'summary', 'backup', 'command', 'restore', 'recovery'].map(name => [`/api/${name}`, name]));
@@ -42,9 +45,444 @@ const staticFiles = new Map([
   ['/vendor/pdfmake/vfs_fonts.js', ['vendor/pdfmake/vfs_fonts.js', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']]
 ]);
-export function createApp({ dataDirectory = path.join(directory, 'data'), logger = record => console.error(JSON.stringify(record)), jsonBodyTimeoutMs = 15000 } = {}) {
+const PROXY_MARKER_RE = /^(?:forwarded$|x-forwarded-|x-real-ip$|tailscale-|cf-|x-store-proxy-secret$)/i;
+const CONTROL_OR_INVISIBLE_RE = /[\s\r\n\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/;
+const LOGIN_ENTRY_RE = /^[^\s,*\r\n\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]{1,254}$/;
+const DNS_HOST_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+const SESSION_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+const CHECKOUT_BLOCKED_STATIC = new Set([
+  '/owner',
+  '/users',
+  '/app.js',
+  '/suppliers.js',
+  '/supplier-pdf.js',
+  '/users.js',
+  '/vendor/pdfmake/pdfmake.min.js',
+  '/vendor/pdfmake/vfs_fonts.js'
+]);
+const CHECKOUT_BLOCKED_API = new Set([
+  '/api/state',
+  '/api/suppliers',
+  '/api/backup',
+  '/api/archive',
+  '/api/archive/restore',
+  '/api/restore',
+  '/api/recovery',
+  '/api/journal',
+  '/api/summary',
+  '/api/account-statement',
+  '/api/item-photo',
+  '/api/download-ticket',
+  '/api/pending-approvals/approve',
+  '/api/pending-approvals/reject',
+  '/api/auth/setup',
+  '/api/auth/employees',
+  '/api/auth/disable',
+  '/api/auth/reset-pin',
+  '/api/auth/rename'
+]);
+const CHECKOUT_ALLOWED_API = new Set([
+  '/api/auth/users',
+  '/api/auth/session',
+  '/api/auth/login',
+  '/api/auth/logout',
+  '/api/auth/change-pin',
+  '/api/checkout',
+  '/api/customers',
+  '/api/pending-approvals',
+  '/api/command'
+]);
+const validatedDeployConfigs = new WeakSet();
+
+function sha256Buffer(value) {
+  return createHash('sha256').update(String(value), 'utf8').digest();
+}
+
+function constantTimeTokenMatch(provided, expectedDigest) {
+  if (typeof provided !== 'string' || !provided || !expectedDigest) return false;
+  return timingSafeEqual(sha256Buffer(provided), expectedDigest);
+}
+
+function validateSecretValue(value, label) {
+  if (typeof value !== 'string' || value.length < 16 || CONTROL_OR_INVISIBLE_RE.test(value)) {
+    throw new Error(`${label} en az 16 karakter olmalı ve boşluk veya kontrol karakteri içermemelidir.`);
+  }
+  return value;
+}
+
+function normalizeAllowedHost(entry, label = 'İzinli alan adı') {
+  if (typeof entry !== 'string' || !entry || entry !== entry.trim()) {
+    throw new Error(`${label} boşluksuz geçerli bir alan adı olmalı.`);
+  }
+  if (/[\s*\/\\?#@%\r\n\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff_]/.test(entry) || entry.startsWith('.') || entry.endsWith('.') || entry.includes('..') || /:\s*$/.test(entry)) {
+    throw new Error(`${label} geçersiz karakter veya biçim içeriyor.`);
+  }
+  let parsed;
+  try {
+    parsed = new URL(`https://${entry}`);
+  } catch {
+    throw new Error(`${label} geçerli bir alan adı olmalı.`);
+  }
+  if (parsed.username !== '' || parsed.password !== '' || parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '' || !parsed.hostname || parsed.port === '0') {
+    throw new Error(`${label} yalnız alan adı ve isteğe bağlı port içerebilir.`);
+  }
+  if (parsed.hostname.startsWith('[') && parsed.hostname.endsWith(']')) {
+    if (isIP(parsed.hostname.slice(1, -1)) !== 6) {
+      throw new Error(`${label} geçerli bir IPv6 adresi olmalı.`);
+    }
+  } else if (!DNS_HOST_RE.test(parsed.hostname)) {
+    throw new Error(`${label} geçerli bir alan adı olmalı.`);
+  }
+  if (parsed.port !== '') {
+    const portNum = Number(parsed.port);
+    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+      throw new Error(`${label} geçerli bir port numarası içermeli.`);
+    }
+  }
+  return parsed.host;
+}
+
+function toEntryList(value, label) {
+  if (value instanceof Set) return [...value];
+  if (Array.isArray(value)) return value;
+  throw new Error(`${label} boş olmayan bir liste olmalı.`);
+}
+
+function parseCsvEnv(raw) {
+  if (raw === undefined || raw === null || raw === '') return [];
+  if (typeof raw !== 'string') return [];
+  return raw.split(',').map(item => item.replace(/^[ \t]+|[ \t]+$/g, ''));
+}
+
+function normalizeClientIp(rawIp) {
+  if (typeof rawIp !== 'string' || !rawIp || /[\s,\r\n\u0000-\u001f\u007f%]/.test(rawIp)) return null;
+  const mapped = rawIp.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+  if (mapped && isIP(mapped[1]) === 4) return mapped[1];
+  const family = isIP(rawIp);
+  if (family === 4) return rawIp;
+  if (family === 6) return rawIp.toLowerCase();
+  return null;
+}
+
+function buildAllowedBlockList(entries) {
+  const list = toEntryList(entries, 'STORE_ALLOWED_IPS');
+  if (!list.length || list.length > 500) {
+    throw new Error('STORE_ALLOWED_IPS 1 ile 500 arasında geçerli IP veya CIDR içermeli.');
+  }
+  const blockList = new BlockList();
+  for (const rawEntry of list) {
+    if (typeof rawEntry !== 'string' || !rawEntry || /[\s,\r\n\u0000-\u001f\u007f%]/.test(rawEntry)) {
+      throw new Error('STORE_ALLOWED_IPS geçersiz IP veya CIDR girişi içeriyor.');
+    }
+    if (rawEntry.includes('/')) {
+      const parts = rawEntry.split('/');
+      if (parts.length !== 2 || !/^\d{1,3}$/.test(parts[1])) {
+        throw new Error('STORE_ALLOWED_IPS geçersiz CIDR öneki içeriyor.');
+      }
+      const [ipPart, prefixStr] = parts;
+      const prefix = Number(prefixStr);
+      const familyNum = isIP(ipPart);
+      if (familyNum === 4) {
+        if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) {
+          throw new Error('STORE_ALLOWED_IPS IPv4 CIDR öneki 0–32 arasında olmalı.');
+        }
+        blockList.addSubnet(ipPart, prefix, 'ipv4');
+      } else if (familyNum === 6) {
+        if (!Number.isInteger(prefix) || prefix < 0 || prefix > 128) {
+          throw new Error('STORE_ALLOWED_IPS IPv6 CIDR öneki 0–128 arasında olmalı.');
+        }
+        blockList.addSubnet(ipPart.toLowerCase(), prefix, 'ipv6');
+      } else {
+        throw new Error('STORE_ALLOWED_IPS geçersiz CIDR IP adresi içeriyor.');
+      }
+    } else {
+      const normalized = normalizeClientIp(rawEntry);
+      if (!normalized) {
+        throw new Error('STORE_ALLOWED_IPS geçersiz IP adresi içeriyor.');
+      }
+      const familyNum = isIP(normalized);
+      blockList.addAddress(normalized, familyNum === 4 ? 'ipv4' : 'ipv6');
+    }
+  }
+  return blockList;
+}
+
+export function validateServerDeployConfig(config = {}) {
+  if (validatedDeployConfigs.has(config)) return config;
+  if (config === null || typeof config !== 'object' || Array.isArray(config)) {
+    throw new Error('Geçersiz sunucu dağıtım yapılandırması.');
+  }
+  const mode = config.mode === undefined ? 'local' : config.mode;
+  if (mode !== 'local' && mode !== 'cloud-proxy') {
+    throw new Error('DEPLOY_MODE yalnız "local" veya "cloud-proxy" olabilir.');
+  }
+  let healthzTokenDigest = null;
+  if (config.healthzToken !== undefined && config.healthzToken !== null && config.healthzToken !== '') {
+    healthzTokenDigest = sha256Buffer(validateSecretValue(config.healthzToken, 'HEALTHZ_TOKEN'));
+  }
+  if (mode === 'local') {
+    const validatedLocal = Object.freeze({
+      mode: 'local',
+      allowMasterFallback: true,
+      hasHealthzToken: Boolean(healthzTokenDigest),
+      healthzTokenDigest
+    });
+    validatedDeployConfigs.add(validatedLocal);
+    return validatedLocal;
+  }
+
+  const ownerAuthProvider = config.ownerAuthProvider === undefined ? 'tailscale' : config.ownerAuthProvider;
+  if (ownerAuthProvider !== 'tailscale' && ownerAuthProvider !== 'cloudflare-access') {
+    throw new Error('OWNER_AUTH_PROVIDER yalnız "tailscale" veya "cloudflare-access" olabilir.');
+  }
+  const storeIpHeader = config.storeIpHeader === undefined ? 'x-real-ip' : config.storeIpHeader;
+  if (storeIpHeader !== 'x-real-ip' && storeIpHeader !== 'cf-connecting-ip') {
+    throw new Error('STORE_IP_HEADER yalnız "x-real-ip" veya "cf-connecting-ip" olabilir.');
+  }
+
+  let cfTeam = null;
+  let ownerCfAud = null;
+  let cfVerifierOptions = null;
+  if (ownerAuthProvider === 'cloudflare-access') {
+    cfTeam = normalizeCfTeamDomain(config.ownerCfTeamDomain, 'OWNER_CF_TEAM_DOMAIN');
+    ownerCfAud = validateCfAud(config.ownerCfAud, 'OWNER_CF_AUD');
+    const rawOpts = {};
+    if (config.jwksProvider !== undefined) rawOpts.jwksProvider = config.jwksProvider;
+    if (config.cfJwksCacheTtlMs !== undefined) rawOpts.cacheTtlMs = config.cfJwksCacheTtlMs;
+    if (config.cfMinRefreshIntervalMs !== undefined) rawOpts.minRefreshIntervalMs = config.cfMinRefreshIntervalMs;
+    if (config.cfJwksTimeoutMs !== undefined) rawOpts.fetchTimeoutMs = config.cfJwksTimeoutMs;
+    if (config.cfClockSkewSeconds !== undefined) rawOpts.clockSkewSeconds = config.cfClockSkewSeconds;
+    if (config.cfNow !== undefined) rawOpts.now = config.cfNow;
+    createCloudflareAccessVerifier({
+      cfTeamDomain: cfTeam.issuer,
+      cfAud: ownerCfAud,
+      ...rawOpts
+    });
+    cfVerifierOptions = Object.freeze(rawOpts);
+  }
+
+  const rawLogins = toEntryList(config.ownerAllowedLogins, 'OWNER_ALLOWED_LOGINS');
+  if (!rawLogins.length || rawLogins.length > 100) {
+    throw new Error(ownerAuthProvider === 'cloudflare-access'
+      ? 'OWNER_ALLOWED_LOGINS 1 ile 100 arasında geçerli e-posta adresi içermeli.'
+      : 'OWNER_ALLOWED_LOGINS 1 ile 100 arasında geçerli Tailscale kullanıcısı içermeli.');
+  }
+  const ownerAllowedLogins = new Set();
+  for (const login of rawLogins) {
+    if (ownerAuthProvider === 'cloudflare-access') {
+      const normalizedEmail = normalizeCfEmail(login);
+      if (!normalizedEmail) {
+        throw new Error('OWNER_ALLOWED_LOGINS geçersiz e-posta adresi içeriyor.');
+      }
+      ownerAllowedLogins.add(normalizedEmail);
+    } else {
+      if (typeof login !== 'string' || !LOGIN_ENTRY_RE.test(login)) {
+        throw new Error('OWNER_ALLOWED_LOGINS geçersiz kullanıcı girişi içeriyor.');
+      }
+      ownerAllowedLogins.add(login.toLowerCase());
+    }
+  }
+
+  const rawOwnerHosts = toEntryList(config.ownerAllowedHosts, 'OWNER_ALLOWED_HOSTS');
+  if (!rawOwnerHosts.length || rawOwnerHosts.length > 100) {
+    throw new Error('OWNER_ALLOWED_HOSTS 1 ile 100 arasında alan adı içermeli.');
+  }
+  const ownerAllowedHosts = new Set(rawOwnerHosts.map(entry => normalizeAllowedHost(entry, 'OWNER_ALLOWED_HOSTS')));
+
+  const rawCheckoutHosts = toEntryList(config.checkoutAllowedHosts, 'CHECKOUT_ALLOWED_HOSTS');
+  if (!rawCheckoutHosts.length || rawCheckoutHosts.length > 100) {
+    throw new Error('CHECKOUT_ALLOWED_HOSTS 1 ile 100 arasında alan adı içermeli.');
+  }
+  const checkoutAllowedHosts = new Set(rawCheckoutHosts.map(entry => normalizeAllowedHost(entry, 'CHECKOUT_ALLOWED_HOSTS')));
+
+  for (const host of ownerAllowedHosts) {
+    if (checkoutAllowedHosts.has(host)) {
+      throw new Error('OWNER_ALLOWED_HOSTS ve CHECKOUT_ALLOWED_HOSTS birbirinden tamamen ayrık olmalı.');
+    }
+  }
+
+  const storeProxySecretDigest = sha256Buffer(validateSecretValue(config.storeProxySecret, 'STORE_PROXY_SECRET'));
+  const storeAllowedBlockList = buildAllowedBlockList(config.storeAllowedIps);
+
+  const validatedCloud = Object.freeze({
+    mode: 'cloud-proxy',
+    allowMasterFallback: false,
+    ownerAuthProvider,
+    ownerCfTeamDomain: cfTeam ? cfTeam.issuer : null,
+    ownerCfAud,
+    cfVerifierOptions,
+    storeIpHeader,
+    ownerAllowedLogins,
+    ownerAllowedHosts,
+    checkoutAllowedHosts,
+    storeProxySecretDigest,
+    storeAllowedBlockList,
+    hasHealthzToken: Boolean(healthzTokenDigest),
+    healthzTokenDigest
+  });
+  validatedDeployConfigs.add(validatedCloud);
+  return validatedCloud;
+}
+
+export function resolveServerDeployConfig(env = process.env) {
+  if (env === null || typeof env !== 'object' || Array.isArray(env)) {
+    throw new Error('Geçersiz ortam yapılandırması.');
+  }
+  const rawMode = env.DEPLOY_MODE;
+  const mode = rawMode === undefined || rawMode === null || rawMode === '' ? 'local' : rawMode;
+  if (mode !== 'local' && mode !== 'cloud-proxy') {
+    throw new Error('DEPLOY_MODE yalnız "local" veya "cloud-proxy" olabilir.');
+  }
+  const healthzToken = env.HEALTHZ_TOKEN !== undefined && env.HEALTHZ_TOKEN !== '' ? env.HEALTHZ_TOKEN : null;
+  if (mode === 'local') {
+    return validateServerDeployConfig({ mode: 'local', healthzToken });
+  }
+  const rawProvider = env.OWNER_AUTH_PROVIDER;
+  const ownerAuthProvider = rawProvider === undefined || rawProvider === null || rawProvider === '' ? 'tailscale' : rawProvider;
+  const rawStoreIpHeader = env.STORE_IP_HEADER;
+  const storeIpHeader = rawStoreIpHeader === undefined || rawStoreIpHeader === null || rawStoreIpHeader === '' ? 'x-real-ip' : rawStoreIpHeader;
+  return validateServerDeployConfig({
+    mode: 'cloud-proxy',
+    ownerAuthProvider,
+    ownerCfTeamDomain: env.OWNER_CF_TEAM_DOMAIN,
+    ownerCfAud: env.OWNER_CF_AUD,
+    storeIpHeader,
+    ownerAllowedLogins: parseCsvEnv(env.OWNER_ALLOWED_LOGINS),
+    ownerAllowedHosts: parseCsvEnv(env.OWNER_ALLOWED_HOSTS),
+    checkoutAllowedHosts: parseCsvEnv(env.CHECKOUT_ALLOWED_HOSTS),
+    storeProxySecret: env.STORE_PROXY_SECRET,
+    storeAllowedIps: parseCsvEnv(env.STORE_ALLOWED_IPS),
+    healthzToken
+  });
+}
+
+function rawHeaderValues(req, lowerName) {
+  const raw = req.rawHeaders || [];
+  const values = [];
+  for (let i = 0; i < raw.length; i += 2) {
+    if (String(raw[i]).toLowerCase() === lowerName) {
+      values.push(raw[i + 1]);
+    }
+  }
+  return values;
+}
+
+function hasRawHeader(req, lowerName) {
+  const raw = req.rawHeaders || [];
+  for (let i = 0; i < raw.length; i += 2) {
+    if (String(raw[i]).toLowerCase() === lowerName) return true;
+  }
+  return false;
+}
+
+function hasRawHeaderPrefix(req, prefixLower) {
+  const raw = req.rawHeaders || [];
+  for (let i = 0; i < raw.length; i += 2) {
+    if (String(raw[i]).toLowerCase().startsWith(prefixLower)) return true;
+  }
+  return false;
+}
+
+function isRoleAllowedOnChannel(channel, role) {
+  if (channel === 'tailscale-owner' || channel === 'cloudflare-owner') return role === 'owner';
+  if (channel === 'store-checkout') return role === 'employee';
+  return role === 'owner' || role === 'employee';
+}
+
+function probeSqliteFile(filePath, probeSql, openHandle = null) {
+  let exists = false;
+  try {
+    exists = existsSync(filePath);
+  } catch {
+    return { present: true, accessible: false };
+  }
+  if (!exists) {
+    if (openHandle?.db) {
+      try {
+        openHandle.db.prepare('SELECT 1 AS ok').get();
+        return { present: false, memory: true, accessible: true };
+      } catch {
+        return { present: false, memory: true, accessible: false };
+      }
+    }
+    return { present: false, accessible: null };
+  }
+  let st;
+  try {
+    st = statSync(filePath);
+  } catch {
+    return { present: true, accessible: false };
+  }
+  if (!st.isFile() || st.size < 100) {
+    return { present: true, accessible: false };
+  }
+  let probeDb;
+  try {
+    probeDb = new DatabaseSync(filePath, { readOnly: true, timeout: 1000 });
+    probeDb.exec('PRAGMA busy_timeout = 1000; PRAGMA trusted_schema = OFF; PRAGMA query_only = ON;');
+    probeDb.prepare(probeSql).get();
+    return { present: true, accessible: true };
+  } catch {
+    return { present: true, accessible: false };
+  } finally {
+    try { probeDb?.close(); } catch {}
+  }
+}
+
+function checkHealthStatus(dataDirectory, repositories, mode) {
+  let dirOk = false;
+  try {
+    const st = statSync(dataDirectory);
+    if (st.isDirectory()) {
+      accessSync(dataDirectory, fsConstants.R_OK);
+      dirOk = true;
+    }
+  } catch {
+    dirOk = false;
+  }
+  if (!dirOk) {
+    return {
+      ok: false,
+      mode,
+      db: {
+        dataDirectory: false,
+        identity: { present: false, accessible: false },
+        workspaces: {
+          dukkan: { present: false, accessible: false },
+          demo: { present: false, accessible: false }
+        }
+      }
+    };
+  }
+  const identity = probeSqliteFile(path.join(dataDirectory, 'identity.sqlite'), 'SELECT 1 FROM identity_users LIMIT 1');
+  const dukkan = probeSqliteFile(path.join(dataDirectory, 'dukkan.sqlite'), 'SELECT 1 FROM meta WHERE id = 1', repositories.get('dukkan'));
+  const demo = probeSqliteFile(path.join(dataDirectory, 'demo.sqlite'), 'SELECT 1 FROM meta WHERE id = 1', repositories.get('demo'));
+  const ok = dirOk && identity.accessible !== false && dukkan.accessible !== false && demo.accessible !== false;
+  return {
+    ok,
+    mode,
+    db: {
+      dataDirectory: dirOk,
+      identity,
+      workspaces: { dukkan, demo }
+    }
+  };
+}
+
+export function createApp({ dataDirectory = path.join(directory, 'data'), logger = record => console.error(JSON.stringify(record)), jsonBodyTimeoutMs = 15000, deploy = undefined } = {}) {
+  const deployConfig = deploy === undefined ? validateServerDeployConfig({ mode: 'local' }) : validateServerDeployConfig(deploy);
+  const ownerCfVerifier = deployConfig.mode === 'cloud-proxy' && deployConfig.ownerAuthProvider === 'cloudflare-access'
+    ? createCloudflareAccessVerifier({
+        cfTeamDomain: deployConfig.ownerCfTeamDomain,
+        cfAud: deployConfig.ownerCfAud,
+        ...(deployConfig.cfVerifierOptions || {})
+      })
+    : null;
   mkdirSync(dataDirectory, { recursive: true });
   let identities;
+  function ensureIdentities() {
+    return (identities ??= new IdentityStore(dataDirectory, { allowMasterFallback: deployConfig.allowMasterFallback }));
+  }
   const downloads = new DownloadTickets();
   const repositories = new Map();
   function repo(workspace) {
@@ -91,85 +529,297 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
       return data;
     }
     try {
-      // Editing is local-only. Serve/proxy traffic belongs to the separate reader.
-      const proxyMarked = req.rawHeaders.some((name, index) => index % 2 === 0 && /^(?:forwarded$|x-forwarded-|x-real-ip$|tailscale-)/i.test(name));
-      const localPeer = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
-      if (!localPeer || proxyMarked) return json(403, { error: 'Bu adres yalnız ana bilgisayarda düzenleme içindir. Uzak erişimde rapor portalını kullanın.' });
+      if ((req.rawHeaders?.length || 0) > 80) {
+        return json(431, { error: 'İstek başlık sayısı sınırı aşıldı.' }, { Connection: 'close' });
+      }
+      // Unconditionally reject Tailscale Funnel traffic across every mode and route.
+      if (hasRawHeader(req, 'tailscale-funnel-request')) {
+        return json(403, { error: 'Funnel üzerinden erişime izin verilmiyor.' });
+      }
+      if (typeof req.url !== 'string' || !req.url.startsWith('/') || req.url.startsWith('//') || req.url.includes('\\')) {
+        return json(400, { error: 'Geçersiz istek adresi.' });
+      }
+      const hostValues = rawHeaderValues(req, 'host');
+      if (hostValues.length !== 1 || typeof hostValues[0] !== 'string' || !hostValues[0]) {
+        return json(403, { error: 'Geçersiz Host başlığı.' });
+      }
+      const rawHost = hostValues[0];
+      const originValues = rawHeaderValues(req, 'origin');
+      if (originValues.length > 1) {
+        return json(403, { error: 'Farklı kaynaktan isteğe izin verilmiyor.' });
+      }
+      const proxyMarked = (req.rawHeaders || []).some((name, index) => index % 2 === 0 && PROXY_MARKER_RE.test(name));
+      const localPeer = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket?.remoteAddress);
       const port = server.address()?.port;
-      const allowedHosts = [`127.0.0.1:${port}`, `localhost:${port}`];
-      if (!allowedHosts.includes(req.headers.host)) return json(403, { error: 'Yalnız bu cihazdaki yerel adres destekleniyor.' });
-      const base = `http://${req.headers.host}`;
-      if (req.headers.origin && req.headers.origin !== base) return json(403, { error: 'Farklı kaynaktan isteğe izin verilmiyor.' });
+      const localAllowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
+
+      const parsedUrlPreview = new URL(req.url, 'http://localhost');
+      if (parsedUrlPreview.pathname === '/healthz') {
+        if (deployConfig.mode === 'local') {
+          if (!localPeer || proxyMarked || !localAllowedHosts.has(rawHost)) {
+            return json(403, { error: 'Bu adres yalnız ana bilgisayarda düzenleme içindir. Uzak erişimde rapor portalını kullanın.' });
+          }
+          if (originValues.length === 1 && originValues[0] !== `http://${rawHost}`) {
+            return json(403, { error: 'Farklı kaynaktan isteğe izin verilmiyor.' });
+          }
+        } else {
+          let healthzAuthorized = false;
+          if (localPeer && !proxyMarked && localAllowedHosts.has(rawHost)) {
+            if (originValues.length === 1 && originValues[0] !== `http://${rawHost}`) {
+              return json(403, { error: 'Farklı kaynaktan isteğe izin verilmiyor.' });
+            }
+            healthzAuthorized = true;
+          } else if (deployConfig.healthzTokenDigest) {
+            const authHeaders = rawHeaderValues(req, 'authorization');
+            const tokenHeaders = rawHeaderValues(req, 'x-healthz-token');
+            if (authHeaders.length <= 1 && tokenHeaders.length <= 1 && !(authHeaders.length === 1 && tokenHeaders.length === 1) && (authHeaders.length === 1 || tokenHeaders.length === 1)) {
+              const candidateToken = tokenHeaders.length === 1
+                ? tokenHeaders[0]
+                : authHeaders[0].match(/^Bearer ([^\s]+)$/)?.[1];
+              if (candidateToken && !CONTROL_OR_INVISIBLE_RE.test(candidateToken) && constantTimeTokenMatch(candidateToken, deployConfig.healthzTokenDigest)) {
+                if (localAllowedHosts.has(rawHost)) {
+                  if (originValues.length === 1 && originValues[0] !== `http://${rawHost}`) {
+                    return json(403, { error: 'Farklı kaynaktan isteğe izin verilmiyor.' });
+                  }
+                  healthzAuthorized = true;
+                } else {
+                  let normalizedHealthHost = null;
+                  try { normalizedHealthHost = normalizeAllowedHost(rawHost); } catch { normalizedHealthHost = null; }
+                  if (normalizedHealthHost && (deployConfig.ownerAllowedHosts.has(normalizedHealthHost) || deployConfig.checkoutAllowedHosts.has(normalizedHealthHost))) {
+                    if (originValues.length === 1 && originValues[0] !== `https://${normalizedHealthHost}`) {
+                      return json(403, { error: 'Farklı kaynaktan isteğe izin verilmiyor.' });
+                    }
+                    healthzAuthorized = true;
+                  }
+                }
+              }
+            }
+          }
+          if (!healthzAuthorized) {
+            return json(403, { error: 'Sağlık kontrolüne erişim reddedildi.' });
+          }
+        }
+        if (req.method !== 'GET') {
+          return json(405, { error: 'Sağlık kontrolü yalnız GET ile desteklenir.' }, { Allow: 'GET' });
+        }
+        const health = checkHealthStatus(dataDirectory, repositories, deployConfig.mode);
+        return json(health.ok ? 200 : 503, health);
+      }
+
+      let channel = 'local';
+      let clientKey = 'local';
+      let source = 'local';
+      let base;
+      if (deployConfig.mode === 'local') {
+        // Editing is local-only. Serve/proxy traffic belongs to the separate reader.
+        if (!localPeer || proxyMarked) return json(403, { error: 'Bu adres yalnız ana bilgisayarda düzenleme içindir. Uzak erişimde rapor portalını kullanın.' });
+        if (!localAllowedHosts.has(rawHost)) return json(403, { error: 'Yalnız bu cihazdaki yerel adres destekleniyor.' });
+        base = `http://${rawHost}`;
+        if (originValues.length === 1 && originValues[0] !== base) return json(403, { error: 'Farklı kaynaktan isteğe izin verilmiyor.' });
+      } else {
+        if (!localPeer) return json(403, { error: 'Bu adres yalnız güvenilir yerel vekil üzerinden erişilebilir.' });
+        let normalizedHost = null;
+        try { normalizedHost = normalizeAllowedHost(rawHost); } catch { normalizedHost = null; }
+        if (!normalizedHost) return json(403, { error: 'Geçersiz Host başlığı.' });
+        if (deployConfig.ownerAllowedHosts.has(normalizedHost)) {
+          channel = deployConfig.ownerAuthProvider === 'cloudflare-access' ? 'cloudflare-owner' : 'tailscale-owner';
+        } else if (deployConfig.checkoutAllowedHosts.has(normalizedHost)) {
+          channel = 'store-checkout';
+        } else {
+          return json(403, { error: 'Bu alan adı yapılandırılmış kanallarla eşleşmiyor.' });
+        }
+        base = `https://${normalizedHost}`;
+        if (originValues.length === 1 && originValues[0] !== base) {
+          return json(403, { error: 'Farklı kaynaktan isteğe izin verilmiyor.' });
+        }
+        if (channel === 'tailscale-owner') {
+          if (hasRawHeader(req, 'x-store-proxy-secret') || hasRawHeader(req, 'x-real-ip') || hasRawHeaderPrefix(req, 'cf-')) {
+            return json(403, { error: 'Bu kanalda mağaza vekil veya Cloudflare başlıklarına izin verilmiyor.' });
+          }
+          const loginValues = rawHeaderValues(req, 'tailscale-user-login');
+          if (loginValues.length !== 1 || typeof loginValues[0] !== 'string' || !LOGIN_ENTRY_RE.test(loginValues[0])) {
+            return json(403, { error: 'Geçerli Tailscale kullanıcı kimliği gerekli.' });
+          }
+          const normalizedLogin = loginValues[0].toLowerCase();
+          if (!deployConfig.ownerAllowedLogins.has(normalizedLogin)) {
+            return json(403, { error: 'Bu Tailscale kullanıcısı yönetici kanalına yetkili değil.' });
+          }
+          clientKey = `tailscale:${normalizedLogin}`;
+          source = 'tailscale-owner';
+        } else if (channel === 'cloudflare-owner') {
+          if (hasRawHeader(req, 'x-store-proxy-secret') || hasRawHeader(req, 'x-real-ip') || hasRawHeaderPrefix(req, 'tailscale-')) {
+            return json(403, { error: 'Bu kanalda mağaza vekil veya Tailscale başlıklarına izin verilmiyor.' });
+          }
+          const cfIdentity = await ownerCfVerifier.verifyRequest(req);
+          if (!deployConfig.ownerAllowedLogins.has(cfIdentity.email)) {
+            return json(403, { error: 'Bu Cloudflare Access kullanıcısı yönetici kanalına yetkili değil.' });
+          }
+          clientKey = `cf:${cfIdentity.email}`;
+          source = 'cloudflare-owner';
+        } else {
+          if (hasRawHeaderPrefix(req, 'tailscale-') || hasRawHeaderPrefix(req, 'cf-access-')) {
+            return json(403, { error: 'Bu kanalda yönetici kimlik başlıklarına izin verilmiyor.' });
+          }
+          const secretValues = rawHeaderValues(req, 'x-store-proxy-secret');
+          if (secretValues.length !== 1 || !constantTimeTokenMatch(secretValues[0], deployConfig.storeProxySecretDigest)) {
+            return json(403, { error: 'Geçersiz mağaza vekil doğrulaması.' });
+          }
+          const ipValues = rawHeaderValues(req, deployConfig.storeIpHeader);
+          if (ipValues.length !== 1) {
+            return json(403, { error: 'Tekil istemci IP başlığı gerekli.' });
+          }
+          const clientIp = normalizeClientIp(ipValues[0]);
+          const ipFamily = clientIp ? isIP(clientIp) : 0;
+          if (!clientIp || (ipFamily !== 4 && ipFamily !== 6) || !deployConfig.storeAllowedBlockList.check(clientIp, ipFamily === 4 ? 'ipv4' : 'ipv6')) {
+            return json(403, { error: 'Bu istemci IP adresi mağaza kasa kanalına yetkili değil.' });
+          }
+          clientKey = `ip:${clientIp}`;
+          source = 'store-checkout';
+        }
+      }
+      const identityContext = { clientKey, source };
       const url = new URL(req.url, base);
+      if (url.origin !== base) return json(403, { error: 'Geçersiz istek adresi.' });
       operation = operations.get(url.pathname) || 'request';
       const requestedWorkspace = url.searchParams.get('workspace') || 'demo';
       if (['demo', 'dukkan'].includes(requestedWorkspace)) workspace = requestedWorkspace;
+      if (channel === 'store-checkout' && CHECKOUT_BLOCKED_STATIC.has(url.pathname)) {
+        return json(403, { error: 'Bu sayfa veya varlık mağaza kasa kanalında kullanılamaz.' });
+      }
       if (req.method === 'GET' && staticFiles.has(url.pathname)) {
         const [file, type] = staticFiles.get(url.pathname);
         const content = readFileSync(path.join(directory, 'public', file));
         res.writeHead(200, { ...headers, 'Content-Type': type }); return res.end(content);
       }
       if (!url.pathname.startsWith('/api/')) return json(404, { error: 'Sayfa bulunamadı.' });
-      identities ??= new IdentityStore(dataDirectory);
-      let token = req.headers.authorization?.match(/^Bearer ([-_A-Za-z0-9]+)$/)?.[1];
+      if (channel === 'store-checkout' && (CHECKOUT_BLOCKED_API.has(url.pathname) || url.pathname === '/api/security' || url.pathname.startsWith('/api/security/') || !CHECKOUT_ALLOWED_API.has(url.pathname))) {
+        return json(403, { error: 'Bu işlem mağaza kasa kanalında kullanılamaz.' });
+      }
+      const authHeaderValues = rawHeaderValues(req, 'authorization');
+      let token = authHeaderValues.length === 1 ? authHeaderValues[0]?.match(/^Bearer ([-_A-Za-z0-9]+)$/)?.[1] : undefined;
       if (req.method === 'GET' && (operation === 'backup' || operation === 'archive') && url.searchParams.has('ticket')) {
         token = downloads.consume(url.searchParams.get('ticket'), operation, requestedWorkspace);
       }
       if (url.pathname === '/api/auth/users' && req.method === 'GET') {
-        const currentActor = identities.session(token);
+        if (channel === 'store-checkout') {
+          if (token && SESSION_TOKEN_RE.test(token) && (identities || existsSync(path.join(dataDirectory, 'identity.sqlite')))) {
+            const currentActor = ensureIdentities().session(token);
+            if (currentActor && !isRoleAllowedOnChannel(channel, currentActor.role)) {
+              return json(403, { error: 'Bu oturum bu kanalda kullanılamaz.' });
+            }
+          }
+          return json(200, { setup: false, users: [] });
+        }
+        const idStore = ensureIdentities();
+        const currentActor = idStore.session(token);
+        if (currentActor && !isRoleAllowedOnChannel(channel, currentActor.role)) {
+          return json(403, { error: 'Bu oturum bu kanalda kullanılamaz.' });
+        }
         const canList = Boolean(currentActor && currentActor.role === 'owner' && !currentActor.mustChangePin);
-        return json(200, { setup: identities.needsSetup(), users: canList ? identities.listUsers() : [] });
+        return json(200, { setup: idStore.needsSetup(), users: canList ? idStore.listUsers() : [] });
       }
+      const idStore = ensureIdentities();
       const authAction = url.pathname.slice('/api/auth/'.length);
       if (url.pathname.startsWith('/api/auth/')) {
-        if (authAction === 'session' && req.method === 'GET') return json(200, requireSession(identities, token));
+        if (authAction === 'session' && req.method === 'GET') {
+          const actor = requireSession(idStore, token);
+          if (!isRoleAllowedOnChannel(channel, actor.role)) fail('Bu oturum bu kanalda kullanılamaz.', { status: 403 });
+          return json(200, actor);
+        }
         if (req.method !== 'POST' || !['setup','login','logout','employees','disable','change-pin','reset-pin','rename'].includes(authAction)) {
           return json(404, { error: 'İşlem bulunamadı.' });
         }
         if (['employees','disable','reset-pin','rename','logout','change-pin'].includes(authAction)) {
-          const actor = requireSession(identities, token);
+          const actor = requireSession(idStore, token);
+          if (!isRoleAllowedOnChannel(channel, actor.role)) fail('Bu oturum bu kanalda kullanılamaz.', { status: 403 });
           if (['employees','disable','reset-pin','rename'].includes(authAction) && (actor.role !== 'owner' || actor.mustChangePin)) deny();
         }
         if (req.headers['content-type']?.split(';')[0].trim() !== 'application/json') return json(415, { error: 'JSON içeriği gerekli.' });
         const data = await readJson(8192);
         if (!data) return;
-        if (authAction === 'logout') { identities.logout(token); return json(200, { ok: true }); }
-        if (authAction === 'change-pin') return json(200, { actor: await identities.changePin(token, data) });
-        if (authAction === 'reset-pin') return json(200, await identities.resetEmployeePin(token, data));
-        if (authAction === 'rename') return json(200, { user: identities.renameUser(token, data) });
-        if (authAction === 'employees') return json(201, await identities.createEmployee(token, data));
-        if (authAction === 'disable') { identities.disableUser(token, data.id); return json(200, { ok: true }); }
+        if (authAction === 'logout') { idStore.logout(token, identityContext); return json(200, { ok: true }); }
+        if (authAction === 'change-pin') return json(200, { actor: await idStore.changePin(token, data, identityContext) });
+        if (authAction === 'reset-pin') return json(200, await idStore.resetEmployeePin(token, data, identityContext));
+        if (authAction === 'rename') return json(200, { user: idStore.renameUser(token, data, identityContext) });
+        if (authAction === 'employees') return json(201, await idStore.createEmployee(token, data, identityContext));
+        if (authAction === 'disable') { idStore.disableUser(token, data.id, identityContext); return json(200, { ok: true }); }
         const pin = data.pin ?? data.password;
         let session;
         if (authAction === 'setup') {
-          const owner = await identities.initializeOwner(data);
-          session = await identities.login(owner.id, pin);
+          const owner = await idStore.initializeOwner(data, identityContext);
+          session = await idStore.login(owner.id, pin, identityContext);
         } else if (typeof data.id === 'string' && data.id.trim()) {
-          session = await identities.login(data.id, pin);
+          session = await idStore.login(data.id, pin, identityContext);
         } else {
-          session = await identities.loginByName(data.name, pin);
+          session = await idStore.loginByName(data.name, pin, identityContext);
         }
         if (!session) return json(401, { error: 'Giriş başarısız. Kullanıcı adı ve 6 haneli PIN kodunu kontrol edip yeniden deneyin.' });
+        if (!isRoleAllowedOnChannel(channel, session.actor.role)) {
+          idStore.logout(session.token, identityContext);
+          return json(403, { error: 'Bu kullanıcı hesabı bu kanal üzerinden oturum açamaz.' });
+        }
         return json(authAction === 'setup' ? 201 : 200, session);
       }
-      let actor = requireSession(identities, token);
+      let actor = requireSession(idStore, token);
+      if (!isRoleAllowedOnChannel(channel, actor.role)) fail('Bu oturum bu kanalda kullanılamaz.', { status: 403 });
       if (actor.mustChangePin) return json(403, { error: 'Devam etmek için geçici PIN kodunuzu değiştirmeniz gerekiyor.', code: 'PIN_CHANGE_REQUIRED' });
       const revokeForRestore = () => {
-        if (requireSession(identities, token).role !== 'owner') deny();
+        const current = requireSession(idStore, token);
+        if (!isRoleAllowedOnChannel(channel, current.role)) fail('Bu oturum bu kanalda kullanılamaz.', { status: 403 });
+        if (current.role !== 'owner') deny();
+        if (current.mustChangePin) fail('Devam etmek için geçici PIN kodunuzu değiştirmeniz gerekiyor.', { status: 403, code: 'PIN_CHANGE_REQUIRED' });
         // Invalidate before financial COMMIT: a process crash must not preserve a stale writer.
-        identities.invalidateSessions();
+        idStore.invalidateSessions(identityContext);
       };
       const worker = actor.role === 'employee';
       if (actor.role !== 'owner' && !worker) deny();
       if (worker && !(req.method === 'POST' && (operation === 'command' || url.pathname === '/api/pending-approvals')) &&
           !(req.method === 'GET' && ['/api/checkout','/api/customers','/api/pending-approvals'].includes(url.pathname))) deny();
+      if (url.pathname === '/api/security/audit' || url.pathname.startsWith('/api/security/')) {
+        if (url.pathname !== '/api/security/audit') return json(404, { error: 'İşlem bulunamadı.' });
+        if (req.method !== 'GET') return json(405, { error: 'Denetim günlüğü yalnız GET ile okunabilir.' }, { Allow: 'GET' });
+        if (actor.role !== 'owner') deny();
+        const allowedParams = new Set(['limit', 'offset', 'eventType']);
+        for (const key of url.searchParams.keys()) {
+          if (!allowedParams.has(key) || url.searchParams.getAll(key).length !== 1) {
+            throw new IdentityError('Geçersiz denetim sorgu parametresi.', 400);
+          }
+        }
+        const limitParam = url.searchParams.get('limit');
+        const offsetParam = url.searchParams.get('offset');
+        const eventTypeParam = url.searchParams.get('eventType');
+        let limit = 100;
+        if (limitParam !== null) {
+          if (!/^\d+$/.test(limitParam)) throw new IdentityError('Geçersiz denetim sınırı.', 400);
+          limit = Number(limitParam);
+          if (!Number.isSafeInteger(limit) || limit < 1) throw new IdentityError('Geçersiz denetim sınırı.', 400);
+          limit = Math.min(500, limit);
+        }
+        let offset = 0;
+        if (offsetParam !== null) {
+          if (!/^\d+$/.test(offsetParam)) throw new IdentityError('Geçersiz denetim başlangıcı.', 400);
+          offset = Number(offsetParam);
+          if (!Number.isSafeInteger(offset) || offset < 0) throw new IdentityError('Geçersiz denetim başlangıcı.', 400);
+        }
+        let eventType = null;
+        if (eventTypeParam !== null) {
+          const trimmed = eventTypeParam.trim();
+          if (!trimmed || !/^[a-z0-9_:-]{1,64}$/i.test(trimmed)) {
+            throw new IdentityError('Geçersiz olay türü filtresi.', 400);
+          }
+          eventType = trimmed;
+        }
+        const auditResult = idStore.listAuthAudit({ limit, offset, eventType });
+        return json(200, { entries: auditResult.entries, total: auditResult.total, limit, offset });
+      }
       if (req.method === 'GET' && url.pathname === '/api/pending-approvals') {
         const repository = repo(requestedWorkspace);
-        const userNamesById = new Map(identities.listUsers().map(u => [u.id, u.name]));
         if (worker) {
+          const userNamesById = new Map([[actor.id, actor.name]]);
           const items = repository.listPending({ status: 'all', submittedById: actor.id, limit: 30, userNamesById });
           return json(200, { items });
         }
+        const userNamesById = new Map(idStore.listUsers().map(u => [u.id, u.name]));
         const status = url.searchParams.get('status') || 'pending';
         const submittedById = url.searchParams.get('employeeId') || '';
         const type = url.searchParams.get('type') || 'all';
@@ -181,7 +831,7 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
         const items = repository.listPending({ status, submittedById, type, startDate, endDate, limit: 200, userNamesById, includeComparison: true });
         const analytics = repository.employeeAnalytics({ submittedById, startDate, endDate, userNamesById });
         const knownEmployees = new Map();
-        for (const u of identities.listUsers()) if (u.id !== actor.id) knownEmployees.set(u.id, u.name);
+        for (const u of idStore.listUsers()) if (u.id !== actor.id) knownEmployees.set(u.id, u.name);
         for (const emp of analytics.byEmployee) if (!knownEmployees.has(emp.id)) knownEmployees.set(emp.id, emp.name);
         const employees = [...knownEmployees.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, 'tr'));
         return json(200, { pendingCount, items, analytics, employees });
@@ -190,7 +840,9 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
         if (!req.headers['content-type']?.startsWith('application/json')) return json(415, { error: 'JSON içeriği gerekli.' });
         const data = await readJson(2 * 1024 * 1024);
         if (!data) return;
-        actor = requireSession(identities, token);
+        actor = requireSession(idStore, token);
+        if (!isRoleAllowedOnChannel(channel, actor.role)) fail('Bu oturum bu kanalda kullanılamaz.', { status: 403 });
+        if (actor.mustChangePin) return json(403, { error: 'Devam etmek için geçici PIN kodunuzu değiştirmeniz gerekiyor.', code: 'PIN_CHANGE_REQUIRED' });
         const repository = repo(requestedWorkspace);
         if (url.pathname === '/api/pending-approvals') {
           if (data.command?.type === 'dailyCount') {
@@ -216,7 +868,10 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
         if (req.headers['content-type']?.split(';')[0].trim() !== 'application/json') return json(415, { error: 'JSON içeriği gerekli.' });
         const data = await readJson(1024);
         if (!data) return;
-        requireSession(identities, token);
+        actor = requireSession(idStore, token);
+        if (!isRoleAllowedOnChannel(channel, actor.role)) fail('Bu oturum bu kanalda kullanılamaz.', { status: 403 });
+        if (actor.mustChangePin) return json(403, { error: 'Devam etmek için geçici PIN kodunuzu değiştirmeniz gerekiyor.', code: 'PIN_CHANGE_REQUIRED' });
+        if (actor.role !== 'owner') deny();
         return json(200, { url: downloads.issue(token, data.operation, requestedWorkspace) });
       }
       // Defer opening financial files until write authorization is decided.
@@ -297,7 +952,9 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
       const bodyLimit = url.pathname === '/api/restore' ? BACKUP_MAX_BYTES + 64 * 1024 : 8 * 1024 * 1024;
       const data = await readJson(bodyLimit);
       if (!data) return;
-      actor = requireSession(identities, token);
+      actor = requireSession(idStore, token);
+      if (!isRoleAllowedOnChannel(channel, actor.role)) fail('Bu oturum bu kanalda kullanılamaz.', { status: 403 });
+      if (actor.mustChangePin) return json(403, { error: 'Devam etmek için geçici PIN kodunuzu değiştirmeniz gerekiyor.', code: 'PIN_CHANGE_REQUIRED' });
       if (url.pathname === '/api/command') {
         if (worker) {
           if (!isWorkerCustomerCreation(data.command)) {
@@ -339,7 +996,7 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
       }
       return json(200, { state: repository.restore(data, { compact, beforeCommit:revokeForRestore }), reauthenticate:true });
     } catch (e) {
-      const expected = e instanceof DomainError || e instanceof IdentityError;
+      const expected = e instanceof DomainError || e instanceof IdentityError || e instanceof CloudflareAccessError;
       if (!expected) {
         // Never log raw messages, stacks, file paths, request IDs or ledger data.
         try {
@@ -348,19 +1005,46 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
         } catch { /* A failed diagnostic sink cannot alter the request outcome. */ }
       }
       if (res.destroyed || res.headersSent) { res.destroy(); return; }
-      return json(expected ? e.status : 500, { error: expected ? e.message : 'İşlem tamamlanamadı. Son isteğin sonucunu Yenile ile kontrol edin; gerekirse aynı işlem anahtarıyla yeniden deneyin.' });
+      return json(expected ? e.status : 500, {
+        error: expected ? e.message : 'İşlem tamamlanamadı. Son isteğin sonucunu Yenile ile kontrol edin; gerekirse aynı işlem anahtarıyla yeniden deneyin.',
+        ...(expected && e.code === 'PIN_CHANGE_REQUIRED' ? { code: e.code } : {})
+      });
     }
   });
   server.requestTimeout = 120000;
   server.headersTimeout = 10000;
+  server.maxHeadersCount = 100;
+  server.on('connect', (req, socket) => socket.end('HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n'));
+  server.on('upgrade', (req, socket) => socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'));
   server.on('close', () => { identities?.close(); for (const r of repositories.values()) r.close(); });
   return { server, repositories };
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const port = Number(process.env.PORT || 4317);
-  if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('PORT 1024–65535 arasında olmalı.');
-  const { server } = createApp();
-  server.on('error', e => { console.error(`Yerel sunucu başlatılamadı: ${e.message}`); process.exitCode = 1; });
-  server.listen(port, '127.0.0.1', () => console.log(`Kuyumcu günlük defter: http://127.0.0.1:${port}\nÖrnek ve dükkân verileri ayrı SQLite dosyalarındadır. Kapatmak için Ctrl+C.`));
-  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => server.close());
+  try {
+    const port = Number(process.env.PORT || 4317);
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+      throw new Error('PORT 1024–65535 arasında olmalı.');
+    }
+    const deploy = resolveServerDeployConfig(process.env);
+    let dataDirectory;
+    if (process.env.DATA_DIRECTORY !== undefined && process.env.DATA_DIRECTORY !== '') {
+      const rawDir = process.env.DATA_DIRECTORY;
+      if (/[\r\n\u0000-\u001f\u007f]/.test(rawDir) || !rawDir.trim()) {
+        throw new Error('DATA_DIRECTORY geçerli bir klasör yolu olmalı.');
+      }
+      dataDirectory = rawDir.trim();
+    }
+    const { server } = createApp({ ...(dataDirectory ? { dataDirectory } : {}), deploy });
+    server.on('error', e => {
+      console.error(`Yerel sunucu başlatılamadı (${e?.code || 'ERR'}).`);
+      process.exitCode = 1;
+    });
+    server.listen(port, '127.0.0.1', () => {
+      console.log(`Kuyumcu günlük defter (${deploy.mode}): http://127.0.0.1:${port}\nÖrnek ve dükkân verileri ayrı SQLite dosyalarındadır. Kapatmak için Ctrl+C.`);
+    });
+    for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => server.close());
+  } catch (error) {
+    console.error(`Sunucu yapılandırması geçersiz: ${error?.message || 'Başlatılamadı.'}`);
+    process.exitCode = 1;
+  }
 }

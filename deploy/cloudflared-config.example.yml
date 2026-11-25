@@ -1,0 +1,56 @@
+# ER ŞAT Dijital Defter — Cloudflare Tunnel (cloudflared) Örnek Yapılandırması
+#
+# Kullanım:
+#   1. Sunucuda `/etc/cloudflared/config.yml` konumuna kopyalayın; `<CLOUDFLARE-TUNNEL-UUID>`
+#      ve `example.com` alan adlarını kendi alan adınızla değiştirin.
+#   2. Tünel kimlik dosyasını (`/etc/cloudflared/<CLOUDFLARE-TUNNEL-UUID>.json`) `chmod 0600`
+#      izniyle koruyun; kesinlikle Git deposuna eklemeyin.
+#   3. Güvenlik ve kanal kuralları:
+#      - Hetzner CX33 / Linux VPS güvenlik duvarında (UFW) gelen tüm HTTP/HTTPS/SSH portları
+#        kapalıdır (0 açık gelen port; `cloudflared` yalnızca dışa giden şifreli tünel kurar).
+#      - `yonetim.example.com` ve `rapor.example.com` için Cloudflare Zero Trust Access
+#        üzerinde iki AYRI Application oluşturulmalıdır (`OWNER_CF_AUD` ve `REPORT_CF_AUD`
+#        farklı AUD etiketleridir).
+#      - `kasa.example.com` üzerinde Cloudflare Zero Trust Access KESİNLİKLE AÇILMAMALIDIR
+#        (`server.mjs` içindeki `store-checkout` kanalı `Cf-Access-Jwt-Assertion` veya
+#        herhangi bir `cf-access-*` başlığını `403` ile reddeder).
+#      - `kasa.example.com` erişimini aşağıdaki iki yöntemden biriyle kilitleyin:
+#          * Seçenek A (Önerilen 1-atlama): Cloudflare WAF (yalnız mağaza statik WAN IP'si,
+#            ör. `203.0.113.10/32`) + Cloudflare Transform Rule (Modify Request Header) ile
+#            tekil `X-Store-Proxy-Secret` = `editor.env` içindeki `STORE_PROXY_SECRET` enjeksiyonu
+#            + `editor.env` içinde `STORE_IP_HEADER=cf-connecting-ip`.
+#          * Seçenek B (Sırrı Edge'de tutmadan yerel Caddy döngüsü): `kasa.example.com` hedefini
+#            `http://127.0.0.1:4319` yapın; yerel Caddy `X-Store-Proxy-Secret` başlığını ekleyip
+#            `CF-Connecting-IP` başlığını koruyarak `http://127.0.0.1:4317` adresine iletsin
+#            (`STORE_IP_HEADER=cf-connecting-ip` — Caddy'de `X-Real-IP {remote_host}` yazmayın!).
+#      - Hem `server.mjs` hem de `report-server.mjs`, `maxHeadersCount = 100` ve
+#        `rawHeaders > 80 -> 431` (en fazla 40 başlık çifti) sınırı uygular; Transform Rules
+#        ile gereksiz ek HTTP başlığı eklemeyin.
+
+tunnel: <CLOUDFLARE-TUNNEL-UUID>
+credentials-file: /etc/cloudflared/<CLOUDFLARE-TUNNEL-UUID>.json
+
+ingress:
+  # İsteğe bağlı: Dışarıdan /healthz erişimini tünel katmanında kapatmak için yorumu kaldırın
+  # (yerel canlılık kontrolü sunucuda `curl -fsS http://127.0.0.1:4317/healthz` ile yapılır;
+  # `editor.env` içinde `HEALTHZ_TOKEN` tanımlanmadıkça `server.mjs` zaten 403 döner).
+  # - path: ^/healthz$
+  #   service: http_status:404
+
+  # 1. Yönetici Kanalı (`cloudflare-owner`) -> server.mjs (`127.0.0.1:4317`)
+  #    Cloudflare Zero Trust Access Application #1 (`OWNER_CF_AUD`) buraya bağlanır.
+  - hostname: yonetim.example.com
+    service: http://127.0.0.1:4317
+
+  # 2. Mağaza Kasa Kanalı (`store-checkout`) -> server.mjs (`127.0.0.1:4317`)
+  #    Zero Trust Access KAPALI; WAF + Transform Rule (veya `127.0.0.1:4319` yerel Caddy).
+  - hostname: kasa.example.com
+    service: http://127.0.0.1:4317
+
+  # 3. Salt Okunur Rapor Portalı (`cloudflare-access`) -> report-server.mjs (`127.0.0.1:4318`)
+  #    Cloudflare Zero Trust Access Application #2 (`REPORT_CF_AUD`) buraya bağlanır.
+  - hostname: rapor.example.com
+    service: http://127.0.0.1:4318
+
+  # Zorunlu Catch-All (eşleşmeyen tüm Host ve yolları reddet)
+  - service: http_status:404

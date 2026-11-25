@@ -1,0 +1,32 @@
+[Unit]
+Description=ER SAT Dijital Defter (Ana Sunucu — Cloud Proxy Modu)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=er-sat
+Group=er-sat
+WorkingDirectory=/opt/er-sat-defter
+# Sunucu yalnız `127.0.0.1:4317` üzerinde dinler (UFW ile 0 açık gelen port).
+# `editor.env` içinde `OWNER_AUTH_PROVIDER=tailscale` (varsayılan, `x-real-ip`) veya
+# `OWNER_AUTH_PROVIDER=cloudflare-access` (`OWNER_CF_TEAM_DOMAIN`, `OWNER_CF_AUD`,
+# `STORE_IP_HEADER=cf-connecting-ip`) seçilebilir; `server.mjs` `maxHeadersCount = 100`
+# (`rawHeaders > 80 -> 431`) sınırı uygular.
+Environment=DEPLOY_MODE=cloud-proxy
+EnvironmentFile=/etc/er-sat-defter/editor.env
+ExecStart=/usr/bin/node /opt/er-sat-defter/server.mjs
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+# Dosya sistemi ve süreç sertleştirme
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/er-sat-defter
+
+[Install]
+WantedBy=multi-user.target
