@@ -707,14 +707,22 @@ test('Faz 1-B: real SQLite lock contention across connections (writes + ReportRe
       const db = new DatabaseSync(process.env.TEST_DB_PATH);
       db.exec('BEGIN IMMEDIATE; UPDATE meta SET revision = revision WHERE id = 1;');
       process.stdout.write('LOCK_HELD\\n');
-      setTimeout(() => {
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
         try { db.exec('ROLLBACK'); } catch {}
-        db.close();
-      }, 3500);
+        try { db.close(); } catch {}
+        process.exit(0);
+      };
+      process.stdin.resume();
+      process.stdin.once('end', release);
+      process.stdin.once('data', release);
+      setTimeout(release, 15000).unref();
     `;
     const child = spawn(process.execPath, ['--input-type=module', '-e', lockerScript], {
       env: { ...process.env, TEST_DB_PATH: dbPath },
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe']
     });
     let out = '';
     child.stdout.on('data', chunk => {
@@ -727,16 +735,20 @@ test('Faz 1-B: real SQLite lock contention across connections (writes + ReportRe
   lockerChild = await lockerReady;
 
   const tBusyStart = performance.now();
-  assert.throws(
-    () => repoParent.execute({
-      id: 'busy-fail-1',
-      revision: revBeforeBusy,
-      command: { type: 'movement', date: DATE, accountId: 'nakit', direction: 'in', category: 'Sermaye', quantity: '1', note: 'Busy test' }
-    }, { actor: OWNER_ACTOR }),
-    err => /SQLITE_BUSY|database is locked/i.test(`${err.code || ''} ${err.message || ''}`)
-  );
+  try {
+    assert.throws(
+      () => repoParent.execute({
+        id: 'busy-fail-1',
+        revision: revBeforeBusy,
+        command: { type: 'movement', date: DATE, accountId: 'nakit', direction: 'in', category: 'Sermaye', quantity: '1', note: 'Busy test' }
+      }, { actor: OWNER_ACTOR }),
+      err => /SQLITE_BUSY|database is locked/i.test(`${err.code || ''} ${err.message || ''}`)
+    );
+  } finally {
+    try { lockerChild.stdin?.end(); } catch {}
+  }
   const busyElapsedMs = performance.now() - tBusyStart;
-  t.diagnostic(`SQLITE_BUSY elapsed time after external 3500ms lock: ${busyElapsedMs.toFixed(1)}ms`);
+  t.diagnostic(`SQLITE_BUSY elapsed time under deterministic external write lock: ${busyElapsedMs.toFixed(1)}ms`);
   assert.ok(busyElapsedMs >= 2700, `Expected busy_timeout wait ~3000ms, got ${busyElapsedMs.toFixed(1)}ms`);
 
   // Wait for locker to release and verify DB remains healthy & clean

@@ -812,14 +812,28 @@ test('Faz 1-C/D: CLI entry point, application_id mismatch rejection, and rollbac
   );
   assert.deepEqual(readFileSync(join(targetDir, 'dukkan.sqlite')), targetDukkanBefore);
 
-  // 3) Rollback-safe swap: open lock on target identity.sqlite causes swap failure after dukkan.sqlite is moved; dukkan.sqlite must roll back intact.
-  const lockedId = new DatabaseSync(join(targetDir, 'identity.sqlite'));
-  try {
-    await assert.rejects(
-      restoreBackupBundle({ bundleDirectory: created.bundleDirectory, targetDirectory: targetDir, tempDirectory: tempDir })
-    );
-  } finally {
-    lockedId.close();
+  // 3) Rollback-safe swap: induce OS-native swap failure and verify target dukkan.sqlite remains intact.
+  // On Windows, an open DatabaseSync handle on identity.sqlite blocks moveFileReplace after dukkan.sqlite is moved.
+  // On POSIX (Linux/macOS), rename() over an open file succeeds, so a read-only target directory (0o500) induces EACCES.
+  if (process.platform === 'win32') {
+    const lockedId = new DatabaseSync(join(targetDir, 'identity.sqlite'));
+    try {
+      await assert.rejects(
+        restoreBackupBundle({ bundleDirectory: created.bundleDirectory, targetDirectory: targetDir, tempDirectory: tempDir })
+      );
+    } finally {
+      lockedId.close();
+    }
+  } else if (typeof process.getuid !== 'function' || process.getuid() !== 0) {
+    const { chmodSync } = await import('node:fs');
+    chmodSync(targetDir, 0o500);
+    try {
+      await assert.rejects(
+        restoreBackupBundle({ bundleDirectory: created.bundleDirectory, targetDirectory: targetDir, tempDirectory: tempDir })
+      );
+    } finally {
+      chmodSync(targetDir, 0o700);
+    }
   }
   assert.deepEqual(readFileSync(join(targetDir, 'dukkan.sqlite')), targetDukkanBefore);
 
