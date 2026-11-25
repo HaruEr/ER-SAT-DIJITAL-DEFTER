@@ -310,7 +310,7 @@ test('concurrent cold-start IdentityStore initialization succeeds across 8 barri
     const db = new DatabaseSync(join(trialDir, 'identity.sqlite'), { readOnly: true });
     try {
       assert.equal(db.prepare('PRAGMA application_id').get().application_id, 1163086153);
-      assert.equal(db.prepare('PRAGMA user_version').get().user_version, 3);
+      assert.equal(db.prepare('PRAGMA user_version').get().user_version, 4);
       assert.equal(String(db.prepare('PRAGMA journal_mode').get().journal_mode).toLowerCase(), 'wal');
       assert.equal(db.prepare('PRAGMA synchronous').get().synchronous, 2);
     } finally {
@@ -319,7 +319,7 @@ test('concurrent cold-start IdentityStore initialization succeeds across 8 barri
   }
 });
 
-test('concurrent v1->v3 DELETE-mode upgrade succeeds across 4 barrier-synchronized workers x 20 trials', async t => {
+test('concurrent v1->v4 DELETE-mode upgrade succeeds across 4 barrier-synchronized workers x 20 trials', async t => {
   const root = mkdtempSync(join(tmpdir(), 'identity-v1-pool-'));
   const pool = createBarrierWorkerPool(4);
   t.after(async () => {
@@ -366,7 +366,7 @@ test('concurrent v1->v3 DELETE-mode upgrade succeeds across 4 barrier-synchroniz
     assert.deepEqual(
       results.filter(r => !r.ok),
       [],
-      `Trial ${trial} had unexpected v1->v3 upgrade failures: ${JSON.stringify(results)}`
+      `Trial ${trial} had unexpected v1->v4 upgrade failures: ${JSON.stringify(results)}`
     );
     for (const r of results) {
       assert.equal(r.needsSetup, false);
@@ -376,7 +376,7 @@ test('concurrent v1->v3 DELETE-mode upgrade succeeds across 4 barrier-synchroniz
     const verifyDb = new DatabaseSync(dbFile, { readOnly: true });
     try {
       assert.equal(verifyDb.prepare('PRAGMA application_id').get().application_id, 1163086153);
-      assert.equal(verifyDb.prepare('PRAGMA user_version').get().user_version, 3);
+      assert.equal(verifyDb.prepare('PRAGMA user_version').get().user_version, 4);
       assert.equal(String(verifyDb.prepare('PRAGMA journal_mode').get().journal_mode).toLowerCase(), 'wal');
       assert.equal(verifyDb.prepare('PRAGMA synchronous').get().synchronous, 2);
       const genRows = verifyDb.prepare('SELECT generation FROM session_generation').all();

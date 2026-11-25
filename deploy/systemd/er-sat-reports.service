@@ -1,0 +1,35 @@
+[Unit]
+Description=ER SAT Dijital Defter — Salt Okunur Mobil Rapor Sunucusu
+After=network-online.target er-sat-defter.service
+Wants=er-sat-defter.service
+
+[Service]
+Type=simple
+User=er-sat
+Group=er-sat
+WorkingDirectory=/opt/er-sat-defter
+Environment=REPORT_ENABLED=1
+EnvironmentFile=/etc/er-sat-defter/reports.env
+ExecStart=/usr/bin/node /opt/er-sat-defter/report-server.mjs
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+# Dosya sistemi ve süreç sertleştirme
+# ÖNEMLİ: Burada `ReadOnlyPaths=` YERİNE `ReadWritePaths=/var/lib/er-sat-defter`
+# kullanılmalıdır. Aktif yazıcı (`er-sat-defter.service`) WAL modunda çalışırken
+# SQLite okuma bağlantıları bile `-shm` (WAL-index paylaşımlı bellek) dosyasını
+# eşlemek ve kilitlemek için veri klasöründe işletim sistemi düzeyinde yazma/kilitleme
+# iznine ihtiyaç duyar; aksi halde `SQLITE_READONLY` veya `SQLITE_CANTOPEN` oluşur.
+# Veritabanı düzeyinde salt okunur güvenlik `report-repository.mjs` içindeki
+# `{ readOnly: true }` + `PRAGMA query_only=ON;` ve `report-server.mjs` GET-only
+# yüzeyi tarafından garanti edilir.
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/er-sat-defter
+
+[Install]
+WantedBy=multi-user.target

@@ -1001,13 +1001,16 @@ function verifyDatabaseContentsAndReconcile(stagedFile, dbEntry) {
     );
 
     if (dbEntry.role === 'identity') {
-      if (applicationId !== IDENTITY_APPLICATION_ID || ![1, 2, 3].includes(userVersion)) {
+      if (applicationId !== IDENTITY_APPLICATION_ID || ![1, 2, 3, 4].includes(userVersion)) {
         throw failBundle('IDENTITY_SCHEMA_INVALID', 'identity.sqlite kimlik uygulaması veya sürümü geçersiz.');
       }
       for (const reqTable of IDENTITY_REQUIRED_TABLES) {
         if (!tableNames.has(reqTable)) {
           throw failBundle('IDENTITY_SCHEMA_INVALID', `identity.sqlite tablosu eksik: ${reqTable}`);
         }
+      }
+      if (userVersion >= 4 && !tableNames.has('auth_audit_log')) {
+        throw failBundle('IDENTITY_SCHEMA_INVALID', 'identity.sqlite tablosu eksik: auth_audit_log');
       }
       const genRow = db.prepare('SELECT generation FROM session_generation WHERE id = 1').get();
       if (!genRow || typeof genRow.generation !== 'string' || !genRow.generation) {
@@ -1020,6 +1023,9 @@ function verifyDatabaseContentsAndReconcile(stagedFile, dbEntry) {
         }
       }
       db.prepare('SELECT bucket, until_ms, attempts FROM login_limits').all();
+      if (userVersion >= 4) {
+        db.prepare('SELECT id, created_at, event_type, outcome FROM auth_audit_log LIMIT 0').all();
+      }
       return { role: 'identity', userCount: users.length };
     }
 

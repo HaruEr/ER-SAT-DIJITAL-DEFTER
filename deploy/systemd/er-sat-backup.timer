@@ -1,0 +1,11 @@
+[Unit]
+Description=ER SAT Dijital Defter — Periyodik Şifreli Yedekleme Zamanlayıcısı
+
+[Timer]
+OnCalendar=*-*-* 00/6:00:00
+Persistent=true
+RandomizedDelaySec=5m
+Unit=er-sat-backup.service
+
+[Install]
+WantedBy=timers.target

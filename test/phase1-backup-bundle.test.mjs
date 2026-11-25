@@ -250,7 +250,7 @@ test('Faz 1-C: cross-DB backup captures dukkan (photos, pending, restore_archive
   assert.equal(dukkanEntry.restoreArchiveCount, 1);
   const idEntry = manifest.databases.find(d => d.role === 'identity');
   assert.equal(idEntry.applicationId, 1163086153);
-  assert.equal(idEntry.userVersion, 3);
+  assert.equal(idEntry.userVersion, 4);
   assert.equal(idEntry.userCount, 2);
 
   // Never leak PINs, tokens, or passphrases in manifest.

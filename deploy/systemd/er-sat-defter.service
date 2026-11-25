@@ -1,0 +1,27 @@
+[Unit]
+Description=ER SAT Dijital Defter (Ana Sunucu — Cloud Proxy Modu)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=er-sat
+Group=er-sat
+WorkingDirectory=/opt/er-sat-defter
+Environment=DEPLOY_MODE=cloud-proxy
+EnvironmentFile=/etc/er-sat-defter/editor.env
+ExecStart=/usr/bin/node /opt/er-sat-defter/server.mjs
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+# Dosya sistemi ve süreç sertleştirme
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/er-sat-defter
+
+[Install]
+WantedBy=multi-user.target
