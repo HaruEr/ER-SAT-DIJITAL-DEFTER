@@ -1,6 +1,6 @@
 # ER ŞAT Dijital Defter — Bulut Hazırlık Kararları ve Adım 8–11 Yol Haritası
 
-Bu belge, `feat/cloud-phase1-data-safety` dalında tamamlanan Faz 0–3 mühendislik çalışmalarını, kesinleşen altyapı/maliyet kararlarını, bağımsız QA bulgularını ve sıradaki **Adım 8–11** (Sentetik Bulut Pilotu → Bağımsız Yedekleme → RPO/RTO Kabulü → Kontrollü Üretime Geçiş) yol haritasını özetler.
+Bu belge, `main` dalına birleştirilen Faz 0–3 mühendislik çalışmalarını (PR #6 → PR #7), kesinleşen altyapı/maliyet ve mağaza operasyon kararlarını, bağımsız QA bulgularını ve sıradaki **Adım 8–11** (Sentetik Bulut Pilotu → Bağımsız Yedekleme → RPO/RTO Kabulü → Kontrollü Üretime Geçiş) yol haritasını özetler.
 
 > **Güvenlik Sınırı:** Bu belge yalnızca mimari kararları ve teknik özeti içerir; canlı veri, parola, PIN, API anahtarı veya gerçek IP adresi barındırmaz.
 
@@ -49,6 +49,18 @@ Bu belge, `feat/cloud-phase1-data-safety` dalında tamamlanan Faz 0–3 mühendi
 
 ---
 
+## 2.5 Mağaza Hazırlık Bulguları ve Kesinleşen Operasyonel Kararlar
+
+Adım 8 öncesinde mağazada yapılan ağ ve operasyon değerlendirmesiyle aşağıdaki kararlar kesinleştirilmiştir (gerçek IP, SSID, parola ve cihaz adları güvenlik gereği bu belgede tutulmaz):
+
+- **Mağaza İnternet ve Statik IP Kararı:** Mağaza hattı Fiber PPPoE, varsayılan **IPv4** (IPv6 kapalı) ve kablolu LAN bağlantılı olarak doğrulanmıştır. `kasa.<alanadiniz>` erişimi için **Statik IP (`STORE_ALLOWED_IPS`) + Cloudflare WAF** modeli kesinleşmiştir (abonelik/fatura üzerinden Statik IP aktifliği teyit edilip gerekirse açtırılacaktır).
+- **Modem / Wi-Fi İzolasyon Kuralı:** Mevcut ISP modem yazılımında yerleşik Misafir Ağı / AP Isolation özelliği bulunmadığından, ana mağaza Wi-Fi ağı yalnızca mağaza kasa ve çalışan cihazlarına özel tutulacak; müşterilerle paylaşılmayacaktır.
+- **Üretime Geçiş Kaynağı (Sıfırdan Temiz Kurulum):** Eski canlı SQLite veritabanı taşıması yapılmayacaktır. Bulut üretim ortamı doğrulandıktan sonra sistem **sıfırdan temiz kurulum** ile başlatılıp açılış kasa, stok, cari ve toptancı bakiyeleri doğrulanarak girilecektir.
+- **Cihaz ve Yazdırma Kapsamı:** Mağazada standart web tarayıcı (PC, tablet, telefon) ve mevcut A4/tarayıcı yazdırma akışı kullanılacaktır; özel termal fiş yazıcı veya barkod okuyucu sürücüsü gerekmemektedir.
+- **Mağaza Ana PC Güvenliği (Adım 9 & 11):** Üretime geçişte yerel 3. yedek kopyasını (`C:\er-sat-backups`) çekecek mağaza ana Windows PC'sinde BitLocker/cihaz şifrelemesi, ayrı Yönetici ve Standart Kullanıcı hesapları, yalnızca Yönetici grubuna kilitli `C:\er-sat-backups` klasörü ve doğrulama için Node.js 24 LTS + `rclone`/`restic` kurulumu tamamlanacaktır.
+
+---
+
 ## 3. Sıradaki Adımlar (Adım 8 – Adım 11)
 
 ### Adım 8 — Sentetik Bulut Pilotu (Sıfır Canlı Veri)
@@ -71,18 +83,19 @@ Bu belge, `feat/cloud-phase1-data-safety` dalında tamamlanan Faz 0–3 mühendi
 2. **Canlı Güvenlik Testleri:** Mağaza dışı IP'den `kasa` → `403`; `kasa`'dan `/owner`, `/api/suppliers`, `owner` PIN → `403`/`404`; sahte/süresi dolmuş JWT → `403`; kademeli PIN kilidi; R2 `backup-writer` ile silme denemesi → `403 AccessDenied`.
 
 ### Adım 11 — Kontrollü Gerçek İşletme Kurulumu (İşletme Sahibi Onayıyla)
-1. Mağaza ana PC'sindeki mevcut canlı veritabanının çift kopya (yerel + harici disk) yedeği alınır.
-2. Mağaza PC temel güvenliği (standart Windows çalışan hesabı, ayrı yönetici hesabı, BitLocker, misafir Wi-Fi ayrımı) tamamlanır.
-3. Canlı veriler şifreli kanaldan doğrulanmış üretim VPS'ine aktarılır; kasa, stok, cari, toptancı ve has altın bakiyeleri eski defterle kuruşu kuruşuna / miligramı miligramına doğrulanır.
-4. Yönetici onayıyla eski yerel sunucu kapatılır, tek aktif yazma merkezi olarak bulut sunucusu devreye alınır ve ilk 15 dk R2 + mağaza PC yedeği doğrulanır.
+1. Mağaza ana PC'sinin temel güvenliği (standart Windows çalışan hesabı, ayrı yönetici hesabı, BitLocker/cihaz şifreleme, ana Wi-Fi'nin müşterilerle paylaşılmaması, `C:\er-sat-backups` NTFS kilidi) tamamlanır.
+2. Doğrulanmış üretim VPS'i **sıfırdan temiz kurulum** ile devreye alınır; yönetici/çalışan 6 haneli PIN hesapları tanımlanır.
+3. Açılış kasa, stok, cari, toptancı ve has altın bakiyeleri işletme sahibi tarafından girilip fiziksel sayım ve mevcut defterle kuruşu kuruşuna / miligramı miligramına doğrulanır.
+4. Yönetici onayıyla bulut sunucusu tek aktif yazma merkezi olarak kullanıma açılır; ilk 15 dk R2 + mağaza ana PC yerel şifreli yedeği ve harici disk kopyası doğrulanır.
 
 ---
 
-## 4. macOS (Apple Silicon) Üzerinden Devam Etme Komutları
+## 4. Evden / macOS (Apple Silicon) Üzerinden Devam Etme Komutları
 
 ```bash
-git fetch origin
-git switch -C feat/cloud-phase1-data-safety origin/feat/cloud-phase1-data-safety
+git fetch origin --prune
+git switch main
+git pull --ff-only origin main
 nvm use
 npm ci --ignore-scripts
 git log --oneline -n 7
