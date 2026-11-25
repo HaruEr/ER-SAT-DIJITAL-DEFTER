@@ -1,0 +1,47 @@
+# ER ŞAT Dijital Defter — Caddy Ters Vekil Örneği (`store-checkout` kanalı)
+#
+# Kullanım:
+#   1. Bu dosyayı sunucuda `/etc/caddy/Caddyfile` (veya `/etc/caddy/conf.d/er-sat.caddy`)
+#      konumuna kopyalayın; `kasa.example.com` yerine gerçek kasa alt alan adınızı yazın.
+#   2. Caddy ortamında `STORE_PROXY_SECRET` değerini `/etc/er-sat-defter/editor.env`
+#      dosyasındaki `STORE_PROXY_SECRET` (en az 16 karakter) ile birebir aynı olacak
+#      şekilde tanımlayın (ör. systemd drop-in `EnvironmentFile=/etc/er-sat-defter/caddy.env`).
+#   3. `server.mjs` (`DEPLOY_MODE=cloud-proxy`) yalnız `127.0.0.1:4317` üzerinde dinler ve
+#      `CHECKOUT_ALLOWED_HOSTS` (ör. `kasa.example.com`) ile `OWNER_ALLOWED_HOSTS` alan
+#      adlarının birbirinden tamamen ayrık olmasını zorunlu kılar.
+#
+# Sağlayıcıdan bağımsız ağ / `STORE_ALLOWED_IPS` seçenekleri (`editor.env` içinde):
+#   - Seçenek A (Statik mağaza WAN IP): `STORE_ALLOWED_IPS=203.0.113.10/32`
+#   - Seçenek B (WireGuard tüneli):    `STORE_ALLOWED_IPS=198.51.100.0/24` (veya WireGuard eş IP/alt ağı)
+#   - Seçenek C (Tailscale ağ geçidi): `STORE_ALLOWED_IPS=198.51.100.25/32` (çıkış/subnet router IP)
+#   Not: `X-Real-IP` değeri Caddy'nin doğrudan gördüğü TCP eş IP'sinden (`{remote_host}`)
+#   üretilir; önünde güvenilmeyen bir CDN/vekil varsa istemci IP doğrulaması bozulur.
+
+kasa.example.com {
+	# Dışarıdan gelen kimliksiz /healthz isteklerini kesin olarak engelle.
+	# Yerel canlılık kontrolü doğrudan sunucu üzerinde loopback üzerinden yapılmalıdır:
+	#   curl -fsS http://127.0.0.1:4317/healthz
+	# (Dış izleme gerekiyorsa `editor.env` içinde >=16 karakterli `HEALTHZ_TOKEN` tanımlayın
+	# ve yalnız `Authorization: Bearer <token>` VEYA `X-Healthz-Token: <token>` başlıklarından
+	# tek birini kullanın — asla ikisini birden veya yinelenen başlık göndermeyin.)
+	@healthz path /healthz
+	respond @healthz 403
+
+	reverse_proxy 127.0.0.1:4317 {
+		# İstemci tarafından sahte `Tailscale-*` (ve `Tailscale-Funnel-Request`) başlığı
+		# enjekte edilmesini engelle; `store-checkout` kanalı `tailscale-*` başlığı görürse 403 döner.
+		header_up -Tailscale-*
+
+		# Önce istemciden gelebilecek olası yinelenen başlıkları sil, ardından tekil değer yaz.
+		# (`server.mjs`, `rawHeaders` içinde bu iki başlığın tam olarak 1 kez bulunmasını ister.)
+		header_up -X-Store-Proxy-Secret
+		header_up X-Store-Proxy-Secret {$STORE_PROXY_SECRET}
+
+		header_up -X-Real-IP
+		header_up X-Real-IP {remote_host}
+
+		# `Host` ve `Origin` başlıkları Caddy tarafından değiştirilmeden korunur:
+		# - `Host` -> `kasa.example.com` (`CHECKOUT_ALLOWED_HOSTS` içinde olmalı)
+		# - `Origin` (tarayıcı gönderdiğinde) -> `https://kasa.example.com`
+	}
+}

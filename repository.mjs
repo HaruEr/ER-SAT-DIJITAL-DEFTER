@@ -4,6 +4,8 @@ import { isSupplierCommand, supplierAccountIds, supplierDocuments } from './supp
 import { underlyingSaleCommand } from './sale-pricing.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, mkdirSync, statSync } from 'node:fs';
+import { dirname, resolve, win32 as win32Path } from 'node:path';
 import { replay, fail, text, quantity, eventVersion, eventActor, applyEvent, validDate, workdaySummary as computeWorkdaySummary } from './domain.mjs';
 import { allowedWorkerCountIds, workerCountCatalog } from './editor-access.mjs';
 import { exportLedgerArchive, importLedgerArchive } from './archive.mjs';
@@ -44,7 +46,87 @@ const HISTORY_COMMANDS = new Set([
   'supplierAllocation', 'supplierOffset'
 ]);
 const RENAME_COMMANDS = new Set(['accountUpdate', 'stockUpdate', 'fundUpdate', 'supplierFirmUpdate']);
+const UUID_RE = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
+const isSqliteBusyError = error =>
+  error?.code === 'ERR_SQLITE_ERROR' &&
+  ((Number.isInteger(error?.errcode) && (error.errcode & 0xff) === 5) ||
+    /database is locked|SQLITE_BUSY/i.test(error?.message || ''));
+function canonicalJson(value) {
+  const normalize = node => {
+    if (node === null || typeof node !== 'object') return JSON.stringify(node);
+    if (Array.isArray(node)) return `[${node.map(normalize).join(',')}]`;
+    return `{${Object.keys(node).sort().map(key => `${JSON.stringify(key)}:${normalize(node[key])}`).join(',')}}`;
+  };
+  return normalize(JSON.parse(JSON.stringify(value)));
+}
+const BACKUP_WIN32_ILLEGAL_CHAR_RE = /[\x00-\x1f\x7f\\/:*?"<>|]/;
+const BACKUP_CONTROL_OR_BIDI_RE = /[\u0080-\u009f\u202a-\u202e\u2066-\u2069]/;
+const BACKUP_WINDOWS_RESERVED_STEM_RE = /^(?:con|prn|aux|nul|com[0-9\u00B2\u00B3\u00B9]|lpt[0-9\u00B2\u00B3\u00B9]|conin\$|conout\$)$/i;
+const BACKUP_WIN32_DEVICE_NAMESPACE_RE = /^[\\/]{2}[?.](?:[\\/]|$)/;
+const BACKUP_WIN32_DRIVE_ROOT_RE = /^[A-Za-z]:[\\/]?$/;
+
+function isUnsafeBackupWin32Segment(segment, { allowDotNavigation = false } = {}) {
+  if (!segment) return false;
+  if (segment === '.' || segment === '..') return !allowDotNavigation;
+  if (segment !== segment.trim()) return true;
+  if (segment.endsWith('.')) return true;
+  if (BACKUP_WIN32_ILLEGAL_CHAR_RE.test(segment)) return true;
+  if (BACKUP_CONTROL_OR_BIDI_RE.test(segment)) return true;
+  const cut = segment.search(/[.:]/);
+  const stem = (cut === -1 ? segment : segment.slice(0, cut)).replace(/[\s.]+$/u, '');
+  return BACKUP_WINDOWS_RESERVED_STEM_RE.test(stem);
+}
+
+function validateBackupPathTree(pathValue, { allowDotNavigation }) {
+  if (BACKUP_WIN32_DEVICE_NAMESPACE_RE.test(pathValue)) {
+    throw Object.assign(new Error('Yedek hedef dosyası Win32 aygıt ad alanı içeremez.'), { code: 'INVALID_PATH' });
+  }
+  const { root } = win32Path.parse(pathValue);
+  if (root) {
+    if (BACKUP_WIN32_DEVICE_NAMESPACE_RE.test(root)) {
+      throw Object.assign(new Error('Yedek hedef dosyası Win32 aygıt ad alanı içeremez.'), { code: 'INVALID_PATH' });
+    }
+    const isSlashRoot = root === '/' || root === '\\';
+    const isDriveRoot = BACKUP_WIN32_DRIVE_ROOT_RE.test(root);
+    if (!isSlashRoot && !isDriveRoot) {
+      if (!/^(?:\\\\|\/\/)/.test(root)) {
+        throw Object.assign(new Error('Yedek hedef dosyası geçersiz bir kök yolu içeriyor.'), { code: 'INVALID_PATH' });
+      }
+      const uncParts = root.replace(/^[\\/]{2}/, '').split(/[\\/]+/).filter(Boolean);
+      if (uncParts.length !== 2 || uncParts.some(part => isUnsafeBackupWin32Segment(part, { allowDotNavigation: false }))) {
+        throw Object.assign(new Error('Yedek hedef dosyası geçersiz bir UNC kök yolu içeriyor.'), { code: 'INVALID_PATH' });
+      }
+    }
+  }
+  const remainder = pathValue.slice(root.length);
+  for (const segment of remainder.split(/[\\/]+/)) {
+    if (!segment) continue;
+    if (isUnsafeBackupWin32Segment(segment, { allowDotNavigation })) {
+      throw Object.assign(new Error('Yedek hedef dosyası geçersiz veya Windows ayrılmış yol bölümü içeriyor.'), { code: 'INVALID_PATH' });
+    }
+  }
+}
+
+function assertSafeBackupTargetPath(targetFile) {
+  if (
+    typeof targetFile !== 'string' ||
+    !targetFile.trim() ||
+    targetFile.includes('\0') ||
+    targetFile !== targetFile.trim() ||
+    targetFile === ':memory:'
+  ) {
+    throw Object.assign(new Error('Geçerli bir yedek hedef dosya yolu gerekli.'), { code: 'INVALID_PATH' });
+  }
+  const resolvedTarget = resolve(targetFile);
+  if (!resolvedTarget.trim() || resolvedTarget.includes('\0') || resolvedTarget !== resolvedTarget.trim()) {
+    throw Object.assign(new Error('Geçerli bir yedek hedef dosya yolu gerekli.'), { code: 'INVALID_PATH' });
+  }
+  validateBackupPathTree(targetFile, { allowDotNavigation: true });
+  validateBackupPathTree(resolvedTarget, { allowDotNavigation: false });
+  return resolvedTarget;
+}
 export const BACKUP_MAX_BYTES = 64 * 1024 * 1024;
 const backupTooLarge = () => fail('JSON yedeği desteklenen 64 MiB sınırını aşıyor. Büyük defter için Yedek ekranındaki akışlı arşivi kullanın.', { status: 413, code: 'BACKUP_TOO_LARGE' });
 export function assertBackupSize(backup) {
@@ -62,83 +144,132 @@ export class Repository {
     this.#cacheMaxBytes = cacheMaxBytes;
     this.#filename = filename;
     this.workspace = workspace;
-    this.db = new DatabaseSync(filename);
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-      CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, body TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS meta(id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
-      INSERT OR IGNORE INTO meta VALUES(1,0);
-      CREATE TABLE IF NOT EXISTS restore_archive(id INTEGER PRIMARY KEY, created_at TEXT, body TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS ledger_snapshot(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL, revision INTEGER NOT NULL, last_seq INTEGER NOT NULL, event_count INTEGER NOT NULL, sha256 TEXT NOT NULL, body TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS ledger_journal(
-        seq INTEGER PRIMARY KEY,
-        id TEXT UNIQUE NOT NULL,
-        date TEXT NOT NULL,
-        type TEXT NOT NULL,
-        supplier_id TEXT,
-        original_id TEXT,
-        search_text TEXT NOT NULL,
-        entry_count INTEGER NOT NULL,
-        revenue INTEGER NOT NULL,
-        purchase_total INTEGER NOT NULL,
-        label TEXT NOT NULL,
-        entries_json TEXT NOT NULL,
-        body TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_lj_date ON ledger_journal(date, seq);
-      CREATE INDEX IF NOT EXISTS idx_lj_type ON ledger_journal(type, seq);
-      CREATE INDEX IF NOT EXISTS idx_lj_supplier ON ledger_journal(supplier_id, seq);
-      CREATE INDEX IF NOT EXISTS idx_lj_original ON ledger_journal(original_id, seq);
-      CREATE TABLE IF NOT EXISTS ledger_journal_accounts(
-        account_id TEXT NOT NULL,
-        match_kind INTEGER NOT NULL,
-        seq INTEGER NOT NULL,
-        PRIMARY KEY(account_id, match_kind, seq)
-      );
-      CREATE TABLE IF NOT EXISTS ledger_links(
-        a TEXT NOT NULL,
-        b TEXT NOT NULL,
-        PRIMARY KEY(a, b)
-      );
-      CREATE TABLE IF NOT EXISTS pending_submissions(
-        id TEXT PRIMARY KEY NOT NULL,
-        workspace TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
-        date TEXT NOT NULL,
-        type TEXT NOT NULL CHECK(type IN ('sale','purchase','dailyCount')),
-        submitted_by_id TEXT NOT NULL,
-        submitted_by_name TEXT NOT NULL,
-        submitted_at TEXT NOT NULL,
-        command_json TEXT NOT NULL,
-        approved_command_json TEXT,
-        summary_json TEXT NOT NULL,
-        reviewed_by_id TEXT,
-        reviewed_by_name TEXT,
-        reviewed_at TEXT,
-        was_edited INTEGER NOT NULL DEFAULT 0 CHECK(was_edited IN (0, 1)),
-        rejection_reason TEXT,
-        approved_event_id TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_ps_status ON pending_submissions(status, submitted_at);
-      CREATE INDEX IF NOT EXISTS idx_ps_worker_date ON pending_submissions(submitted_by_id, date, status);`);
-    const psSchema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='pending_submissions'").get();
-    if (psSchema?.sql && !psSchema.sql.includes("'dailyCount'")) {
-      this.db.exec(`BEGIN IMMEDIATE;
-        ALTER TABLE pending_submissions RENAME TO pending_submissions_old;
-        CREATE TABLE pending_submissions(
-          id TEXT PRIMARY KEY NOT NULL, workspace TEXT NOT NULL,
-          status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
-          date TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('sale','purchase','dailyCount')),
-          submitted_by_id TEXT NOT NULL, submitted_by_name TEXT NOT NULL, submitted_at TEXT NOT NULL,
-          command_json TEXT NOT NULL, approved_command_json TEXT, summary_json TEXT NOT NULL,
-          reviewed_by_id TEXT, reviewed_by_name TEXT, reviewed_at TEXT,
-          was_edited INTEGER NOT NULL DEFAULT 0 CHECK(was_edited IN (0, 1)),
-          rejection_reason TEXT, approved_event_id TEXT
+    this.db = new DatabaseSync(filename, { timeout: 3000 });
+    try {
+      this.db.exec('PRAGMA busy_timeout=3000; PRAGMA trusted_schema=OFF;');
+      const lockDeadline = Date.now() + 3000;
+      if (this.#filename !== ':memory:') {
+        let lastBusyError = null;
+        while (true) {
+          try {
+            const currentMode = this.db.prepare('PRAGMA journal_mode').get()?.journal_mode;
+            if (String(currentMode).toLowerCase() === 'wal') break;
+            const nextMode = this.db.prepare('PRAGMA journal_mode=WAL').get()?.journal_mode;
+            if (String(nextMode).toLowerCase() === 'wal') break;
+          } catch (error) {
+            if (!isSqliteBusyError(error) || Date.now() >= lockDeadline) throw error;
+            lastBusyError = error;
+          }
+          if (Date.now() >= lockDeadline) {
+            throw lastBusyError ?? new Error('Defter veritabanı WAL moduna geçirilemedi.');
+          }
+          Atomics.wait(sleepBuffer, 0, 0, 5 + Math.floor(Math.random() * 20));
+        }
+      }
+      this.db.exec('PRAGMA synchronous=FULL;');
+      while (true) {
+        try {
+          this.db.exec('BEGIN IMMEDIATE');
+          break;
+        } catch (error) {
+          if (!isSqliteBusyError(error) || Date.now() >= lockDeadline) throw error;
+          Atomics.wait(sleepBuffer, 0, 0, 5 + Math.floor(Math.random() * 20));
+        }
+      }
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, body TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS meta(id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+        INSERT OR IGNORE INTO meta VALUES(1,0);
+        CREATE TABLE IF NOT EXISTS restore_archive(id INTEGER PRIMARY KEY, created_at TEXT, body TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS ledger_snapshot(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL, revision INTEGER NOT NULL, last_seq INTEGER NOT NULL, event_count INTEGER NOT NULL, sha256 TEXT NOT NULL, body TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS ledger_journal(
+          seq INTEGER PRIMARY KEY,
+          id TEXT UNIQUE NOT NULL,
+          date TEXT NOT NULL,
+          type TEXT NOT NULL,
+          supplier_id TEXT,
+          original_id TEXT,
+          search_text TEXT NOT NULL,
+          entry_count INTEGER NOT NULL,
+          revenue INTEGER NOT NULL,
+          purchase_total INTEGER NOT NULL,
+          label TEXT NOT NULL,
+          entries_json TEXT NOT NULL,
+          body TEXT NOT NULL
         );
-        INSERT INTO pending_submissions SELECT * FROM pending_submissions_old;
-        DROP TABLE pending_submissions_old;
+        CREATE INDEX IF NOT EXISTS idx_lj_date ON ledger_journal(date, seq);
+        CREATE INDEX IF NOT EXISTS idx_lj_type ON ledger_journal(type, seq);
+        CREATE INDEX IF NOT EXISTS idx_lj_supplier ON ledger_journal(supplier_id, seq);
+        CREATE INDEX IF NOT EXISTS idx_lj_original ON ledger_journal(original_id, seq);
+        CREATE TABLE IF NOT EXISTS ledger_journal_accounts(
+          account_id TEXT NOT NULL,
+          match_kind INTEGER NOT NULL,
+          seq INTEGER NOT NULL,
+          PRIMARY KEY(account_id, match_kind, seq)
+        );
+        CREATE TABLE IF NOT EXISTS ledger_links(
+          a TEXT NOT NULL,
+          b TEXT NOT NULL,
+          PRIMARY KEY(a, b)
+        );
+        CREATE TABLE IF NOT EXISTS pending_submissions(
+          id TEXT PRIMARY KEY NOT NULL,
+          workspace TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+          date TEXT NOT NULL,
+          type TEXT NOT NULL CHECK(type IN ('sale','purchase','dailyCount')),
+          submitted_by_id TEXT NOT NULL,
+          submitted_by_name TEXT NOT NULL,
+          submitted_via_master_pin INTEGER NOT NULL DEFAULT 0 CHECK(submitted_via_master_pin IN (0, 1)),
+          submitted_master_actor_id TEXT,
+          submitted_at TEXT NOT NULL,
+          command_json TEXT NOT NULL,
+          approved_command_json TEXT,
+          summary_json TEXT NOT NULL,
+          reviewed_by_id TEXT,
+          reviewed_by_name TEXT,
+          reviewed_at TEXT,
+          was_edited INTEGER NOT NULL DEFAULT 0 CHECK(was_edited IN (0, 1)),
+          rejection_reason TEXT,
+          approved_event_id TEXT
+        );
         CREATE INDEX IF NOT EXISTS idx_ps_status ON pending_submissions(status, submitted_at);
-        CREATE INDEX IF NOT EXISTS idx_ps_worker_date ON pending_submissions(submitted_by_id, date, status);
-        COMMIT;`);
+        CREATE INDEX IF NOT EXISTS idx_ps_worker_date ON pending_submissions(submitted_by_id, date, status);`);
+      const psSchema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='pending_submissions'").get();
+      if (psSchema?.sql && !psSchema.sql.includes("'dailyCount'")) {
+        this.db.exec(`
+          ALTER TABLE pending_submissions RENAME TO pending_submissions_old;
+          CREATE TABLE pending_submissions(
+            id TEXT PRIMARY KEY NOT NULL, workspace TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+            date TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('sale','purchase','dailyCount')),
+            submitted_by_id TEXT NOT NULL, submitted_by_name TEXT NOT NULL, submitted_at TEXT NOT NULL,
+            command_json TEXT NOT NULL, approved_command_json TEXT, summary_json TEXT NOT NULL,
+            reviewed_by_id TEXT, reviewed_by_name TEXT, reviewed_at TEXT,
+            was_edited INTEGER NOT NULL DEFAULT 0 CHECK(was_edited IN (0, 1)),
+            rejection_reason TEXT, approved_event_id TEXT
+          );
+          INSERT INTO pending_submissions SELECT * FROM pending_submissions_old;
+          DROP TABLE pending_submissions_old;
+          CREATE INDEX IF NOT EXISTS idx_ps_status ON pending_submissions(status, submitted_at);
+          CREATE INDEX IF NOT EXISTS idx_ps_worker_date ON pending_submissions(submitted_by_id, date, status);`);
+      }
+      const psCols = new Set(this.db.prepare('PRAGMA table_info(pending_submissions)').all().map(col => col.name));
+      if (!psCols.has('submitted_via_master_pin') || !psCols.has('submitted_master_actor_id')) {
+        if (!psCols.has('submitted_via_master_pin')) {
+          this.db.exec('ALTER TABLE pending_submissions ADD COLUMN submitted_via_master_pin INTEGER NOT NULL DEFAULT 0 CHECK(submitted_via_master_pin IN (0, 1))');
+        }
+        if (!psCols.has('submitted_master_actor_id')) {
+          this.db.exec('ALTER TABLE pending_submissions ADD COLUMN submitted_master_actor_id TEXT');
+        }
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      if (this.db.isTransaction) {
+        try { this.db.exec('ROLLBACK'); } catch {}
+      }
+      try { this.db.close(); } catch {}
+      throw error;
     }
   }
   events({ stream = false } = {}) {
@@ -680,117 +811,196 @@ export class Repository {
       return { workspace: this.workspace, revision, canRestore };
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
-  execute({ id, revision, command }, { compact = false, actor = null, submittedBy = null, wasEdited = false } = {}) {
+  #prepareExecution({ id, command }, { actor = null, submittedBy = null, wasEdited = false } = {}) {
     text(id, 'İşlem anahtarı', 100);
     if (!command || typeof command !== 'object') fail('İşlem içeriği gerekli.');
     if (actor && ['stocktake', 'close'].includes(command.type)) command = { ...command, approvedBy: actor.name };
+    if (actor && (actor.viaMasterPin !== undefined || actor.masterActorId !== undefined)) {
+      if (actor.viaMasterPin !== true || actor.role !== 'employee' || typeof actor.masterActorId !== 'string' || !UUID_RE.test(actor.masterActorId)) {
+        fail('İşlem sahibi bilgisi geçersiz.');
+      }
+    }
+    if (submittedBy && (submittedBy.viaMasterPin !== undefined || submittedBy.masterActorId !== undefined)) {
+      if (submittedBy.viaMasterPin !== true || typeof submittedBy.masterActorId !== 'string' || !UUID_RE.test(submittedBy.masterActorId)) {
+        fail('Tezgâh çalışanı bilgisi geçersiz.');
+      }
+    }
     const audit = actor && {
       version: 1,
-      actor: { id: actor.id, name: actor.name, role: actor.role },
-      ...(submittedBy ? { submittedBy: { id: submittedBy.id, name: submittedBy.name }, ...(wasEdited ? { wasEdited: true } : {}) } : {})
+      actor: {
+        id: actor.id,
+        name: actor.name,
+        role: actor.role,
+        ...(actor.viaMasterPin === true ? { viaMasterPin: true, masterActorId: actor.masterActorId } : {})
+      },
+      ...(submittedBy ? {
+        submittedBy: {
+          id: submittedBy.id,
+          name: submittedBy.name,
+          ...(submittedBy.viaMasterPin === true ? { viaMasterPin: true, masterActorId: submittedBy.masterActorId } : {})
+        },
+        ...(wasEdited ? { wasEdited: true } : {})
+      } : {})
     };
     if (audit) eventActor({ audit, command });
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const existing = this.db.prepare('SELECT body FROM events WHERE id=?').get(id);
-      if (existing) {
-        const stored = JSON.parse(existing.body);
-        if (stored.audit?.actor.id !== actor?.id || JSON.stringify(stored.command) !== JSON.stringify(command)) fail('Aynı işlem anahtarı farklı içerikle kullanılamaz.');
-        const owned = this.#ownedLedger();
-        this.db.exec('COMMIT');
-        return { state: this.#project(owned.mode, owned.data, compact), duplicate: true };
-      }
-      // Current-command policy only: historical HAS funds remain replayable and
-      // an already committed request above can still be retried idempotently.
-      if (command.type === 'fundAccount' && command.physical === false && command.unit === 'HAS') fail('Banka hesabında para birimi seçin. HAS için fiziki kasa veya cari hesap kullanın.');
-      if (command.type === 'fundAccount' && command.physical === false && command.unit === 'SILVER') fail('Saf gümüş için fiziki kasa veya cari hesap kullanın.');
-      const owned = this.#ownedLedger();
-      const currentState = owned.data.state;
-      if (!Number.isInteger(revision) || revision !== currentState.revision) fail('Veriler başka sekmede değişti. Yenileyip sayım/işlemi tekrar kontrol edin.', { status: 409, code: 'REVISION_CONFLICT' });
-      if (command.type === 'amend' && command.replacement?.orderSettlement !== undefined) fail('Sipariş mahsubu yalnız yeni nihai satışta kaydedilir.');
-      if (owned.mode === 'hot') {
-        const checkIds = [id];
-        if (['amend', 'supplierAmend'].includes(command.type)) checkIds.push(`${id}:undo`);
-        if (['retailExchange', 'undoExchange'].includes(command.type)) checkIds.push(`${id}:return`);
-        const ph = checkIds.map(() => '?').join(',');
-        if (this.db.prepare(`SELECT 1 FROM ledger_journal WHERE id IN (${ph}) LIMIT 1`).get(...checkIds)) fail('Tekrarlanan işlem anahtarı.');
-      }
-      // Retired supplier write paths cannot bypass explicit source consumption.
-      // This gate is deliberately absent from replay/restore and follows duplicate handling.
-      const currentTrade=command.type==='amend'?command.replacement:command;
-      if (currentTrade && ['sale','purchase','collection','movement'].includes(currentTrade.type)) {
-        const supplierIds=new Set(currentState.accounts.filter(a=>a.partyType==='supplier').map(a=>a.id));
-        const references=value=>value&&typeof value==='object'&&Object.entries(value).some(([key,item])=>
-          ['accountId','customerAccount','counterpartyId','counterpartyAccount'].includes(key)&&supplierIds.has(item)
-          || item&&typeof item==='object'&&(Array.isArray(item)?item.some(references):references(item)));
-        const original=command.type==='amend'&&(owned.mode==='full'?currentState.journal.find(entry=>entry.id===command.originalId):this.#getJournalEntry(command.originalId));
-        if (currentTrade.source==='supplier'||references(currentTrade)||original&&(original.meta.source==='supplier'||references(original.meta)||references(original.entries))) fail('Toptancı işlemini firma kartındaki yeni alış, ödeme veya tahsis akışından kaydedin.');
-      }
-      if (owned.mode === 'full') {
-        const ledger = owned.data;
-        const schemaVersion = eventVersion(command, ledger.state);
-        const event = { id, schemaVersion, timestamp: new Date().toISOString(), command, ...(audit && { audit }) };
-        if (schemaVersion === 10) event.tradeVersion = eventVersion(underlyingSaleCommand(command), ledger.state);
-        if ((schemaVersion === 11 || event.tradeVersion === 11) && usesInventory(command)) event.saleInventoryVersion = 1;
-        applyLedgerEvent(ledger, event);
-        this.db.prepare('INSERT INTO events(id,body) VALUES(?,?)').run(id, JSON.stringify(event));
-        this.db.exec('UPDATE meta SET revision=revision+1 WHERE id=1');
-        ledger.state.revision = revision + 1;
-        let mode = 'full', targetData = ledger;
-        if (this.#cacheMaxBytes > 0 && estimateLedgerBytes(ledger) > this.#cacheMaxBytes) {
-          const hot = extractHotState(ledger);
-          this.#syncJournalTables(ledger.state.journal, ledger.state);
-          mode = 'hot';
-          targetData = hot;
-        }
-        const { key } = this.#fingerprint();
-        this.db.exec('COMMIT');
-        this.#snapshotDirty = true;
-        const remembered = this.#remember(mode, targetData, key);
-        if (remembered.evicted && this.#cacheMaxBytes > 0 && this.#filename !== ':memory:') {
-          this.#saveSnapshot(remembered.mode, remembered.data, revision + 1);
-        }
-        return { state: this.#project(remembered.mode, remembered.data, compact), duplicate: false };
-      }
-      // Hot mode execution
-      const hot = owned.data;
-      const isHistory = HISTORY_COMMANDS.has(command.type)
-        || (command.type === 'registerItem' && command.purchaseLine !== undefined)
-        || (command.type === 'accountUpdate' && command.partyType !== undefined)
-        || (['supplierPurchase', 'supplierPayment'].includes(command.type) && (Boolean(command.debts?.length) || command.debtUses !== undefined || command.allocations !== undefined));
-      const supplierTargetId = isSupplierCommand(command)
-        ? (command.supplierId || command.replacement?.supplierId || (command.originalId ? this.#getJournalEntry(command.originalId)?.meta?.supplierId : null))
-        : null;
-      const workJournal = isHistory
-        ? (supplierTargetId ? this.#loadSupplierJournalEntries(hot.state, supplierTargetId) : this.#loadAllJournalEntries())
-        : [];
-      const workState = { ...hot.state, journal: workJournal };
-      const schemaVersion = eventVersion(command, workState);
+    return { command, audit };
+  }
+  #executeInTransaction({ id, revision, command }, { compact = false, actor = null, submittedBy = null, wasEdited = false, owned = null } = {}) {
+    if (!this.db.isTransaction) throw new Error('#executeInTransaction requires an active transaction.');
+    const prepared = this.#prepareExecution({ id, command }, { actor, submittedBy, wasEdited });
+    command = prepared.command;
+    const audit = prepared.audit;
+    const existing = this.db.prepare('SELECT body FROM events WHERE id=?').get(id);
+    if (existing) {
+      const stored = JSON.parse(existing.body);
+      const storedActor = stored.audit?.actor || null;
+      const expectedViaMaster = actor?.viaMasterPin === true;
+      const expectedMasterId = expectedViaMaster ? actor.masterActorId : undefined;
+      const storedViaMaster = storedActor?.viaMasterPin === true;
+      const storedMasterId = storedViaMaster ? storedActor.masterActorId : undefined;
+      const storedSub = stored.audit?.submittedBy || null;
+      const expectedSubViaMaster = submittedBy?.viaMasterPin === true;
+      const expectedSubMasterId = expectedSubViaMaster ? submittedBy.masterActorId : undefined;
+      const storedSubViaMaster = storedSub?.viaMasterPin === true;
+      const storedSubMasterId = storedSubViaMaster ? storedSub.masterActorId : undefined;
+      if (
+        storedActor?.id !== actor?.id ||
+        storedViaMaster !== expectedViaMaster ||
+        storedMasterId !== expectedMasterId ||
+        storedSub?.id !== submittedBy?.id ||
+        storedSubViaMaster !== expectedSubViaMaster ||
+        storedSubMasterId !== expectedSubMasterId ||
+        JSON.stringify(stored.command) !== JSON.stringify(command)
+      ) fail('Aynı işlem anahtarı farklı içerikle kullanılamaz.');
+      const existingOwned = owned || this.#ownedLedger();
+      return {
+        duplicate: true,
+        mode: existingOwned.mode,
+        targetData: existingOwned.data,
+        isHistory: false,
+        supplierTargetId: null,
+        nextState: null,
+        nextRevision: existingOwned.data.state.revision,
+        needsProjection: true
+      };
+    }
+    // Current-command policy only: historical HAS funds remain replayable and
+    // an already committed request above can still be retried idempotently.
+    if (command.type === 'fundAccount' && command.physical === false && command.unit === 'HAS') fail('Banka hesabında para birimi seçin. HAS için fiziki kasa veya cari hesap kullanın.');
+    if (command.type === 'fundAccount' && command.physical === false && command.unit === 'SILVER') fail('Saf gümüş için fiziki kasa veya cari hesap kullanın.');
+    const currentOwned = owned || this.#ownedLedger();
+    const currentState = currentOwned.data.state;
+    if (!Number.isInteger(revision) || revision !== currentState.revision) fail('Veriler başka sekmede değişti. Yenileyip sayım/işlemi tekrar kontrol edin.', { status: 409, code: 'REVISION_CONFLICT' });
+    if (command.type === 'amend' && command.replacement?.orderSettlement !== undefined) fail('Sipariş mahsubu yalnız yeni nihai satışta kaydedilir.');
+    if (currentOwned.mode === 'hot') {
+      const checkIds = [id];
+      if (['amend', 'supplierAmend'].includes(command.type)) checkIds.push(`${id}:undo`);
+      if (['retailExchange', 'undoExchange'].includes(command.type)) checkIds.push(`${id}:return`);
+      const ph = checkIds.map(() => '?').join(',');
+      if (this.db.prepare(`SELECT 1 FROM ledger_journal WHERE id IN (${ph}) LIMIT 1`).get(...checkIds)) fail('Tekrarlanan işlem anahtarı.');
+    }
+    // Retired supplier write paths cannot bypass explicit source consumption.
+    // This gate is deliberately absent from replay/restore and follows duplicate handling.
+    const currentTrade = command.type === 'amend' ? command.replacement : command;
+    if (currentTrade && ['sale', 'purchase', 'collection', 'movement'].includes(currentTrade.type)) {
+      const supplierIds = new Set(currentState.accounts.filter(a => a.partyType === 'supplier').map(a => a.id));
+      const references = value => value && typeof value === 'object' && Object.entries(value).some(([key, item]) =>
+        ['accountId', 'customerAccount', 'counterpartyId', 'counterpartyAccount'].includes(key) && supplierIds.has(item)
+        || item && typeof item === 'object' && (Array.isArray(item) ? item.some(references) : references(item)));
+      const original = command.type === 'amend' && (currentOwned.mode === 'full' ? currentState.journal.find(entry => entry.id === command.originalId) : this.#getJournalEntry(command.originalId));
+      if (currentTrade.source === 'supplier' || references(currentTrade) || original && (original.meta.source === 'supplier' || references(original.meta) || references(original.entries))) fail('Toptancı işlemini firma kartındaki yeni alış, ödeme veya tahsis akışından kaydedin.');
+    }
+    if (currentOwned.mode === 'full') {
+      const ledger = currentOwned.data;
+      const schemaVersion = eventVersion(command, ledger.state);
       const event = { id, schemaVersion, timestamp: new Date().toISOString(), command, ...(audit && { audit }) };
-      if (schemaVersion === 10) event.tradeVersion = eventVersion(underlyingSaleCommand(command), workState);
+      if (schemaVersion === 10) event.tradeVersion = eventVersion(underlyingSaleCommand(command), ledger.state);
       if ((schemaVersion === 11 || event.tradeVersion === 11) && usesInventory(command)) event.saleInventoryVersion = 1;
-      const nextState = applyEvent(workState, event);
-      const newEntries = nextState.journal.slice(workJournal.length);
-      const lookupById = lookupId => this.#getJournalEntry(lookupId);
-      const startSeq = hot.journalMeta.total + 1;
-      const nextHot = applyHotState(hot, nextState, newEntries, lookupById, startSeq);
+      applyLedgerEvent(ledger, event);
       this.db.prepare('INSERT INTO events(id,body) VALUES(?,?)').run(id, JSON.stringify(event));
       this.db.exec('UPDATE meta SET revision=revision+1 WHERE id=1');
-      nextHot.state.revision = revision + 1;
-      this.#insertJournalEntries(newEntries, nextHot.state, startSeq, nextHot.accountCreatedSeq);
-      if (command.type === 'accountUpdate' && command.partyType !== undefined) {
-        const targetIds = nextHot.state.accounts.filter(a => a.id === command.accountId || a.parentAccountId === command.accountId).map(a => a.id);
-        this.#syncAccountInheritedMatches(targetIds, nextState.journal, nextHot.state, nextHot.accountCreatedSeq);
+      ledger.state.revision = revision + 1;
+      let mode = 'full', targetData = ledger;
+      if (this.#cacheMaxBytes > 0 && estimateLedgerBytes(ledger) > this.#cacheMaxBytes) {
+        const hot = extractHotState(ledger);
+        this.#syncJournalTables(ledger.state.journal, ledger.state);
+        mode = 'hot';
+        targetData = hot;
       }
-      if (RENAME_COMMANDS.has(command.type)) this.#refreshRenamedSearchText(command, nextHot.state);
+      return {
+        duplicate: false,
+        mode,
+        targetData,
+        isHistory: false,
+        supplierTargetId: null,
+        nextState: targetData.state,
+        nextRevision: revision + 1,
+        needsProjection: true
+      };
+    }
+    // Hot mode execution
+    const hot = currentOwned.data;
+    const isHistory = HISTORY_COMMANDS.has(command.type)
+      || (command.type === 'registerItem' && command.purchaseLine !== undefined)
+      || (command.type === 'accountUpdate' && command.partyType !== undefined)
+      || (['supplierPurchase', 'supplierPayment'].includes(command.type) && (Boolean(command.debts?.length) || command.debtUses !== undefined || command.allocations !== undefined));
+    const supplierTargetId = isSupplierCommand(command)
+      ? (command.supplierId || command.replacement?.supplierId || (command.originalId ? this.#getJournalEntry(command.originalId)?.meta?.supplierId : null))
+      : null;
+    const workJournal = isHistory
+      ? (supplierTargetId ? this.#loadSupplierJournalEntries(hot.state, supplierTargetId) : this.#loadAllJournalEntries())
+      : [];
+    const workState = { ...hot.state, journal: workJournal };
+    const schemaVersion = eventVersion(command, workState);
+    const event = { id, schemaVersion, timestamp: new Date().toISOString(), command, ...(audit && { audit }) };
+    if (schemaVersion === 10) event.tradeVersion = eventVersion(underlyingSaleCommand(command), workState);
+    if ((schemaVersion === 11 || event.tradeVersion === 11) && usesInventory(command)) event.saleInventoryVersion = 1;
+    const nextState = applyEvent(workState, event);
+    const newEntries = nextState.journal.slice(workJournal.length);
+    const lookupById = lookupId => this.#getJournalEntry(lookupId);
+    const startSeq = hot.journalMeta.total + 1;
+    const nextHot = applyHotState(hot, nextState, newEntries, lookupById, startSeq);
+    this.db.prepare('INSERT INTO events(id,body) VALUES(?,?)').run(id, JSON.stringify(event));
+    this.db.exec('UPDATE meta SET revision=revision+1 WHERE id=1');
+    nextHot.state.revision = revision + 1;
+    this.#insertJournalEntries(newEntries, nextHot.state, startSeq, nextHot.accountCreatedSeq);
+    if (command.type === 'accountUpdate' && command.partyType !== undefined) {
+      const targetIds = nextHot.state.accounts.filter(a => a.id === command.accountId || a.parentAccountId === command.accountId).map(a => a.id);
+      this.#syncAccountInheritedMatches(targetIds, nextState.journal, nextHot.state, nextHot.accountCreatedSeq);
+    }
+    if (RENAME_COMMANDS.has(command.type)) this.#refreshRenamedSearchText(command, nextHot.state);
+    return {
+      duplicate: false,
+      mode: 'hot',
+      targetData: nextHot,
+      isHistory,
+      supplierTargetId,
+      nextState,
+      nextRevision: revision + 1,
+      needsProjection: true
+    };
+  }
+  execute({ id, revision, command }, { compact = false, actor = null, submittedBy = null, wasEdited = false } = {}) {
+    const prepared = this.#prepareExecution({ id, command }, { actor, submittedBy, wasEdited });
+    command = prepared.command;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const txRes = this.#executeInTransaction({ id, revision, command }, { compact, actor, submittedBy, wasEdited });
+      if (txRes.duplicate) {
+        this.db.exec('COMMIT');
+        return { state: this.#project(txRes.mode, txRes.targetData, compact), duplicate: true };
+      }
       const { key } = this.#fingerprint();
       this.db.exec('COMMIT');
       this.#snapshotDirty = true;
-      const remembered = this.#remember('hot', nextHot, key);
+      const remembered = this.#remember(txRes.mode, txRes.targetData, key);
       if (remembered.evicted && this.#cacheMaxBytes > 0 && this.#filename !== ':memory:') {
-        this.#saveSnapshot('hot', nextHot, revision + 1);
+        this.#saveSnapshot(remembered.mode, remembered.data, txRes.nextRevision);
       }
-      return { state: isHistory && !supplierTargetId && !compact ? projectHotLedger(nextHot, false, nextState.journal) : this.#project(remembered.mode, remembered.data, compact), duplicate: false };
+      const state = txRes.mode === 'hot' && txRes.isHistory && !txRes.supplierTargetId && !compact
+        ? projectHotLedger(txRes.targetData, false, txRes.nextState.journal)
+        : this.#project(remembered.mode, remembered.data, compact);
+      return { state, duplicate: false };
     } catch (e) { this.#cache = null; if (this.db.isTransaction) this.db.exec('ROLLBACK'); throw e; }
   }
   #backupSnapshot({ bounded = false } = {}) {
@@ -818,6 +1028,31 @@ export class Repository {
     try { replay(backup.events); }
     catch { throw Object.assign(new Error('Stored backup history failed validation.'), { code: 'BACKUP_HISTORY_INVALID' }); }
     return backup;
+  }
+  createConsistentBackup(targetFile) {
+    const resolvedTarget = assertSafeBackupTargetPath(targetFile);
+    let targetExists = existsSync(resolvedTarget);
+    if (!targetExists) {
+      try {
+        lstatSync(resolvedTarget);
+        targetExists = true;
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+      }
+    }
+    if (targetExists) {
+      throw Object.assign(new Error(`Yedek hedef dosyası zaten mevcut: ${resolvedTarget}`), { code: 'EEXIST' });
+    }
+    mkdirSync(dirname(resolvedTarget), { recursive: true });
+    this.db.prepare('VACUUM INTO ?').run(resolvedTarget);
+    if (!existsSync(resolvedTarget)) {
+      throw new Error('Tutarlı yedek dosyası oluşturulamadı.');
+    }
+    const sizeBytes = statSync(resolvedTarget).size;
+    if (sizeBytes <= 0) {
+      throw new Error('Oluşturulan yedek dosyası boş.');
+    }
+    return { filename: resolvedTarget, sizeBytes, method: 'VACUUM INTO' };
   }
   restore({ backup, revision, confirmation }, { compact = false, beforeCommit } = {}) {
     if (confirmation !== 'GERİ YÜKLE') fail('Geri yükleme onayı eşleşmiyor.');
@@ -896,6 +1131,24 @@ export class Repository {
       debts: mapAlloc(entry.meta.debtLines)
     };
   }
+  #normalizeDailyCountCommand(command) {
+    if (!command.counts || typeof command.counts !== 'object' || Array.isArray(command.counts)) {
+      return null;
+    }
+    const reasonsInput = command.reasons && typeof command.reasons === 'object' && !Array.isArray(command.reasons) ? command.reasons : {};
+    const cleanCounts = {};
+    const cleanReasons = {};
+    for (const [accId, rawVal] of Object.entries(command.counts)) {
+      if (rawVal === null || rawVal === undefined || String(rawVal).trim() === '') continue;
+      const rawReason = reasonsInput[accId];
+      const reason = typeof rawReason === 'string' ? rawReason.trim().slice(0, 160) : '';
+      cleanCounts[accId] = String(rawVal).trim();
+      if (reason) cleanReasons[accId] = reason;
+    }
+    if (!Object.keys(cleanCounts).length) return null;
+    const note = typeof command.note === 'string' ? command.note.trim().slice(0, 160) : '';
+    return { type: 'dailyCount', date: command.date, counts: cleanCounts, reasons: cleanReasons, ...(note ? { note } : {}) };
+  }
   #summarizeBlindCount(state, command) {
     if (!command || typeof command !== 'object' || command.type !== 'dailyCount') {
       fail('Geçerli günlük sayım verisi gerekli.');
@@ -941,39 +1194,75 @@ export class Repository {
   submitPending({ id, revision, command }, { actor }) {
     text(id, 'Bildirim anahtarı', 100);
     if (!actor?.id || !actor?.name) fail('İşlem sahibi bilgisi gerekli.');
-    if (!command || typeof command !== 'object' || !['sale', 'purchase', 'dailyCount'].includes(command.type)) {
+    if (actor.viaMasterPin !== undefined || actor.masterActorId !== undefined) {
+      if (actor.viaMasterPin !== true || actor.role !== 'employee' || typeof actor.masterActorId !== 'string' || !UUID_RE.test(actor.masterActorId)) {
+        fail('İşlem sahibi bilgisi geçersiz.');
+      }
+    }
+    const viaMasterPin = actor.viaMasterPin === true ? 1 : 0;
+    const masterActorId = viaMasterPin ? actor.masterActorId : null;
+    if (!command || typeof command !== 'object' || Array.isArray(command) || !['sale', 'purchase', 'dailyCount'].includes(command.type)) {
       fail('Yalnız satış, alış veya günlük sayım işlemleri onaya gönderilebilir.');
     }
-    const existing = this.db.prepare('SELECT * FROM pending_submissions WHERE id=?').get(id);
-    if (existing) {
-      if (existing.submitted_by_id !== actor.id) {
-        fail('Aynı bildirim anahtarı farklı kullanıcıyla kullanılamaz.');
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const existing = this.db.prepare('SELECT * FROM pending_submissions WHERE id=?').get(id);
+      if (existing) {
+        if (
+          existing.submitted_by_id !== actor.id ||
+          Number(existing.submitted_via_master_pin || 0) !== viaMasterPin ||
+          (existing.submitted_master_actor_id ?? null) !== masterActorId
+        ) {
+          fail('Aynı bildirim anahtarı farklı kullanıcıyla kullanılamaz.');
+        }
+        const existingCommand = JSON.parse(existing.command_json);
+        const normalizedIncoming = command.type === 'dailyCount'
+          ? this.#normalizeDailyCountCommand(command)
+          : command;
+        if (
+          command.type !== existingCommand?.type ||
+          !normalizedIncoming ||
+          canonicalJson(normalizedIncoming) !== canonicalJson(existingCommand)
+        ) {
+          fail('Aynı bildirim anahtarı farklı içerikle kullanılamaz.', { status: 409, code: 'IDEMPOTENCY_CONFLICT' });
+        }
+        const storedSummary = JSON.parse(existing.summary_json);
+        this.db.exec('COMMIT');
+        return { id: existing.id, status: existing.status, duplicate: true, submittedAt: existing.submitted_at, summary: storedSummary };
       }
-      const storedSummary = JSON.parse(existing.summary_json);
-      return { id: existing.id, status: existing.status, duplicate: true, submittedAt: existing.submitted_at, summary: storedSummary };
+      const owned = this.#ownedLedger();
+      const currentState = owned.data.state;
+      if (!currentState.initialized) fail('Defter henüz açılmamış.');
+      if (revision !== undefined && (!Number.isInteger(revision) || revision !== currentState.revision)) {
+        fail('Defter başka bir işlemle güncellendi. Ekranı yenileyip tekrar deneyin.', { status: 409, code: 'REVISION_CONFLICT' });
+      }
+      let storedCommand = command;
+      let summary;
+      if (command.type === 'dailyCount') {
+        const built = this.#summarizeBlindCount(currentState, command);
+        storedCommand = built.cleanCommand;
+        summary = built.summary;
+      } else {
+        summary = this.#summarizeTrade(currentState, command);
+      }
+      const submittedAt = new Date().toISOString();
+      this.db.prepare(`
+        INSERT INTO pending_submissions(
+          id, workspace, status, date, type, submitted_by_id, submitted_by_name,
+          submitted_via_master_pin, submitted_master_actor_id, submitted_at,
+          command_json, summary_json
+        ) VALUES(?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, this.workspace, storedCommand.date, storedCommand.type, actor.id, actor.name, viaMasterPin, masterActorId, submittedAt, JSON.stringify(storedCommand), JSON.stringify(summary));
+      const { key } = this.#fingerprint();
+      this.db.exec('COMMIT');
+      this.#remember(owned.mode, owned.data, key);
+      return { id, status: 'pending', duplicate: false, submittedAt, summary };
+    } catch (e) {
+      if (this.db.isTransaction) {
+        try { this.db.exec('ROLLBACK'); } catch {}
+      }
+      throw e;
     }
-    const currentState = this.state({ compact: false });
-    if (!currentState.initialized) fail('Defter henüz açılmamış.');
-    if (revision !== undefined && (!Number.isInteger(revision) || revision !== currentState.revision)) {
-      fail('Defter başka bir işlemle güncellendi. Ekranı yenileyip tekrar deneyin.', { status: 409, code: 'REVISION_CONFLICT' });
-    }
-    let storedCommand = command;
-    let summary;
-    if (command.type === 'dailyCount') {
-      const built = this.#summarizeBlindCount(currentState, command);
-      storedCommand = built.cleanCommand;
-      summary = built.summary;
-    } else {
-      summary = this.#summarizeTrade(currentState, command);
-    }
-    const submittedAt = new Date().toISOString();
-    this.db.prepare(`
-      INSERT INTO pending_submissions(
-        id, workspace, status, date, type, submitted_by_id, submitted_by_name, submitted_at,
-        command_json, summary_json
-      ) VALUES(?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, this.workspace, storedCommand.date, storedCommand.type, actor.id, actor.name, submittedAt, JSON.stringify(storedCommand), JSON.stringify(summary));
-    return { id, status: 'pending', duplicate: false, submittedAt, summary };
   }
   #formatPendingRow(row, userNamesById = null, { includeComparison = false, balances = null } = {}) {
     const currentName = userNamesById?.get(row.submitted_by_id) || row.submitted_by_name;
@@ -998,7 +1287,11 @@ export class Repository {
       status: row.status,
       date: row.date,
       type: row.type,
-      submittedBy: { id: row.submitted_by_id, name: currentName },
+      submittedBy: {
+        id: row.submitted_by_id,
+        name: currentName,
+        ...(row.submitted_via_master_pin ? { viaMasterPin: true, masterActorId: row.submitted_master_actor_id } : {})
+      },
       submittedAt: row.submitted_at,
       command: JSON.parse(row.approved_command_json || row.command_json),
       originalCommand: JSON.parse(row.command_json),
@@ -1117,58 +1410,118 @@ export class Repository {
   }
   approvePending({ id, commandOverride = null, revision, actor }, { compact = false } = {}) {
     text(id, 'Bildirim anahtarı', 100);
-    if (!actor || actor.role !== 'owner') fail('Onay için yönetici oturumu gerekli.', { status: 403 });
-    const row = this.db.prepare('SELECT * FROM pending_submissions WHERE id=?').get(id);
-    if (!row) fail('Onay bekleyen bildirim bulunamadı.', { status: 404 });
-    if (row.status === 'approved') {
-      return { ok: true, id, approvedEventId: row.approved_event_id, wasEdited: Boolean(row.was_edited), duplicate: true, state: this.state({ compact }) };
+    if (!actor || actor.role !== 'owner' || actor.viaMasterPin !== undefined || actor.masterActorId !== undefined) {
+      fail('Onay için yönetici oturumu gerekli.', { status: 403 });
     }
-    if (row.status !== 'pending') fail('Bu bildirim daha önce reddedilmiş.', { status: 409 });
-    if (row.type === 'dailyCount') {
+    if (!actor.id || !actor.name) fail('İşlem sahibi bilgisi gerekli.');
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.db.prepare('SELECT * FROM pending_submissions WHERE id=?').get(id);
+      if (!row) fail('Onay bekleyen bildirim bulunamadı.', { status: 404 });
+      if (row.status === 'approved') {
+        if (row.reviewed_by_id !== actor.id) {
+          fail('Bu bildirim farklı bir yönetici tarafından onaylanmış.', { status: 409 });
+        }
+        if (commandOverride !== undefined && commandOverride !== null) {
+          if (typeof commandOverride !== 'object' || Array.isArray(commandOverride)) {
+            fail('Onaylanmış bildirim farklı işlem içeriğiyle yeniden onaylanamaz.', { status: 409 });
+          }
+          const expectedCommand = JSON.parse(row.approved_command_json || row.command_json);
+          const normalizedOverride = { ...commandOverride, date: expectedCommand.date };
+          if (canonicalJson(normalizedOverride) !== canonicalJson(expectedCommand)) {
+            fail('Onaylanmış bildirim farklı işlem içeriğiyle yeniden onaylanamaz.', { status: 409 });
+          }
+        }
+        const owned = this.#ownedLedger();
+        const { key } = this.#fingerprint();
+        this.db.exec('COMMIT');
+        const remembered = this.#remember(owned.mode, owned.data, key);
+        return { ok: true, id, approvedEventId: row.approved_event_id, wasEdited: Boolean(row.was_edited), duplicate: true, state: this.#project(remembered.mode, remembered.data, compact) };
+      }
+      if (row.status !== 'pending') fail('Bu bildirim daha önce reddedilmiş.', { status: 409 });
+      if (row.type === 'dailyCount') {
+        const storedCommand = JSON.parse(row.command_json);
+        const reviewedAt = new Date().toISOString();
+        const owned = this.#ownedLedger();
+        this.db.prepare(`
+          UPDATE pending_submissions
+          SET status='approved', reviewed_by_id=?, reviewed_by_name=?, reviewed_at=?, was_edited=0
+          WHERE id=?
+        `).run(actor.id, actor.name, reviewedAt, id);
+        const { key } = this.#fingerprint();
+        this.db.exec('COMMIT');
+        const remembered = this.#remember(owned.mode, owned.data, key);
+        return { ok: true, id, type: 'dailyCount', counts: storedCommand.counts || {}, reasons: storedCommand.reasons || {}, note: storedCommand.note || '', duplicate: false, state: this.#project(remembered.mode, remembered.data, compact) };
+      }
+      const owned = this.#ownedLedger();
+      const currentState = owned.data.state;
       const storedCommand = JSON.parse(row.command_json);
+      const wasEdited = Boolean(commandOverride && typeof commandOverride === 'object');
+      const finalCommand = { ...(wasEdited ? commandOverride : storedCommand), date: currentState.date };
+      if (!['sale', 'purchase'].includes(finalCommand.type)) fail('Onaylanan işlem satış veya alış olmalı.');
+      const eventId = `approve-${id}`;
+      if (!this.db.prepare('SELECT 1 FROM events WHERE id=?').get(eventId) && (!Number.isInteger(revision) || revision !== currentState.revision)) {
+        fail('Veriler başka sekmede değişti. Yenileyip sayım/işlemi tekrar kontrol edin.', { status: 409, code: 'REVISION_CONFLICT' });
+      }
+      const approvedSummary = this.#summarizeTrade(currentState, finalCommand);
+      const submittedBy = {
+        id: row.submitted_by_id,
+        name: row.submitted_by_name,
+        ...(row.submitted_via_master_pin ? { viaMasterPin: true, masterActorId: row.submitted_master_actor_id } : {})
+      };
+      const txRes = this.#executeInTransaction(
+        { id: eventId, revision, command: finalCommand },
+        { compact, actor, submittedBy, wasEdited, owned }
+      );
       const reviewedAt = new Date().toISOString();
       this.db.prepare(`
         UPDATE pending_submissions
-        SET status='approved', reviewed_by_id=?, reviewed_by_name=?, reviewed_at=?, was_edited=0
+        SET status='approved', approved_command_json=?, summary_json=?,
+            reviewed_by_id=?, reviewed_by_name=?, reviewed_at=?, was_edited=?, approved_event_id=?
         WHERE id=?
-      `).run(actor.id, actor.name, reviewedAt, id);
-      const st = this.state({ compact });
-      return { ok: true, id, type: 'dailyCount', counts: storedCommand.counts || {}, reasons: storedCommand.reasons || {}, note: storedCommand.note || '', duplicate: false, state: st };
+      `).run(JSON.stringify(finalCommand), JSON.stringify(approvedSummary), actor.id, actor.name, reviewedAt, wasEdited ? 1 : 0, eventId, id);
+      const { key } = this.#fingerprint();
+      this.db.exec('COMMIT');
+      if (!txRes.duplicate) {
+        this.#snapshotDirty = true;
+        const remembered = this.#remember(txRes.mode, txRes.targetData, key);
+        if (remembered.evicted && this.#cacheMaxBytes > 0 && this.#filename !== ':memory:') {
+          this.#saveSnapshot(remembered.mode, remembered.data, txRes.nextRevision);
+        }
+        return { ok: true, id, approvedEventId: eventId, wasEdited, duplicate: false, state: this.#project(remembered.mode, remembered.data, compact) };
+      }
+      const remembered = this.#remember(txRes.mode, txRes.targetData, key);
+      return { ok: true, id, approvedEventId: eventId, wasEdited, duplicate: true, state: this.#project(remembered.mode, remembered.data, compact) };
+    } catch (e) {
+      this.#cache = null;
+      if (this.db.isTransaction) this.db.exec('ROLLBACK');
+      throw e;
     }
-    const currentState = this.state({ compact: false });
-    const storedCommand = JSON.parse(row.command_json);
-    const wasEdited = Boolean(commandOverride && typeof commandOverride === 'object');
-    const finalCommand = { ...(wasEdited ? commandOverride : storedCommand), date: currentState.date };
-    if (!['sale', 'purchase'].includes(finalCommand.type)) fail('Onaylanan işlem satış veya alış olmalı.');
-    const approvedSummary = this.#summarizeTrade(currentState, finalCommand);
-    const eventId = `approve-${id}`;
-    const execResult = this.execute(
-      { id: eventId, revision, command: finalCommand },
-      { compact, actor, submittedBy: { id: row.submitted_by_id, name: row.submitted_by_name }, wasEdited }
-    );
-    const reviewedAt = new Date().toISOString();
-    this.db.prepare(`
-      UPDATE pending_submissions
-      SET status='approved', approved_command_json=?, summary_json=?,
-          reviewed_by_id=?, reviewed_by_name=?, reviewed_at=?, was_edited=?, approved_event_id=?
-      WHERE id=?
-    `).run(JSON.stringify(finalCommand), JSON.stringify(approvedSummary), actor.id, actor.name, reviewedAt, wasEdited ? 1 : 0, eventId, id);
-    return { ok: true, id, approvedEventId: eventId, wasEdited, duplicate: execResult.duplicate, state: execResult.state };
   }
   rejectPending({ id, reason, actor }) {
     text(id, 'Bildirim anahtarı', 100);
-    if (!actor || actor.role !== 'owner') fail('Red işlemi için yönetici oturumu gerekli.', { status: 403 });
+    if (!actor || actor.role !== 'owner' || actor.viaMasterPin !== undefined || actor.masterActorId !== undefined) {
+      fail('Red işlemi için yönetici oturumu gerekli.', { status: 403 });
+    }
+    if (!actor.id || !actor.name) fail('İşlem sahibi bilgisi gerekli.');
     const cleanReason = text(reason, 'Red gerekçesi', 160);
-    const row = this.db.prepare('SELECT * FROM pending_submissions WHERE id=?').get(id);
-    if (!row) fail('Onay bekleyen bildirim bulunamadı.', { status: 404 });
-    if (row.status !== 'pending') fail('Yalnızca onay bekleyen bildirimler reddedilebilir.', { status: 409 });
-    const reviewedAt = new Date().toISOString();
-    this.db.prepare(`
-      UPDATE pending_submissions
-      SET status='rejected', rejection_reason=?, reviewed_by_id=?, reviewed_by_name=?, reviewed_at=?
-      WHERE id=?
-    `).run(cleanReason, actor.id, actor.name, reviewedAt, id);
-    return { ok: true, id, status: 'rejected', rejectionReason: cleanReason };
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.db.prepare('SELECT * FROM pending_submissions WHERE id=?').get(id);
+      if (!row) fail('Onay bekleyen bildirim bulunamadı.', { status: 404 });
+      if (row.status !== 'pending') fail('Yalnızca onay bekleyen bildirimler reddedilebilir.', { status: 409 });
+      const reviewedAt = new Date().toISOString();
+      this.db.prepare(`
+        UPDATE pending_submissions
+        SET status='rejected', rejection_reason=?, reviewed_by_id=?, reviewed_by_name=?, reviewed_at=?
+        WHERE id=?
+      `).run(cleanReason, actor.id, actor.name, reviewedAt, id);
+      this.db.exec('COMMIT');
+      return { ok: true, id, status: 'rejected', rejectionReason: cleanReason };
+    } catch (e) {
+      if (this.db.isTransaction) this.db.exec('ROLLBACK');
+      throw e;
+    }
   }
   close() {
     if (this.#snapshotDirty && this.#cache) {

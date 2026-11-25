@@ -1,0 +1,18 @@
+[Unit]
+Description=ER SAT Dijital Defter — Periyodik Şifreli Yedekleme Zamanlayıcısı
+
+[Timer]
+OnCalendar=*-*-* 00/6:00:00
+Persistent=true
+RandomizedDelaySec=5m
+Unit=er-sat-backup.service
+# Bulut üretim ortamında 10 dakikalık RPO için systemd drop-in örneği
+# (`/etc/systemd/system/er-sat-backup.timer.d/override.conf` — boş `OnCalendar=`
+# satırı varsayılan 6 saatlik takvimi sıfırlamak için zorunludur):
+# [Timer]
+# OnCalendar=
+# OnCalendar=*:0/10
+# RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target

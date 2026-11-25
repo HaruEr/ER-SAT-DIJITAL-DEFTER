@@ -1,0 +1,41 @@
+[Unit]
+Description=ER SAT Dijital Defter — Atomik ve Şifreli Yedekleme Görevi
+After=er-sat-defter.service
+
+[Service]
+Type=oneshot
+User=er-sat
+Group=er-sat
+WorkingDirectory=/opt/er-sat-defter
+EnvironmentFile=/etc/er-sat-defter/backup.env
+
+# Dosya sistemi ve süreç sertleştirme
+# `backup-bundle.mjs create` SQLite dosyalarını Repository/IdentityStore üzerinden
+# açtığı için `/var/lib/er-sat-defter` üzerinde WAL/kilitleme erişimine ihtiyaç duyar.
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/er-sat-defter /var/backups/er-sat-defter
+
+# Notlar:
+# - `scripts/backup-bundle.mjs` yalnız boşlukla ayrılmış `--flag value` sözdizimini kabul eder.
+# - `encrypt` düz metin `--bundle-dir` klasörünü silmediği için özel geçici sahneleme
+#   klasörü `EXIT` tuzağıyla her durumda (başarı veya hata) temizlenir.
+# - `$$` ve `%%` işaretleri systemd birim dosyasında kabuk değişkenleri ile `date` belirteçlerinin korunması içindir.
+# - Cloudflare R2 (EU + Object/Bucket Lock) üzerine append-only `restic` aktarımı ve
+#   `Healthchecks.io` sinyali için bu birim dosyasını değiştirmeden systemd drop-in
+#   (`/etc/systemd/system/er-sat-backup.service.d/r2-sync.conf` içinde `ExecStartPost=...`)
+#   ekleyebilirsiniz (ayrıntılar için `deploy/README.md` §4.1-4.2).
+ExecStart=/bin/bash -euo pipefail -c ' \
+  DATA_DIR="$${DATA_DIRECTORY:-/var/lib/er-sat-defter}"; \
+  OUT_DIR="$${BACKUP_OUT_DIR:-/var/backups/er-sat-defter}"; \
+  STAGE_DIR="$$(mktemp -d "$${OUT_DIR}/.stage.XXXXXX")"; \
+  cleanup() { rm -rf -- "$${STAGE_DIR}"; }; \
+  trap cleanup EXIT; \
+  CREATE_JSON="$$(/usr/bin/node /opt/er-sat-defter/scripts/backup-bundle.mjs create --data-dir "$${DATA_DIR}" --out-dir "$${STAGE_DIR}" --temp-dir "$${STAGE_DIR}")"; \
+  BUNDLE_DIR="$$(/usr/bin/node -e "const d = JSON.parse(process.argv[1]); if (!d.bundleDirectory) process.exit(1); process.stdout.write(d.bundleDirectory);" "$${CREATE_JSON}")"; \
+  STAMP="$$(date -u +%%Y%%m%%dT%%H%%M%%SZ)"; \
+  OUT_FILE="$${OUT_DIR}/er-sat-backup-$${STAMP}.enc"; \
+  /usr/bin/node /opt/er-sat-defter/scripts/backup-bundle.mjs encrypt --bundle-dir "$${BUNDLE_DIR}" --out-file "$${OUT_FILE}" --passphrase-env BACKUP_PASSPHRASE --temp-dir "$${STAGE_DIR}"'
