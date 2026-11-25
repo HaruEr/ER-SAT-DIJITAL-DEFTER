@@ -1,6 +1,6 @@
 # ER ŞAT Dijital Defter — Linux LTS Üretim ve İşletim Kılavuzu
 
-Bu doküman, ER ŞAT Dijital Defter uygulamasını herhangi bir Linux LTS sunucusunda (sağlayıcıdan bağımsız olarak) **Node.js 24**, **systemd**, **Caddy** (`store-checkout`) ve **Tailscale Serve** (`tailscale-owner` + `report-server.mjs`) ile kurma, güncelleme, yedekleme, kurtarma ve çevrimdışı mutabakat prosedürlerini tanımlar.
+Bu doküman, ER ŞAT Dijital Defter uygulamasını Linux LTS sunucularında (ör. **Hetzner CX33** üzerinde **0 açık gelen port** ile **Cloudflare Tunnel + Zero Trust Access** veya sağlayıcıdan bağımsız **Caddy + Tailscale Serve**) **Node.js 24** ve **systemd** kullanarak kurma, güncelleme, yedekleme, kurtarma ve çevrimdışı mutabakat prosedürlerini tanımlar.
 
 ---
 
@@ -43,6 +43,8 @@ node scripts/release-check.mjs   # (Git deposundan kurulduysa)
 
 Ortam dosyalarını **kesinlikle Git deposunun içine koymayın**; `/etc/er-sat-defter/` altında oluşturup `chmod 0600` ile koruyun (`chown er-sat:er-sat`).
 
+**Seçenek A — Tailscale + Caddy (`/etc/er-sat-defter/editor.env` ve `reports.env`):**
+
 **`/etc/er-sat-defter/editor.env`** (`er-sat-defter.service` tarafından okunur):
 
 ```ini
@@ -50,13 +52,15 @@ PORT=4317
 DATA_DIRECTORY=/var/lib/er-sat-defter
 DEPLOY_MODE=cloud-proxy
 
-# Tailscale yönetici kanalı (tailscale-owner)
+# Tailscale yönetici kanalı (tailscale-owner; varsayılan OWNER_AUTH_PROVIDER=tailscale)
+OWNER_AUTH_PROVIDER=tailscale
 OWNER_ALLOWED_LOGINS=owner@example.com
 OWNER_ALLOWED_HOSTS=yonetim.example-tailnet.ts.net:8443
 
 # Mağaza kasa kanalı (store-checkout) — OWNER_ALLOWED_HOSTS ile tamamen ayrık olmalı
 CHECKOUT_ALLOWED_HOSTS=kasa.example.com
 STORE_PROXY_SECRET=<EN_AZ_16_KARAKTERLIK_GUCLU_RASTGELE_SIR>
+STORE_IP_HEADER=x-real-ip
 STORE_ALLOWED_IPS=203.0.113.10/32
 
 # İsteğe bağlı: dış sağlık ucu kullanılacaksa (en az 16 karakter; boş bırakılırsa yalnız loopback)
@@ -69,7 +73,49 @@ STORE_ALLOWED_IPS=203.0.113.10/32
 REPORT_ENABLED=1
 REPORT_PORT=4318
 REPORT_DATA_DIRECTORY=/var/lib/er-sat-defter
+REPORT_AUTH_PROVIDER=tailscale
 REPORT_ORIGIN=https://yonetim.example-tailnet.ts.net
+REPORT_ALLOWED_LOGINS=owner@example.com
+```
+
+**Seçenek B — Cloudflare Tunnel + Zero Trust Access (Hetzner CX33, 0 açık gelen port):**
+
+> **Takım adı kuralı:** `OWNER_CF_TEAM_DOMAIN` ve `REPORT_CF_TEAM_DOMAIN` yalnızca küçük harf, rakam ve tire (`-`) içeren `<team-slug>.cloudflareaccess.com` biçimini kabul eder (`_` alt çizgi reddedilir). `REPORT_ORIGIN` yalnızca `https://<alanadi>` biçiminde olmalıdır (port numarası ve sondaki `/` kabul edilmez).
+
+**`/etc/er-sat-defter/editor.env`** (`er-sat-defter.service` tarafından okunur):
+
+```ini
+PORT=4317
+DATA_DIRECTORY=/var/lib/er-sat-defter
+DEPLOY_MODE=cloud-proxy
+
+# Cloudflare Zero Trust Access yönetici kanalı (cloudflare-owner)
+OWNER_AUTH_PROVIDER=cloudflare-access
+OWNER_CF_TEAM_DOMAIN=<team-slug>.cloudflareaccess.com
+OWNER_CF_AUD=<YONETIM-CF-AUD>
+OWNER_ALLOWED_LOGINS=owner@example.com
+OWNER_ALLOWED_HOSTS=yonetim.example.com
+
+# Mağaza kasa kanalı (store-checkout) — Zero Trust Access KAPALI; OWNER_ALLOWED_HOSTS ile ayrık
+CHECKOUT_ALLOWED_HOSTS=kasa.example.com
+STORE_PROXY_SECRET=<EN_AZ_16_KARAKTERLIK_GUCLU_RASTGELE_SIR>
+STORE_IP_HEADER=cf-connecting-ip
+STORE_ALLOWED_IPS=203.0.113.10/32
+
+# İsteğe bağlı: dış sağlık ucu kullanılacaksa (en az 16 karakter; boş bırakılırsa yalnız loopback)
+# HEALTHZ_TOKEN=<EN_AZ_16_KARAKTERLIK_SAGLIK_ANAHTARI>
+```
+
+**`/etc/er-sat-defter/reports.env`** (`er-sat-reports.service` tarafından okunur):
+
+```ini
+REPORT_ENABLED=1
+REPORT_PORT=4318
+REPORT_DATA_DIRECTORY=/var/lib/er-sat-defter
+REPORT_AUTH_PROVIDER=cloudflare-access
+REPORT_CF_TEAM_DOMAIN=<team-slug>.cloudflareaccess.com
+REPORT_CF_AUD=<RAPOR-CF-AUD>
+REPORT_ORIGIN=https://rapor.example.com
 REPORT_ALLOWED_LOGINS=owner@example.com
 ```
 
@@ -108,6 +154,14 @@ curl -fsS http://127.0.0.1:4317/healthz
 > ```bash
 > sudo systemctl enable --now er-sat-backup.timer
 > ```
+> Bulut üretim ortamında 10 dakikalık RPO için birim dosyasını değiştirmeden systemd drop-in (`/etc/systemd/system/er-sat-backup.timer.d/override.conf`) ekleyin (boş `OnCalendar=` satırı varsayılan 6 saatlik takvimi sıfırlamak için zorunludur):
+> ```ini
+> [Timer]
+> OnCalendar=
+> OnCalendar=*:0/10
+> RandomizedDelaySec=30s
+> ```
+> Ardından `sudo systemctl daemon-reload && sudo systemctl restart er-sat-backup.timer` çalıştırın.
 
 ### 1.5 `restic` Durumu Hakkında Şeffaf Not
 
@@ -138,6 +192,31 @@ Yerel sistemde `restic` ikili dosyası yoksa bu komut çökmeden ve internetten 
     2. **WireGuard tüneli:** `STORE_ALLOWED_IPS=198.51.100.0/24` (tünel eş adresi/alt ağı)
     3. **Tailscale ağ geçidi / subnet router:** `STORE_ALLOWED_IPS=198.51.100.25/32`
   - Bu kanalda `/owner`, `/users`, `/api/state`, `/api/suppliers`, `/api/backup`, `/api/archive`, `/api/restore`, `/api/recovery`, `/api/journal`, `/api/summary`, `/api/security/*` ve yönetici girişi sunucu katmanında `403`/`404` ile engellenir.
+
+### 2.1 Hetzner CX33 + Cloudflare Tunnel + Cloudflare Zero Trust Access
+
+Bu mimaride sunucuda **hiçbir gelen port açılmaz**; hem yönetim hem mağaza kasa hem de rapor trafiği dışa giden şifreli `cloudflared` tünelinden geçirilir:
+
+1. **Hetzner CX33 UFW Güvenlik Duvarı (0 Açık Gelen Port):**
+   ```bash
+   sudo ufw default deny incoming
+   sudo ufw default allow outgoing
+   sudo ufw --force enable
+   sudo ufw status verbose
+   ```
+   *(Yönetim ve acil müdahale için Hetzner Cloud Console veya Cloudflare Access SSH / Tailscale SSH kullanın; `80`, `443` ve `22` portlarını internete açmayın.)*
+
+2. **`cloudflared` Tünel Kurulumu:**
+   - `deploy/cloudflared-config.example.yml` şablonunu `/etc/cloudflared/config.yml` konumuna kopyalayın; `<CLOUDFLARE-TUNNEL-UUID>` ve `example.com` değerlerini kendi alan adınızla değiştirin.
+   - Tünel kimlik dosyasını (`/etc/cloudflared/<CLOUDFLARE-TUNNEL-UUID>.json`) `chmod 0600` ile koruyun (Git deposuna eklemeyin) ve `sudo systemctl enable --now cloudflared` ile başlatın.
+
+3. **Kanal, Zero Trust Access ve WAF Kuralları:**
+   - **`yonetim.example.com` (`cloudflare-owner`):** Cloudflare Zero Trust Access **Application #1** (`OWNER_CF_AUD`) bağlanır. `server.mjs`, `Cf-Access-Jwt-Assertion` (`RS256` + JWKS) imzasını kriptografik olarak doğrular ve `email` adresini `OWNER_ALLOWED_LOGINS` içinde arar. `Cf-Access-Authenticated-User-Email` başlığına tek başına asla güvenilmez (varsa JWT `email` ile eşleşmesi zorunludur; uyuşmazlıkta `403`). Bu kanalda `allowMasterFallback: false` korunur; `x-store-proxy-secret`, `x-real-ip` ve `tailscale-*` başlıkları reddedilir.
+   - **`rapor.example.com` (`cloudflare-access`):** Cloudflare Zero Trust Access **Application #2** (`REPORT_CF_AUD` — `OWNER_CF_AUD`'dan ayrı bir Application ve AUD) bağlanır. `report-server.mjs` yalnız `GET` isteklerini, `PRAGMA query_only=ON` salt okunur bağlantıyı ve sıkı CSP'yi korur; `tailscale-*` başlıklarını reddeder; `REPORT_ORIGIN` portsuz ve sondaki `/` olmadan (`https://rapor.example.com`) tanımlanır.
+   - **`kasa.example.com` (`store-checkout`):** Bu alt alan adında **Cloudflare Zero Trust Access KESİNLİKLE KAPALI** olmalıdır (`server.mjs`, `cf-access-*` başlıklarını `403` ile reddeder). Erişimi şu iki yöntemden biriyle kilitleyin:
+     - **Seçenek A (1-atlama WAF + Transform Rule):** Cloudflare WAF ile yalnızca mağaza statik WAN IP'sine (`203.0.113.10/32`) izin verin; Cloudflare Transform Rule (Modify Request Header) ile tekil `X-Store-Proxy-Secret` = `STORE_PROXY_SECRET` enjekte edin ve `editor.env` içinde `STORE_IP_HEADER=cf-connecting-ip` kullanın.
+     - **Seçenek B (Yerel Caddy döngüsü):** `cloudflared` içinde `kasa.example.com` -> `http://127.0.0.1:4319` yönlendirin; yerel Caddy `X-Store-Proxy-Secret` başlığını ekleyip `CF-Connecting-IP` başlığını **değiştirmeden** `http://127.0.0.1:4317` adresine iletsin (`STORE_IP_HEADER=cf-connecting-ip`; Caddy içinde `X-Real-IP {remote_host}` yazmayın!).
+   - **Başlık Sınırı (M1 Hizalaması):** Hem `server.mjs` hem de `report-server.mjs`, `maxHeadersCount = 100` ve `rawHeaders > 80 -> 431` (en fazla 40 başlık çifti) sınırı uygular; Transform Kuralları ile gereksiz ek başlık eklemeyin.
 
 ---
 
@@ -254,6 +333,47 @@ BACKUP_PASSPHRASE='<YEDEK_PAROLASI>' \
 ```
 
 Çıktıda Seçenek A (`decrypt`) için `bundleId` ve `manifest` alanlarını, Seçenek B (`restore`) için `"ok": true` ve `reconciliations` özetini doğruladıktan sonra geçici doğrulama klasörlerini temizleyin (`rm -rf /tmp/er-sat-verify-dec /tmp/er-sat-verify-restore`). Sunucu diskini doldurmamak için günlük/haftalık `.enc` kopyalarını yerel PC'de arşivleyip sunucudaki eski `.enc` dosyaları için saklama süresi (ör. 30 gün) belirleyin.
+
+### 4.1 Cloudflare R2 (EU) + Object/Bucket Lock + Append-Only Restic (10 dk RPO)
+
+Bulut üretim ortamında fidye yazılımı veya yanlış silme riskine karşı **değiştirilemez (immutable)** uzak yedekleme önerilir:
+
+1. **EU Konumlu R2 Bucket ve Bucket Lock:** Cloudflare R2 üzerinde **EU** konumlu bir bucket oluşturun ve **Object Lock / Bucket Lock** korumasını (ör. 30–90 günlük saklama kilidi) etkinleştirin.
+2. **En Az Yetkili İki Ayrı R2 API Anahtarı:**
+   - **VPS Append-Only Yazma Anahtarı:** Yalnız yeni nesne yazma/ekleme yetkisine sahip (`delete` yetkisi olmayan) anahtar oluşturun; parolayı `/etc/er-sat-defter/restic.env` (`chmod 0600`, `chown er-sat:er-sat`, Git dışında) içinde tutun.
+   - **Mağaza PC Salt Okunur Çekme Anahtarı:** Yalnızca okuma/indirme yetkili ayrı bir R2 API anahtarı oluşturun.
+3. **Systemd Drop-In ile Otomatik R2 Aktarımı:** `er-sat-backup.service` çekirdek birimini değiştirmeden `/etc/systemd/system/er-sat-backup.service.d/r2-sync.conf` dosyası ekleyin:
+   ```ini
+   [Service]
+   EnvironmentFile=/etc/er-sat-defter/restic.env
+   ExecStartPost=/usr/bin/restic --repo s3:https://<CF-ACCOUNT-ID>.r2.cloudflarestorage.com/<R2-BUCKET> backup /var/backups/er-sat-defter --tag er-sat-enc
+   ExecStartPost=/usr/bin/find /var/backups/er-sat-defter -maxdepth 1 -type f -name 'er-sat-backup-*.enc' -mtime +7 -delete
+   ```
+   *(İlk kullanımda `restic init` çalıştırın; `.enc` dosyaları `backup-bundle.mjs` tarafından zaten AES-256-GCM ile şifrelenmiş olduğundan çift katmanlı koruma sağlanır.)*
+
+### 4.2 Canlılık ve Yedek Alarmı (Healthchecks.io + UptimeRobot)
+
+- **Yedekleme Nabzı (Dead-Man's Switch):** `/etc/systemd/system/er-sat-backup.service.d/r2-sync.conf` sonuna bir sinyal satırı ekleyerek yedekleme + R2 aktarımı başarılı olduğunda **Healthchecks.io**'yu bilgilendirin (ör. 15 dakika içinde sinyal gelmezse Telegram/e-posta uyarısı):
+  ```ini
+  ExecStartPost=/usr/bin/curl -fsS -m 10 --retry 3 https://hc-ping.com/<HEALTHCHECKS-UUID>
+  ```
+- **UptimeRobot / Harici Sağlık İzleme:** `/healthz` ucunu dışarı açmak istemiyorsanız tünel katmanında kapalı bırakın; dış izleme gerekiyorsa `editor.env` içinde `HEALTHZ_TOKEN` tanımlayıp tekil `Authorization: Bearer <token>` veya `X-Healthz-Token: <token>` başlığıyla sorgulayın.
+
+### 4.3 Mağaza Windows PC Yerel 3. Kopya Çekme (`C:\er-sat-backups`)
+
+Mağaza Windows bilgisayarında Görev Zamanlayıcı (Task Scheduler) ile R2 EU bucket'ındaki şifreli yedekleri **yalnız salt okunur R2 anahtarı** kullanarak (`$0` egress) yerel **`C:\er-sat-backups`** klasörüne düzenli çekin:
+
+- Hedef klasörü kullanıcı profil klasörleri yerine doğrudan **`C:\er-sat-backups`** olarak oluşturun ve NTFS izinlerini yalnızca yönetici hesabı ile sınırlayın (`icacls C:\er-sat-backups /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F"`).
+- Çekilen `.enc` dosyasını izole bir geçici klasörde PowerShell üzerinden doğrulayıp temizleyin:
+  ```powershell
+  $env:BACKUP_PASSPHRASE = '<YEDEK_PAROLASI>'
+  node scripts/backup-bundle.mjs restore `
+    --encrypted-file C:\er-sat-backups\er-sat-backup-YYYYMMDDTHHMMSSZ.enc `
+    --passphrase-env BACKUP_PASSPHRASE `
+    --target-dir C:\er-sat-verify-tmp
+  Remove-Item -Recurse -Force C:\er-sat-verify-tmp
+  Remove-Item Env:BACKUP_PASSPHRASE
+  ```
 
 ---
 

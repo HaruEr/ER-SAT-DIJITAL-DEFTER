@@ -24,6 +24,10 @@ ReadWritePaths=/var/lib/er-sat-defter /var/backups/er-sat-defter
 # - `encrypt` düz metin `--bundle-dir` klasörünü silmediği için özel geçici sahneleme
 #   klasörü `EXIT` tuzağıyla her durumda (başarı veya hata) temizlenir.
 # - `$$` ve `%%` işaretleri systemd birim dosyasında kabuk değişkenleri ile `date` belirteçlerinin korunması içindir.
+# - Cloudflare R2 (EU + Object/Bucket Lock) üzerine append-only `restic` aktarımı ve
+#   `Healthchecks.io` sinyali için bu birim dosyasını değiştirmeden systemd drop-in
+#   (`/etc/systemd/system/er-sat-backup.service.d/r2-sync.conf` içinde `ExecStartPost=...`)
+#   ekleyebilirsiniz (ayrıntılar için `deploy/README.md` §4.1-4.2).
 ExecStart=/bin/bash -euo pipefail -c ' \
   DATA_DIR="$${DATA_DIRECTORY:-/var/lib/er-sat-defter}"; \
   OUT_DIR="$${BACKUP_OUT_DIR:-/var/backups/er-sat-defter}"; \

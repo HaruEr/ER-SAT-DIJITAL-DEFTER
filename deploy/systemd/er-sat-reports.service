@@ -8,6 +8,11 @@ Type=simple
 User=er-sat
 Group=er-sat
 WorkingDirectory=/opt/er-sat-defter
+# Sunucu yalnız `127.0.0.1:4318` üzerinde dinler (UFW ile 0 açık gelen port).
+# `reports.env` içinde `REPORT_AUTH_PROVIDER=tailscale` (varsayılan) veya
+# `REPORT_AUTH_PROVIDER=cloudflare-access` (`REPORT_CF_TEAM_DOMAIN`, `OWNER_CF_AUD`'dan
+# ayrı `REPORT_CF_AUD`, `REPORT_ORIGIN=https://rapor.example.com`) seçilebilir;
+# `report-server.mjs` de `maxHeadersCount = 100` (`rawHeaders > 80 -> 431`) uygular.
 Environment=REPORT_ENABLED=1
 EnvironmentFile=/etc/er-sat-defter/reports.env
 ExecStart=/usr/bin/node /opt/er-sat-defter/report-server.mjs

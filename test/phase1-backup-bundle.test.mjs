@@ -10,6 +10,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync
 } from 'node:fs';
@@ -541,6 +542,47 @@ test('Faz 1-D: restoreBackupBundle rejects corrupt, missing, extra, SHA-256 mism
   assertTargetUntouched();
 });
 
+test('Faz 1-C: createBackupBundle rejects <100-byte and >=100-byte invalid 16-byte SQLite source headers without publishing', async t => {
+  const root = makeTempDir('p1-bad-sqlite-header-');
+  const validDataDir = join(root, 'valid-data');
+  mkdirSync(validDataDir, { recursive: true });
+  t.after(() => removeTempDir(root));
+
+  await seedFullDataDirectory(validDataDir, { includeDemo: true });
+
+  const cases = [
+    ['dukkan-empty-0b', 'dukkan.sqlite', Buffer.alloc(0)],
+    ['dukkan-short-99b-valid-prefix', 'dukkan.sqlite', Buffer.concat([Buffer.from('SQLite format 3\0', 'utf8'), Buffer.alloc(83, 0x78)])],
+    ['dukkan-byte15-diff-128b', 'dukkan.sqlite', Buffer.concat([Buffer.from('SQLite format 3!', 'utf8'), Buffer.alloc(112, 0x78)])],
+    ['dukkan-bit7-masked-byte0-128b', 'dukkan.sqlite', Buffer.concat([Buffer.from([0xd3]), Buffer.from('QLite format 3\0', 'utf8'), Buffer.alloc(112, 0x78)])],
+    ['identity-invalid-256b', 'identity.sqlite', Buffer.alloc(256, 0x41)],
+    ['demo-invalid-220b', 'demo.sqlite', Buffer.from('Not SQLite!'.repeat(20), 'utf8')]
+  ];
+
+  for (const [label, targetFile, payload] of cases) {
+    const caseRoot = join(root, label);
+    const caseDataDir = join(caseRoot, 'data');
+    const caseOutDir = join(caseRoot, 'out');
+    const caseTempDir = join(caseRoot, 'tmp');
+    mkdirSync(caseDataDir, { recursive: true });
+    mkdirSync(caseOutDir, { recursive: true });
+    mkdirSync(caseTempDir, { recursive: true });
+
+    for (const file of ['dukkan.sqlite', 'demo.sqlite', 'identity.sqlite']) {
+      copyFileSync(join(validDataDir, file), join(caseDataDir, file));
+    }
+    writeFileSync(join(caseDataDir, targetFile), payload);
+
+    await assert.rejects(
+      createBackupBundle({ dataDirectory: caseDataDir, outputDirectory: caseOutDir, tempDirectory: caseTempDir }),
+      { code: 'SQLITE_HEADER_INVALID' },
+      `expected SQLITE_HEADER_INVALID for ${label}`
+    );
+    assert.deepEqual(readdirSync(caseOutDir), [], `expected empty outDir for ${label}`);
+    assert.deepEqual(readdirSync(caseTempDir), [], `expected empty tempDir for ${label}`);
+  }
+});
+
 test('Faz 1-D: AES-256-GCM + scrypt encrypted bundle round-trip, wrong-key/tamper rejection, and transparent Restic probe', async t => {
   const root = makeTempDir('p1-enc-roundtrip-');
   const dataDir = join(root, 'data');
@@ -567,6 +609,9 @@ test('Faz 1-D: AES-256-GCM + scrypt encrypted bundle round-trip, wrong-key/tampe
   });
   assert.equal(encInfo.algorithm, 'aes-256-gcm');
   assert.equal(encInfo.kdf, 'scrypt');
+  if (process.platform !== 'win32' && (typeof process.getuid !== 'function' || process.getuid() !== 0)) {
+    assert.equal(statSync(encFile).mode & 0o777, 0o600);
+  }
 
   const encBytes = readFileSync(encFile);
   assert.equal(encBytes.includes(Buffer.from('SQLite format 3')), false);
@@ -614,6 +659,12 @@ test('Faz 1-D: AES-256-GCM + scrypt encrypted bundle round-trip, wrong-key/tampe
     tempDirectory: tempDir
   });
   assert.equal(decInfo.bundleId, bundle.bundleId);
+  if (process.platform !== 'win32' && (typeof process.getuid !== 'function' || process.getuid() !== 0)) {
+    assert.equal(statSync(decInfo.bundleDirectory).mode & 0o777, 0o700);
+    for (const filename of ['bundle-manifest.json', 'dukkan.sqlite', 'demo.sqlite', 'identity.sqlite']) {
+      assert.equal(statSync(join(decInfo.bundleDirectory, filename)).mode & 0o777, 0o600);
+    }
+  }
 
   // Valid encrypted restoreBackupBundle.
   const restored = await restoreBackupBundle({

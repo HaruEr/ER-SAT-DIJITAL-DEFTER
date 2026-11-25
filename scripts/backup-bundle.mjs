@@ -1,16 +1,19 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scrypt } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
+  closeSync,
   copyFileSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
-  statSync,
   unlinkSync,
   writeFileSync
 } from 'node:fs';
@@ -177,13 +180,27 @@ function assertRegularNoSymlink(targetPath, label) {
 
 function assertValidSqliteSource(filePath, label) {
   assertRegularNoSymlink(filePath, label);
-  const st = statSync(filePath);
-  if (st.size < 100) {
-    throw failBundle('SQLITE_HEADER_INVALID', `${label} geçerli bir SQLite veritabanı değil.`);
-  }
-  const header = readFileSync(filePath).subarray(0, 16).toString('utf8');
-  if (header !== SQLITE_HEADER_PREFIX) {
-    throw failBundle('SQLITE_HEADER_INVALID', `${label} SQLite dosya başlığı geçersiz.`);
+  const fd = openSync(filePath, 'r');
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) {
+      throw failBundle('INVALID_FILE', `${label} geçerli bir normal dosya değil.`);
+    }
+    if (st.size < 100) {
+      throw failBundle('SQLITE_HEADER_INVALID', `${label} geçerli bir SQLite veritabanı değil.`);
+    }
+    const header = Buffer.alloc(16);
+    let totalRead = 0;
+    while (totalRead < 16) {
+      const bytesRead = readSync(fd, header, totalRead, 16 - totalRead, totalRead);
+      if (bytesRead === 0) break;
+      totalRead += bytesRead;
+    }
+    if (totalRead !== 16 || header.toString('utf8') !== SQLITE_HEADER_PREFIX) {
+      throw failBundle('SQLITE_HEADER_INVALID', `${label} SQLite dosya başlığı geçersiz.`);
+    }
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -266,7 +283,7 @@ function moveDirectoryAtomically(sourceDir, targetDir) {
     if (error?.code !== 'EXDEV') throw error;
     const stagingInTarget = join(dirname(targetDir), `.tmp-${basename(targetDir)}-${randomUUID()}`);
     try {
-      mkdirSync(stagingInTarget, { recursive: true });
+      mkdirSync(stagingInTarget, { recursive: true, mode: 0o700 });
       for (const entry of readdirSync(sourceDir, { withFileTypes: true })) {
         if (!entry.isFile()) throw failBundle('BUNDLE_PAYLOAD_INVALID', 'Beklenmeyen paket öğesi.');
         copyFileSync(join(sourceDir, entry.name), join(stagingInTarget, entry.name));
@@ -734,7 +751,12 @@ function readAndValidateBundleDir(bundleDir) {
   }
 
   for (const dbEntry of manifest.databases) {
-    validateDatabaseBuffer(dbEntry, readFileSync(join(bundleDir, dbEntry.filename)));
+    const dbBytes = readFileSync(join(bundleDir, dbEntry.filename));
+    try {
+      validateDatabaseBuffer(dbEntry, dbBytes);
+    } finally {
+      dbBytes.fill(0);
+    }
   }
 
   return manifest;
@@ -754,21 +776,27 @@ function buildEncryptedHeader(salt, iv, n = SCRYPT_N, r = SCRYPT_R, p = SCRYPT_P
 
 function packBundleFiles(bundleDir, filenames) {
   const chunks = [];
-  const countBuf = Buffer.alloc(4);
-  countBuf.writeUInt32BE(filenames.length, 0);
-  chunks.push(countBuf);
+  try {
+    const countBuf = Buffer.alloc(4);
+    countBuf.writeUInt32BE(filenames.length, 0);
+    chunks.push(countBuf);
 
-  for (const filename of [...filenames].sort()) {
-    assertSafeBasename(filename);
-    const nameBytes = Buffer.from(filename, 'utf8');
-    const dataBytes = readFileSync(join(bundleDir, filename));
-    const metaBuf = Buffer.alloc(2 + nameBytes.length + 8);
-    metaBuf.writeUInt16BE(nameBytes.length, 0);
-    nameBytes.copy(metaBuf, 2);
-    metaBuf.writeBigUInt64BE(BigInt(dataBytes.length), 2 + nameBytes.length);
-    chunks.push(metaBuf, dataBytes);
+    for (const filename of [...filenames].sort()) {
+      assertSafeBasename(filename);
+      const nameBytes = Buffer.from(filename, 'utf8');
+      const dataBytes = readFileSync(join(bundleDir, filename));
+      const metaBuf = Buffer.alloc(2 + nameBytes.length + 8);
+      metaBuf.writeUInt16BE(nameBytes.length, 0);
+      nameBytes.copy(metaBuf, 2);
+      metaBuf.writeBigUInt64BE(BigInt(dataBytes.length), 2 + nameBytes.length);
+      chunks.push(metaBuf, dataBytes);
+    }
+    return Buffer.concat(chunks);
+  } finally {
+    for (const chunk of chunks) {
+      chunk.fill(0);
+    }
   }
-  return Buffer.concat(chunks);
 }
 
 function unpackBundleFiles(plaintext) {
@@ -842,27 +870,32 @@ export async function encryptBackupBundle({
 
   const manifest = readAndValidateBundleDir(srcBundleDir);
   const filenames = [BUNDLE_MANIFEST_FILENAME, ...manifest.databases.map(d => d.filename)];
-  const plaintext = packBundleFiles(srcBundleDir, filenames);
+  let plaintext = null;
+  let passphraseBuf = null;
+  let key = null;
+  let stageDir = null;
 
-  const salt = randomBytes(16);
-  const iv = randomBytes(12);
-  const header = buildEncryptedHeader(salt, iv);
-  const key = await deriveKey(Buffer.from(passphrase, 'utf8'), salt, 32, {
-    N: SCRYPT_N,
-    r: SCRYPT_R,
-    p: SCRYPT_P,
-    maxmem: SCRYPT_MAXMEM
-  });
-
-  const cipher = createCipheriv('aes-256-gcm', key, iv);
-  cipher.setAAD(header);
-  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  const envelope = Buffer.concat([header, ciphertext, authTag]);
-
-  mkdirSync(tempBase, { recursive: true });
-  const stageDir = mkdtempSync(join(tempBase, 'backup-enc-stage-'));
   try {
+    plaintext = packBundleFiles(srcBundleDir, filenames);
+    const salt = randomBytes(16);
+    const iv = randomBytes(12);
+    const header = buildEncryptedHeader(salt, iv);
+    passphraseBuf = Buffer.from(passphrase, 'utf8');
+    key = await deriveKey(passphraseBuf, salt, 32, {
+      N: SCRYPT_N,
+      r: SCRYPT_R,
+      p: SCRYPT_P,
+      maxmem: SCRYPT_MAXMEM
+    });
+
+    const cipher = createCipheriv('aes-256-gcm', key, iv);
+    cipher.setAAD(header);
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    const envelope = Buffer.concat([header, ciphertext, authTag]);
+
+    mkdirSync(tempBase, { recursive: true });
+    stageDir = mkdtempSync(join(tempBase, 'backup-enc-stage-'));
     const stagedFile = join(stageDir, 'bundle.enc');
     writeFileSync(stagedFile, envelope, { flag: 'wx', mode: 0o600, flush: true });
     mkdirSync(dirname(destFile), { recursive: true });
@@ -878,6 +911,9 @@ export async function encryptBackupBundle({
       kdf: 'scrypt'
     };
   } finally {
+    key?.fill(0);
+    passphraseBuf?.fill(0);
+    plaintext?.fill(0);
     removeDirSafe(stageDir);
   }
 }
@@ -911,30 +947,46 @@ async function decryptToStaging(encryptedFile, passphrase, stagingDir) {
   const ciphertext = raw.subarray(ENCRYPTED_HEADER_BYTES, raw.length - ENCRYPTED_TAG_BYTES);
   const authTag = raw.subarray(raw.length - ENCRYPTED_TAG_BYTES);
 
-  const key = await deriveKey(Buffer.from(passphrase, 'utf8'), salt, 32, {
-    N: n,
-    r,
-    p,
-    maxmem: SCRYPT_MAXMEM
-  });
+  let passphraseBuf = null;
+  let key = null;
+  let decUpdate = null;
+  let decFinal = null;
+  let plaintext = null;
 
-  let plaintext;
   try {
-    const decipher = createDecipheriv('aes-256-gcm', key, iv);
-    decipher.setAAD(header);
-    decipher.setAuthTag(authTag);
-    plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  } catch {
-    throw failBundle('BUNDLE_DECRYPT_FAILED', 'Şifre çözme başarısız: parola hatalı veya paket bozulmuş.');
-  }
+    passphraseBuf = Buffer.from(passphrase, 'utf8');
+    key = await deriveKey(passphraseBuf, salt, 32, {
+      N: n,
+      r,
+      p,
+      maxmem: SCRYPT_MAXMEM
+    });
 
-  const files = unpackBundleFiles(plaintext);
-  validateBundleEntryBuffers(files);
-  mkdirSync(stagingDir, { recursive: true });
-  for (const [name, data] of files) {
-    writeFileSync(join(stagingDir, name), data, { flag: 'wx', flush: true });
+    try {
+      const decipher = createDecipheriv('aes-256-gcm', key, iv);
+      decipher.setAAD(header);
+      decipher.setAuthTag(authTag);
+      decUpdate = decipher.update(ciphertext);
+      decFinal = decipher.final();
+      plaintext = Buffer.concat([decUpdate, decFinal]);
+    } catch {
+      throw failBundle('BUNDLE_DECRYPT_FAILED', 'Şifre çözme başarısız: parola hatalı veya paket bozulmuş.');
+    }
+
+    const files = unpackBundleFiles(plaintext);
+    validateBundleEntryBuffers(files);
+    mkdirSync(stagingDir, { recursive: true, mode: 0o700 });
+    for (const [name, data] of files) {
+      writeFileSync(join(stagingDir, name), data, { flag: 'wx', mode: 0o600, flush: true });
+    }
+    return readAndValidateBundleDir(stagingDir);
+  } finally {
+    key?.fill(0);
+    passphraseBuf?.fill(0);
+    decUpdate?.fill(0);
+    decFinal?.fill(0);
+    plaintext?.fill(0);
   }
-  return readAndValidateBundleDir(stagingDir);
 }
 
 /**
