@@ -155,7 +155,9 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
       let actor = requireSession(identities, token);
       if (actor.mustChangePin) return json(403, { error: 'Devam etmek için geçici PIN kodunuzu değiştirmeniz gerekiyor.', code: 'PIN_CHANGE_REQUIRED' });
       const revokeForRestore = () => {
-        if (requireSession(identities, token).role !== 'owner') deny();
+        const current = requireSession(identities, token);
+        if (current.role !== 'owner') deny();
+        if (current.mustChangePin) fail('Devam etmek için geçici PIN kodunuzu değiştirmeniz gerekiyor.', { status: 403, code: 'PIN_CHANGE_REQUIRED' });
         // Invalidate before financial COMMIT: a process crash must not preserve a stale writer.
         identities.invalidateSessions();
       };
@@ -191,6 +193,7 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
         const data = await readJson(2 * 1024 * 1024);
         if (!data) return;
         actor = requireSession(identities, token);
+        if (actor.mustChangePin) return json(403, { error: 'Devam etmek için geçici PIN kodunuzu değiştirmeniz gerekiyor.', code: 'PIN_CHANGE_REQUIRED' });
         const repository = repo(requestedWorkspace);
         if (url.pathname === '/api/pending-approvals') {
           if (data.command?.type === 'dailyCount') {
@@ -216,7 +219,9 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
         if (req.headers['content-type']?.split(';')[0].trim() !== 'application/json') return json(415, { error: 'JSON içeriği gerekli.' });
         const data = await readJson(1024);
         if (!data) return;
-        requireSession(identities, token);
+        actor = requireSession(identities, token);
+        if (actor.mustChangePin) return json(403, { error: 'Devam etmek için geçici PIN kodunuzu değiştirmeniz gerekiyor.', code: 'PIN_CHANGE_REQUIRED' });
+        if (actor.role !== 'owner') deny();
         return json(200, { url: downloads.issue(token, data.operation, requestedWorkspace) });
       }
       // Defer opening financial files until write authorization is decided.
@@ -298,6 +303,7 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
       const data = await readJson(bodyLimit);
       if (!data) return;
       actor = requireSession(identities, token);
+      if (actor.mustChangePin) return json(403, { error: 'Devam etmek için geçici PIN kodunuzu değiştirmeniz gerekiyor.', code: 'PIN_CHANGE_REQUIRED' });
       if (url.pathname === '/api/command') {
         if (worker) {
           if (!isWorkerCustomerCreation(data.command)) {
@@ -348,7 +354,10 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
         } catch { /* A failed diagnostic sink cannot alter the request outcome. */ }
       }
       if (res.destroyed || res.headersSent) { res.destroy(); return; }
-      return json(expected ? e.status : 500, { error: expected ? e.message : 'İşlem tamamlanamadı. Son isteğin sonucunu Yenile ile kontrol edin; gerekirse aynı işlem anahtarıyla yeniden deneyin.' });
+      return json(expected ? e.status : 500, {
+        error: expected ? e.message : 'İşlem tamamlanamadı. Son isteğin sonucunu Yenile ile kontrol edin; gerekirse aynı işlem anahtarıyla yeniden deneyin.',
+        ...(expected && e.code === 'PIN_CHANGE_REQUIRED' ? { code: e.code } : {})
+      });
     }
   });
   server.requestTimeout = 120000;

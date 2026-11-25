@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
-import { join } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, statSync } from 'node:fs';
+import { dirname, join, resolve, win32 as win32Path } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { promisify } from 'node:util';
 
@@ -14,6 +15,73 @@ const validToken = token => typeof token === 'string' && token.length === 43 && 
 const validPin = pin => typeof pin === 'string' && /^\d{6}$/.test(pin);
 const readPin = input => input?.pin ?? input?.password;
 
+const BACKUP_WIN32_ILLEGAL_CHAR_RE = /[\x00-\x1f\x7f\\/:*?"<>|]/;
+const BACKUP_CONTROL_OR_BIDI_RE = /[\u0080-\u009f\u202a-\u202e\u2066-\u2069]/;
+const BACKUP_WINDOWS_RESERVED_STEM_RE = /^(?:con|prn|aux|nul|com[0-9\u00B2\u00B3\u00B9]|lpt[0-9\u00B2\u00B3\u00B9]|conin\$|conout\$)$/i;
+const BACKUP_WIN32_DEVICE_NAMESPACE_RE = /^[\\/]{2}[?.](?:[\\/]|$)/;
+const BACKUP_WIN32_DRIVE_ROOT_RE = /^[A-Za-z]:[\\/]?$/;
+
+function isUnsafeBackupWin32Segment(segment, { allowDotNavigation = false } = {}) {
+  if (!segment) return false;
+  if (segment === '.' || segment === '..') return !allowDotNavigation;
+  if (segment !== segment.trim()) return true;
+  if (segment.endsWith('.')) return true;
+  if (BACKUP_WIN32_ILLEGAL_CHAR_RE.test(segment)) return true;
+  if (BACKUP_CONTROL_OR_BIDI_RE.test(segment)) return true;
+  const cut = segment.search(/[.:]/);
+  const stem = (cut === -1 ? segment : segment.slice(0, cut)).replace(/[\s.]+$/u, '');
+  return BACKUP_WINDOWS_RESERVED_STEM_RE.test(stem);
+}
+
+function validateBackupPathTree(pathValue, { allowDotNavigation }) {
+  if (BACKUP_WIN32_DEVICE_NAMESPACE_RE.test(pathValue)) {
+    throw Object.assign(new Error('Yedek hedef dosyası Win32 aygıt ad alanı içeremez.'), { code: 'INVALID_PATH' });
+  }
+  const { root } = win32Path.parse(pathValue);
+  if (root) {
+    if (BACKUP_WIN32_DEVICE_NAMESPACE_RE.test(root)) {
+      throw Object.assign(new Error('Yedek hedef dosyası Win32 aygıt ad alanı içeremez.'), { code: 'INVALID_PATH' });
+    }
+    const isSlashRoot = root === '/' || root === '\\';
+    const isDriveRoot = BACKUP_WIN32_DRIVE_ROOT_RE.test(root);
+    if (!isSlashRoot && !isDriveRoot) {
+      if (!/^(?:\\\\|\/\/)/.test(root)) {
+        throw Object.assign(new Error('Yedek hedef dosyası geçersiz bir kök yolu içeriyor.'), { code: 'INVALID_PATH' });
+      }
+      const uncParts = root.replace(/^[\\/]{2}/, '').split(/[\\/]+/).filter(Boolean);
+      if (uncParts.length !== 2 || uncParts.some(part => isUnsafeBackupWin32Segment(part, { allowDotNavigation: false }))) {
+        throw Object.assign(new Error('Yedek hedef dosyası geçersiz bir UNC kök yolu içeriyor.'), { code: 'INVALID_PATH' });
+      }
+    }
+  }
+  const remainder = pathValue.slice(root.length);
+  for (const segment of remainder.split(/[\\/]+/)) {
+    if (!segment) continue;
+    if (isUnsafeBackupWin32Segment(segment, { allowDotNavigation })) {
+      throw Object.assign(new Error('Yedek hedef dosyası geçersiz veya Windows ayrılmış yol bölümü içeriyor.'), { code: 'INVALID_PATH' });
+    }
+  }
+}
+
+function assertSafeBackupTargetPath(targetFile) {
+  if (
+    typeof targetFile !== 'string' ||
+    !targetFile.trim() ||
+    targetFile.includes('\0') ||
+    targetFile !== targetFile.trim() ||
+    targetFile === ':memory:'
+  ) {
+    throw Object.assign(new Error('Geçerli bir yedek hedef dosya yolu gerekli.'), { code: 'INVALID_PATH' });
+  }
+  const resolvedTarget = resolve(targetFile);
+  if (!resolvedTarget.trim() || resolvedTarget.includes('\0') || resolvedTarget !== resolvedTarget.trim()) {
+    throw Object.assign(new Error('Geçerli bir yedek hedef dosya yolu gerekli.'), { code: 'INVALID_PATH' });
+  }
+  validateBackupPathTree(targetFile, { allowDotNavigation: true });
+  validateBackupPathTree(resolvedTarget, { allowDotNavigation: false });
+  return resolvedTarget;
+}
+
 export class IdentityError extends Error {
   constructor(message, status = 400) {
     super(message);
@@ -23,6 +91,11 @@ export class IdentityError extends Error {
 }
 
 const displayKey = name => name.toLocaleLowerCase('tr').normalize('NFC');
+const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
+const isSqliteBusyError = error =>
+  error?.code === 'ERR_SQLITE_ERROR' &&
+  ((Number.isInteger(error?.errcode) && (error.errcode & 0xff) === 5) ||
+    /database is locked|SQLITE_BUSY/i.test(error?.message || ''));
 
 function actor(row, extra = null) {
   const base = { id: row.id, name: row.name, role: row.role, mustChangePin: Boolean(row.must_change_pin) };
@@ -46,9 +119,61 @@ export class IdentityStore {
 
   constructor(directory, { now = Date.now } = {}) {
     this.#now = now;
-    this.#db = new DatabaseSync(join(directory, 'identity.sqlite'));
+    this.#db = new DatabaseSync(join(directory, 'identity.sqlite'), { timeout: 5000 });
     try {
-      this.#db.exec('PRAGMA trusted_schema = OFF; PRAGMA busy_timeout = 5000; BEGIN IMMEDIATE');
+      this.#db.exec('PRAGMA busy_timeout = 5000; PRAGMA trusted_schema = OFF;');
+
+      this.#db.exec('BEGIN');
+      let hasInitialSchema, initialAppId, initialUserVersion, initialJournalMode;
+      try {
+        hasInitialSchema = Boolean(this.#db.prepare('SELECT 1 FROM sqlite_schema LIMIT 1').get());
+        ({ application_id: initialAppId } = this.#db.prepare('PRAGMA application_id').get());
+        ({ user_version: initialUserVersion } = this.#db.prepare('PRAGMA user_version').get());
+        ({ journal_mode: initialJournalMode } = this.#db.prepare('PRAGMA journal_mode').get());
+      } finally {
+        if (this.#db.isTransaction) {
+          this.#db.exec('ROLLBACK');
+        }
+      }
+
+      if (
+        !(initialAppId === 0 && initialUserVersion === 0 && !hasInitialSchema) &&
+        !(initialAppId === identityApplicationId && [1, 2, 3].includes(initialUserVersion))
+      ) {
+        throw new Error('Desteklenmeyen kimlik veritabanı.');
+      }
+
+      const lockDeadline = Date.now() + 5000;
+      if (String(initialJournalMode).toLowerCase() !== 'wal') {
+        let lastBusyError = null;
+        while (true) {
+          try {
+            const currentMode = this.#db.prepare('PRAGMA journal_mode').get()?.journal_mode;
+            if (String(currentMode).toLowerCase() === 'wal') break;
+            const nextMode = this.#db.prepare('PRAGMA journal_mode = WAL').get()?.journal_mode;
+            if (String(nextMode).toLowerCase() === 'wal') break;
+          } catch (error) {
+            if (!isSqliteBusyError(error) || Date.now() >= lockDeadline) throw error;
+            lastBusyError = error;
+          }
+          if (Date.now() >= lockDeadline) {
+            throw lastBusyError ?? new Error('Kimlik veritabanı WAL moduna geçirilemedi.');
+          }
+          Atomics.wait(sleepBuffer, 0, 0, 5 + Math.floor(Math.random() * 20));
+        }
+      }
+
+      this.#db.exec('PRAGMA synchronous = FULL;');
+
+      while (true) {
+        try {
+          this.#db.exec('BEGIN IMMEDIATE');
+          break;
+        } catch (error) {
+          if (!isSqliteBusyError(error) || Date.now() >= lockDeadline) throw error;
+          Atomics.wait(sleepBuffer, 0, 0, 5 + Math.floor(Math.random() * 20));
+        }
+      }
       const { application_id } = this.#db.prepare('PRAGMA application_id').get();
       const { user_version } = this.#db.prepare('PRAGMA user_version').get();
       if (application_id === 0 && user_version === 0 && !this.#db.prepare('SELECT 1 FROM sqlite_schema LIMIT 1').get()) {
@@ -85,9 +210,38 @@ export class IdentityStore {
       }
       this.#db.exec('COMMIT');
     } catch (error) {
+      if (this.#db.isTransaction) {
+        try { this.#db.exec('ROLLBACK'); } catch {}
+      }
       this.#db.close();
       throw error;
     }
+  }
+
+  createConsistentBackup(targetFile) {
+    const resolvedTarget = assertSafeBackupTargetPath(targetFile);
+    let targetExists = existsSync(resolvedTarget);
+    if (!targetExists) {
+      try {
+        lstatSync(resolvedTarget);
+        targetExists = true;
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+      }
+    }
+    if (targetExists) {
+      throw Object.assign(new Error(`Yedek hedef dosyası zaten mevcut: ${resolvedTarget}`), { code: 'EEXIST' });
+    }
+    mkdirSync(dirname(resolvedTarget), { recursive: true });
+    this.#db.prepare('VACUUM INTO ?').run(resolvedTarget);
+    if (!existsSync(resolvedTarget)) {
+      throw new Error('Tutarlı yedek dosyası oluşturulamadı.');
+    }
+    const sizeBytes = statSync(resolvedTarget).size;
+    if (sizeBytes <= 0) {
+      throw new Error('Oluşturulan yedek dosyası boş.');
+    }
+    return { filename: resolvedTarget, sizeBytes, method: 'VACUUM INTO' };
   }
 
   close() {

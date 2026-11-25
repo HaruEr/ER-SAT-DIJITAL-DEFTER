@@ -17,7 +17,7 @@ function accountInfo(account) {
 export class ReportRepository {
   constructor(filename, workspace = 'demo') {
     this.workspace = workspace;
-    try { this.db = new DatabaseSync(filename, { readOnly: true }); this.db.exec('PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;'); }
+    try { this.db = new DatabaseSync(filename, { readOnly: true, timeout: 3000 }); this.db.exec('PRAGMA busy_timeout=3000; PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;'); }
     catch { this.db?.close(); throw unavailable(); }
   }
   #snapshot() {

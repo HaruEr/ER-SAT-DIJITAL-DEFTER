@@ -782,21 +782,39 @@ export function isWorkerCustomerCreation(command) {
   } catch { return false; }
 }
 
+const UUID_RE = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+
 export function eventActor(event) {
   if (!Object.hasOwn(event, 'audit')) return null;
   const audit = event.audit;
-  if (audit?.version !== 1 || !audit.actor) fail('İşlem sahibi bilgisi geçersiz.');
+  if (audit?.version !== 1 || !audit.actor || typeof audit.actor !== 'object' || Array.isArray(audit.actor)) fail('İşlem sahibi bilgisi geçersiz.');
   const { id, name, role } = audit.actor;
-  if (typeof id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)
+  if (typeof id !== 'string' || !UUID_RE.test(id)
     || !['employee', 'owner'].includes(role) || text(name, 'İşlem sahibi') !== name) fail('İşlem sahibi bilgisi geçersiz.');
   if (role === 'employee' && !['sale', 'purchase'].includes(event.command.type) && !isWorkerCustomerCreation(event.command)) fail('Bu işlem yönetici yetkisi gerektirir.');
   if (['stocktake', 'close'].includes(event.command.type) && event.command.approvedBy !== name) fail('Sayım onayı işlem sahibiyle eşleşmiyor.');
   const result = { id, name, role };
+  if (Object.hasOwn(audit.actor, 'viaMasterPin') || Object.hasOwn(audit.actor, 'masterActorId')) {
+    if (audit.actor.viaMasterPin !== true || role !== 'employee'
+      || typeof audit.actor.masterActorId !== 'string' || !UUID_RE.test(audit.actor.masterActorId)) {
+      fail('İşlem sahibi bilgisi geçersiz.');
+    }
+    result.viaMasterPin = true;
+    result.masterActorId = audit.actor.masterActorId;
+  }
   if (audit.submittedBy && typeof audit.submittedBy === 'object' && !Array.isArray(audit.submittedBy)) {
     const sid = audit.submittedBy.id, sname = audit.submittedBy.name;
-    if (typeof sid !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sid)
+    if (typeof sid !== 'string' || !UUID_RE.test(sid)
       || text(sname, 'Tezgâh çalışanı') !== sname) fail('Tezgâh çalışanı bilgisi geçersiz.');
     result.submittedBy = { id: sid, name: sname };
+    if (Object.hasOwn(audit.submittedBy, 'viaMasterPin') || Object.hasOwn(audit.submittedBy, 'masterActorId')) {
+      if (audit.submittedBy.viaMasterPin !== true
+        || typeof audit.submittedBy.masterActorId !== 'string' || !UUID_RE.test(audit.submittedBy.masterActorId)) {
+        fail('Tezgâh çalışanı bilgisi geçersiz.');
+      }
+      result.submittedBy.viaMasterPin = true;
+      result.submittedBy.masterActorId = audit.submittedBy.masterActorId;
+    }
     if (audit.wasEdited === true) result.wasEdited = true;
   }
   return result;
