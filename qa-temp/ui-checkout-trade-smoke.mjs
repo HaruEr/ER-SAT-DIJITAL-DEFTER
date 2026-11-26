@@ -18,8 +18,8 @@ async function setup(t,handler,seed,initialDraft) {
   const {window}=dom,doc=window.document,get=s=>doc.querySelector(s),tick=()=>new Promise(r=>setTimeout(r,0));
   t.after(()=>window.close());
   Object.defineProperty(window.crypto,'randomUUID',{value:randomUUID});
-  if(seed)window.sessionStorage.setItem('defter-sale-retry-worker-demo',JSON.stringify(seed));
-  if(initialDraft)window.sessionStorage.setItem('defter-pending-checkout-draft-worker-demo-sale',JSON.stringify(initialDraft));
+  if(seed)window.sessionStorage.setItem('defter-sale-retry-worker-dukkan',JSON.stringify(seed));
+  if(initialDraft)window.sessionStorage.setItem('defter-pending-checkout-draft-worker-dukkan-sale',JSON.stringify(initialDraft));
   const calls=[],snapshot=structuredClone(base);
   window.DefterSession={current:()=>({actor:{id:'worker'}}),api:async(path,body)=>{
     if(body)calls.push(body);
@@ -76,8 +76,8 @@ test('sale/purchase/workspace drafts survive switches and changed revision requi
   f.fill('#operation','purchase');assert.equal(f.get('[data-item] [data-value]').value,'');
   f.fill('[data-item] [data-value]','55');
   f.fill('#operation','sale');assert.equal(f.get('[data-item] [data-value]').value,'100');
-  f.fill('#workspace','dukkan');await f.tick();await f.tick();assert.equal(f.get('[data-item] [data-value]').value,'');
-  f.fill('#workspace','demo');await f.tick();await f.tick();assert.equal(f.get('[data-item] [data-value]').value,'100');
+  f.fill('#workspace','demo');await f.tick();await f.tick();assert.equal(f.get('[data-item] [data-value]').value,'');
+  f.fill('#workspace','dukkan');await f.tick();await f.tick();assert.equal(f.get('[data-item] [data-value]').value,'100');
   f.snapshot.revision=4;f.get('#refresh').click();await f.tick();await f.tick();
   assert.equal(f.get('#draft-stale').hidden,false);assert.equal(f.get('#record').disabled,true);
   f.get('#accept-snapshot').click();assert.equal(f.get('#draft-stale').hidden,true);

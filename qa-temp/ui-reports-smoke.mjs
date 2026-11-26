@@ -34,6 +34,7 @@ async function fixture(){
     }catch(error){return{ok:false,status:error.status||controller.status,json:async()=>({error:error.message})};}
   };
   window.eval(source);await tick();
+  {const ws=document.querySelector('#report-workspace');ws.value='demo';ws.dispatchEvent(new window.Event('change',{bubbles:true}));await tick();}
   return{window,document,calls,controller,writer,run,async nav(name){document.querySelector('[data-report-view="'+name+'"]').click();await tick();},close(){window.close();reports.close();empty.close();writer.close();other.close();rmSync(directory,{recursive:true,force:true});}};
 }
 check('a distinct read-only dashboard shows accessible TL charts and no editor actions',async({document,calls})=>{
