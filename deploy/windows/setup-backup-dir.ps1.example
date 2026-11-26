@@ -1,0 +1,23 @@
+# ER ŞAT Dijital Defter — Mağaza Windows PC Yerel Yedek Klasörü Kilitleme Şablonu
+#
+# Kullanım:
+#   Yönetici (Run as Administrator) PowerShell oturumunda çalıştırın.
+#   `C:\er-sat-backups` klasörünü oluşturur ve NTFS izinlerini yalnızca
+#   Yerel Yöneticiler grubu (*S-1-5-32-544) ile SYSTEM (*S-1-5-18) erişimine kilitler.
+#   Standart çalışan Windows hesabı bu klasörü okuyamaz veya silemez.
+
+$ErrorActionPreference = 'Stop'
+$BackupDir = 'C:\er-sat-backups'
+
+if (-not (Test-Path -LiteralPath $BackupDir)) {
+  New-Item -ItemType Directory -Path $BackupDir | Out-Null
+}
+
+# Devralmayı kapat ve yalnızca Administrators + SYSTEM erişimine izin ver
+icacls $BackupDir /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F'
+if ($LASTEXITCODE -ne 0) {
+  throw "icacls başarısız oldu (kod: $LASTEXITCODE)."
+}
+
+Write-Host "Klasör hazır ve kilitlendi: $BackupDir"
+icacls $BackupDir

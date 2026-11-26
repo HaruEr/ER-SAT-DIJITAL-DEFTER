@@ -1,0 +1,17 @@
+# ER ŞAT Dijital Defter — 10 Dakikalık RPO Systemd Timer Drop-In Örneği
+#
+# Kurulum (Linux VPS):
+#   sudo mkdir -p /etc/systemd/system/er-sat-backup.timer.d
+#   sudo cp deploy/systemd/drop-ins/er-sat-backup.timer.d-override.conf.example \
+#     /etc/systemd/system/er-sat-backup.timer.d/override.conf
+#   sudo systemctl daemon-reload
+#   sudo systemctl restart er-sat-backup.timer
+#   systemctl list-timers er-sat-backup.timer
+#
+# Not: İlk boş `OnCalendar=` satırı, ana `er-sat-backup.timer` birimindeki
+# 6 saatlik varsayılan takvimi sıfırlamak için zorunludur.
+
+[Timer]
+OnCalendar=
+OnCalendar=*:0/10
+RandomizedDelaySec=30s
