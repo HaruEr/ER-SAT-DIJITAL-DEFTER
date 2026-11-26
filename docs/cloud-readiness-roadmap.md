@@ -69,16 +69,17 @@ Adım 8 öncesinde mağazada yapılan ağ ve operasyon değerlendirmesiyle aşa�
    - Cloudflare Tunnel (`cloudflared`) kurulur ve `deploy/cloudflared-config.example.yml` ile `yonetim`, `kasa`, `rapor` subdomain'leri yönlendirilir.
    - `yonetim` ve `rapor` için ayrı Cloudflare Zero Trust Access uygulamaları (politika + `AUD` etiketi) tanımlanır.
    - `kasa` için Cloudflare WAF / IP kuralı ile yalnız mağaza statik IP'sine izin verilir ve `x-store-proxy-secret` başlığı yapılandırılır.
-3. `deploy/README.md` adımlarıyla Node.js 24, `ersat` servis kullanıcısı, `er-sat-defter.service` (`DEPLOY_MODE=cloud-proxy`, `OWNER_AUTH_PROVIDER=cloudflare-access`, `STORE_IP_HEADER=cf-connecting-ip`) ve `er-sat-reports.service` ayağa kaldırılır.
+3. `deploy/README.md` adımlarıyla Node.js 24, `er-sat` servis kullanıcısı, `er-sat-defter.service` (`DEPLOY_MODE=cloud-proxy`, `OWNER_AUTH_PROVIDER=cloudflare-access`, `STORE_IP_HEADER=cf-connecting-ip`) ve `er-sat-reports.service` ayağa kaldırılır.
 4. Yalnız **sentetik verilerle** PC/tablet/telefon üzerinden 3 kanal ve 7 eşzamanlı kullanıcı testi yapılır.
 
 ### Adım 9 — Bağımsız Yedekleme, Yerel Kurtarma ve İzleme Kurulumu
 1. Cloudflare R2 (EU) bucket + **Bucket Lock** + iki ayrı erişim anahtarı (`backup-writer` yalnız yazma/append-only, `backup-reader` salt okunur) oluşturulur.
-2. Linux `restic` (SHA-256 doğrulamalı) + `er-sat-backup.timer` (5–15 dk) ile `scripts/backup-bundle.mjs` + R2 şifreli artımlı yedekleme devreye alınır.
-3. Mağaza Windows PC'de periyodik `rclone`/`restic` görevi ile R2'den yerel şifreli çekme (`$0` egress) kurulur.
+2. Linux `restic` (SHA-256 doğrulamalı) + `er-sat-backup.timer` (`deploy/systemd/drop-ins/er-sat-backup.timer.d-override.conf.example` ile 10 dk RPO) ve `deploy/systemd/drop-ins/er-sat-backup.service.d-r2-sync.conf.example` ile `scripts/backup-bundle.mjs` + R2 şifreli artımlı yedekleme devreye alınır.
+3. Mağaza Windows PC'de `deploy/windows/setup-backup-dir.ps1.example` ve `deploy/windows/pull-and-verify-r2.ps1.example` şablonlarıyla periyodik R2'den yerel şifreli çekme (`$0` egress) ve doğrulama kurulur.
 4. Healthchecks.io (RPO > 15 dk alarmı) ve UptimeRobot/Better Stack (`/healthz` canlılık alarmı) Telegram + E-posta kanallarına bağlanır.
 
 ### Adım 10 — RPO/RTO ve Güvenlik Kabulü (20 Maddelik Üretim Kapısı)
+> Tam doğrulama matrisi ve kanıt kayıt tablosu: `docs/cloud-acceptance-gate.md`
 1. **Temiz 2. Test VPS'inde Felaket Kurtarma Tatbikatı:** Yalnız R2 yedeği + şifreleme anahtarıyla sıfırdan tam kurulum ve geri yükleme; ölçülmüş **RPO ≤ 15 dk**, **RTO ≤ 4 saat** kanıtı; geri yükleme sonrası eski oturumların `401` reddi ve bakiye mutabakatı.
 2. **Canlı Güvenlik Testleri:** Mağaza dışı IP'den `kasa` → `403`; `kasa`'dan `/owner`, `/api/suppliers`, `owner` PIN → `403`/`404`; sahte/süresi dolmuş JWT → `403`; kademeli PIN kilidi; R2 `backup-writer` ile silme denemesi → `403 AccessDenied`.
 

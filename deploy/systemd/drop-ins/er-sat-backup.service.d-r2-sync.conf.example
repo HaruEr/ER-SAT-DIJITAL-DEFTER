@@ -1,0 +1,27 @@
+# ER ŞAT Dijital Defter — Cloudflare R2 (EU) Restic + Healthchecks.io Drop-In Örneği
+#
+# Ön koşul (`/etc/er-sat-defter/restic.env`, `chown er-sat:er-sat`, `chmod 0600`, Git dışında):
+#   AWS_ACCESS_KEY_ID=<R2_BACKUP_WRITER_ACCESS_KEY>
+#   AWS_SECRET_ACCESS_KEY=<R2_BACKUP_WRITER_SECRET_KEY>
+#   RESTIC_PASSWORD=<GUCLU_RESTIC_REPO_PAROLASI>
+#
+# İlk depo başlatma (bir kez, `er-sat` kullanıcısı ile):
+#   sudo -u er-sat /bin/bash -euo pipefail -c '
+#     set -a; source /etc/er-sat-defter/restic.env; set +a
+#     /usr/bin/restic --repo s3:https://<CF-ACCOUNT-ID>.r2.cloudflarestorage.com/<R2-BUCKET> init
+#   '
+#
+# Kurulum (Linux VPS):
+#   sudo mkdir -p /etc/systemd/system/er-sat-backup.service.d
+#   sudo cp deploy/systemd/drop-ins/er-sat-backup.service.d-r2-sync.conf.example \
+#     /etc/systemd/system/er-sat-backup.service.d/r2-sync.conf
+#   # <CF-ACCOUNT-ID>, <R2-BUCKET> ve <HEALTHCHECKS-UUID> yer tutucularını doldurun.
+#   sudo systemctl daemon-reload
+#   sudo systemctl start er-sat-backup.service
+#   journalctl -u er-sat-backup.service -n 50 --no-pager
+
+[Service]
+EnvironmentFile=/etc/er-sat-defter/restic.env
+ExecStartPost=/usr/bin/restic --no-lock --repo s3:https://<CF-ACCOUNT-ID>.eu.r2.cloudflarestorage.com/<R2-BUCKET> backup /var/backups/er-sat-defter --tag er-sat-enc
+ExecStartPost=/usr/bin/find /var/backups/er-sat-defter -maxdepth 1 -type f -name 'er-sat-backup-*.enc' -mtime +7 -delete
+ExecStartPost=/usr/bin/curl -fsS -m 10 --retry 3 https://hc-ping.com/<HEALTHCHECKS-UUID>

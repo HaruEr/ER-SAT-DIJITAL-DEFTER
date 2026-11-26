@@ -1,0 +1,80 @@
+# ER ŞAT Dijital Defter — Mağaza Windows PC R2 Yerel 3. Kopya Çekme ve Doğrulama Şablonu
+#
+# Amaç:
+#   Cloudflare R2 (EU) bucket'ındaki en güncel şifreli `.enc` yedeklerini yalnızca
+#   salt okunur (`backup-reader`) anahtarıyla ($0 egress) `C:\er-sat-backups` klasörüne çeker
+#   ve en yeni `.enc` dosyasını izole geçici klasörde `backup-bundle.mjs restore` ile doğrular.
+#
+# Ön koşullar (Mağaza Ana Windows PC — Yönetici hesabı):
+#   1. `setup-backup-dir.ps1.example` ile `C:\er-sat-backups` NTFS kilidi uygulanmış olmalı.
+#   2. Node.js 24 LTS ve `restic` (SHA-256 doğrulamalı) kurulu olmalı.
+#   3. Sırlar bu betiğin içine YAZILMAMALIDIR; yalnızca Yönetici okuma izinli bir ortamdan
+#      veya Windows Credential Manager / korumalı görev ortamından sağlanmalıdır:
+#        - AWS_ACCESS_KEY_ID     (R2 backup-reader, salt okunur)
+#        - AWS_SECRET_ACCESS_KEY (R2 backup-reader, salt okunur)
+#        - RESTIC_REPOSITORY     (s3:https://<CF-ACCOUNT-ID>.r2.cloudflarestorage.com/<R2-BUCKET>)
+#        - RESTIC_PASSWORD       (Restic depo parolası)
+#        - BACKUP_PASSPHRASE     (backup-bundle.mjs AES-256-GCM parolası)
+
+$ErrorActionPreference = 'Stop'
+
+$BackupDir = 'C:\er-sat-backups'
+$RepoRoot = 'C:\er-sat-defter'
+$VerifyTemp = Join-Path 'C:\er-sat-verify-tmp' ([guid]::NewGuid().ToString('N'))
+
+foreach ($varName in @('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'RESTIC_REPOSITORY', 'RESTIC_PASSWORD', 'BACKUP_PASSPHRASE')) {
+  if (-not (Get-Item -Path "Env:$varName" -ErrorAction SilentlyContinue)?.Value) {
+    throw "Eksik ortam değişkeni: $varName"
+  }
+}
+
+# 1. R2 üzerindeki en güncel snapshot içinden `.enc` yedeklerini yerel klasöre çek
+$StageRestore = Join-Path 'C:\er-sat-verify-tmp' ('r2-pull-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $StageRestore -Force | Out-Null
+
+try {
+  & restic --no-lock restore latest --target $StageRestore --include '*.enc'
+  if ($LASTEXITCODE -ne 0) {
+    throw "restic restore başarısız oldu (kod: $LASTEXITCODE)."
+  }
+
+  $PulledFiles = Get-ChildItem -Path $StageRestore -Filter 'er-sat-backup-*.enc' -Recurse -File |
+    Sort-Object LastWriteTimeUtc -Descending
+
+  if (-not $PulledFiles) {
+    throw 'R2 snapshot içinde er-sat-backup-*.enc dosyası bulunamadı.'
+  }
+
+  foreach ($file in $PulledFiles) {
+    $dest = Join-Path $BackupDir $file.Name
+    if (-not (Test-Path -LiteralPath $dest)) {
+      Copy-Item -LiteralPath $file.FullName -Destination $dest
+    }
+  }
+
+  # 2. En güncel .enc dosyasını izole geçici klasörde tam replay() + integrity_check ile doğrula
+  $LatestLocal = Get-ChildItem -Path $BackupDir -Filter 'er-sat-backup-*.enc' -File |
+    Sort-Object LastWriteTimeUtc -Descending |
+    Select-Object -First 1
+
+  New-Item -ItemType Directory -Path $VerifyTemp -Force | Out-Null
+  & node (Join-Path $RepoRoot 'scripts\backup-bundle.mjs') restore `
+    --encrypted-file $LatestLocal.FullName `
+    --passphrase-env BACKUP_PASSPHRASE `
+    --target-dir $VerifyTemp `
+    --temp-dir $VerifyTemp
+
+  if ($LASTEXITCODE -ne 0) {
+    throw "backup-bundle.mjs restore doğrulaması başarısız (kod: $LASTEXITCODE)."
+  }
+
+  Write-Host "Yerel çekme ve doğrulama başarılı: $($LatestLocal.Name)"
+}
+finally {
+  if (Test-Path -LiteralPath $StageRestore) {
+    Remove-Item -LiteralPath $StageRestore -Recurse -Force
+  }
+  if (Test-Path -LiteralPath $VerifyTemp) {
+    Remove-Item -LiteralPath $VerifyTemp -Recurse -Force
+  }
+}
