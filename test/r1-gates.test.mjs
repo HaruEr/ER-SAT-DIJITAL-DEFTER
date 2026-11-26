@@ -72,6 +72,7 @@ async function createOwnerApp({ url = 'http://127.0.0.1:4317/#v=overview', failC
   const dom = new JSDOM(indexHtml, { url, runScripts: 'outside-only' });
   const { window } = dom;
   const document = window.document;
+  window.localStorage.setItem('defter-workspace', 'demo');
   const prevGlobals = {
     window: globalThis.window,
     document: globalThis.document,
@@ -618,6 +619,7 @@ test('R1 checkout.js: beforeunload protects dirty/pending/other-op drafts withou
   const dom = new JSDOM(checkoutHtml, { url: 'http://127.0.0.1/checkout', runScripts: 'outside-only' });
   const { window } = dom;
   const { document } = window;
+  if (document.getElementById('workspace')) document.getElementById('workspace').value = 'demo';
   Object.defineProperty(window.crypto, 'randomUUID', { value: randomUUID });
   window.HTMLElement.prototype.scrollIntoView = () => {};
 
@@ -741,6 +743,7 @@ test('R1 checkout.js: dirty-only #logout clears drafts and pagehide does not re-
   const dom = new JSDOM(checkoutHtml, { url: 'http://127.0.0.1/checkout', runScripts: 'outside-only' });
   const { window } = dom;
   const { document } = window;
+  if (document.getElementById('workspace')) document.getElementById('workspace').value = 'demo';
   Object.defineProperty(window.crypto, 'randomUUID', { value: randomUUID });
   window.HTMLElement.prototype.scrollIntoView = () => {};
 

@@ -171,6 +171,7 @@ async function createOwnerApp({
   const dom = new JSDOM(indexHtml, { url, runScripts: 'outside-only' });
   const { window } = dom;
   const { document } = window;
+  window.localStorage.setItem('defter-workspace', 'demo');
   Object.defineProperty(window.crypto, 'randomUUID', { value: randomUUID });
   window.HTMLElement.prototype.scrollIntoView = () => {};
   window.confirm = () => confirmResult;
@@ -328,6 +329,7 @@ async function createEmployeeCheckout({
   const dom = new JSDOM(checkoutHtml, { url: 'http://127.0.0.1:4317/checkout', runScripts: 'outside-only' });
   const { window } = dom;
   const { document } = window;
+  if (document.getElementById('workspace')) document.getElementById('workspace').value = 'demo';
   Object.defineProperty(window.crypto, 'randomUUID', { value: randomUUID });
   window.HTMLElement.prototype.scrollIntoView = () => {};
 
