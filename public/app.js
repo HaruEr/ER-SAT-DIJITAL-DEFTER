@@ -79,13 +79,13 @@ const defaultDraftStore = {
 function getDraftStore() {
   return (typeof window !== 'undefined' && window.DefterDraftStore) || (typeof globalThis !== 'undefined' && globalThis.DefterDraftStore) || defaultDraftStore;
 }
-function pendingKeyForWorkspace(selected = (typeof workspace !== 'undefined' ? workspace : 'demo')) {
+function pendingKeyForWorkspace(selected = (typeof workspace !== 'undefined' ? workspace : 'dukkan')) {
   const store = getDraftStore();
   const actorId = currentActorId();
   return store.makeKey({ actorId, workspace: selected, scope: 'retail', type: 'pending' });
 }
 function readPending() {
-  const ws = typeof workspace !== 'undefined' ? workspace : (typeof localStorage !== 'undefined' && localStorage.getItem('defter-workspace') === 'dukkan' ? 'dukkan' : 'demo');
+  const ws = typeof workspace !== 'undefined' ? workspace : (typeof localStorage !== 'undefined' && localStorage.getItem('defter-workspace') === 'demo' ? 'demo' : 'dukkan');
   const store = getDraftStore();
   const pKey = pendingKeyForWorkspace(ws);
   const stored = store.getPending(pKey);
@@ -109,7 +109,7 @@ let state, view = 'overview', transactionTab = 'sale', detailId = null, busy = f
 const DETAIL_HASH_VIEWS = new Set(['accounts', 'stocks', 'suppliers', 'orders']);
 let busyControls = new Map();
 let recoveryGeneration = 0;
-let workspace = localStorage.getItem('defter-workspace') === 'dukkan' ? 'dukkan' : 'demo';
+let workspace = localStorage.getItem('defter-workspace') === 'demo' ? 'demo' : 'dukkan';
 let pending = readPending();
 const journalFilterMemory = new Map();
 const workbenchMemory = new Map();

@@ -30,7 +30,7 @@ test('known absent record is queried before same-key POST',async t=>{
  const posts=f.calls.filter(c=>c.path==='/api/command');assert.equal(posts.length,2);assert.equal(posts[0].body,posts[1].body);assert.ok(f.calls.findIndex(c=>c.path==='/api/journal')<f.calls.lastIndexOf(posts[1]));assert.equal(f.repo.state().balances.nakit,200);
 });
 test('failed lookup keeps uncertain envelope and never resends',async t=>{
- const f=await fixture(t);f.failLookup();f.w.document.querySelector('#retry').click();await tick();await tick();assert.equal(f.calls.filter(c=>c.path==='/api/command').length,1);assert.equal(f.w.document.querySelector('#retry-bar').hidden,false);assert.ok(f.w.sessionStorage.getItem('defter-pending-demo'));
+ const f=await fixture(t);f.failLookup();f.w.document.querySelector('#retry').click();await tick();await tick();assert.equal(f.calls.filter(c=>c.path==='/api/command').length,1);assert.equal(f.w.document.querySelector('#retry-bar').hidden,false);assert.ok(f.w.sessionStorage.getItem('defter-pending-dukkan'));
 });
 test('manual refresh reconciles committed ID without retrying mutation',async t=>{
  const f=await fixture(t);await f.w.__test.refresh();assert.equal(f.calls.filter(c=>c.path==='/api/command').length,1);assert.ok(f.calls.some(c=>c.path==='/api/journal'));assert.equal(f.w.document.querySelector('#retry-bar').hidden,true);
@@ -39,7 +39,7 @@ for(const mode of ['denied','revision','actor'])test(mode+' lookup preserves pen
  const f=await fixture(t),original=f.w.fetch;
  if(mode==='actor')f.w.DefterSession={current:()=>({token:'synthetic',actor:{id:'different-owner'}})};
  f.w.fetch=async(url,options)=>{const path=new URL(url,f.w.location.href).pathname;if(mode==='denied'&&path==='/api/journal')return {ok:false,status:403,json:async()=>({error:'Erişim reddedildi'})};const response=await original(url,options);if(mode==='revision'&&path==='/api/state'){const state=await response.json();return {...response,json:async()=>({...state,revision:state.revision+1})};}return response;};
- f.w.document.querySelector('#retry').click();await tick();await tick();assert.equal(f.calls.filter(c=>c.path==='/api/command').length,1);assert.equal(f.w.document.querySelector('#retry-bar').hidden,false);assert.ok(f.w.sessionStorage.getItem('defter-pending-demo'));
+ f.w.document.querySelector('#retry').click();await tick();await tick();assert.equal(f.calls.filter(c=>c.path==='/api/command').length,1);assert.equal(f.w.document.querySelector('#retry-bar').hidden,false);assert.ok(f.w.sessionStorage.getItem('defter-pending-dukkan'));
 });
 test('refresh of absent pending ID performs no write',async t=>{
  const f=await fixture(t,false);await f.w.__test.refresh();assert.equal(f.calls.filter(c=>c.path==='/api/command').length,1);assert.equal(f.w.document.querySelector('#retry-bar').hidden,false);assert.equal(f.repo.state().balances.nakit,0);

@@ -536,6 +536,7 @@ function attachLiveFetchPart2(window, base, token, interceptor = null) {
 async function mountOwnerPart2(srv, { url = 'http://127.0.0.1:4317/owner#v=suppliers', seededStorage = {}, fetchInterceptor = null } = {}) {
   const dom = new JSDOM(indexHtml, { url, runScripts: 'outside-only' });
   const { window } = dom;
+  window.localStorage.setItem('defter-workspace', 'demo');
   Object.defineProperty(window.crypto, 'randomUUID', { value: randomUUID });
   window.HTMLElement.prototype.scrollIntoView = () => {};
   window.confirm = () => true;
@@ -580,6 +581,7 @@ async function mountOwnerPart2(srv, { url = 'http://127.0.0.1:4317/owner#v=suppl
 async function mountCheckoutPart2(srv, { seededStorage = {}, fetchInterceptor = null } = {}) {
   const dom = new JSDOM(checkoutHtml, { url: 'http://127.0.0.1:4317/checkout', runScripts: 'outside-only' });
   const { window } = dom;
+  if (window.document.getElementById('workspace')) window.document.getElementById('workspace').value = 'demo';
   Object.defineProperty(window.crypto, 'randomUUID', { value: randomUUID });
   window.HTMLElement.prototype.scrollIntoView = () => {};
   for (const [k, v] of Object.entries(seededStorage)) window.sessionStorage.setItem(k, v);

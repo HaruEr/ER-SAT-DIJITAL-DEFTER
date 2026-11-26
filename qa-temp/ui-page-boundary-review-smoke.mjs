@@ -22,6 +22,7 @@ async function fixture() {
   }
   const dom = new JSDOM(readFileSync(new URL('../public/index.html', import.meta.url), 'utf8'), { url: 'http://127.0.0.1:4317/', runScripts: 'outside-only' });
   const w = dom.window, d = w.document, commands = [];
+  w.localStorage.setItem('defter-workspace', 'demo');
   Object.defineProperty(w.crypto, 'randomUUID', { value: randomUUID });
   let failNext = null;
   w.fetch = async (url, options = {}) => {

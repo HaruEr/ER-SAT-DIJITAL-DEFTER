@@ -592,6 +592,7 @@ test('R1.4: Employee GET /api/checkout and POST /api/command never leak store ba
 
 test('R1.4: Employee checkout UI notification channel restricts status messages to operational confirmation and suppresses administrative financial data', async () => {
   const dom = new JSDOM(checkoutHtml, { url: 'http://127.0.0.1:4317/checkout', runScripts: 'outside-only' });
+  if (dom.window.document.getElementById('workspace')) dom.window.document.getElementById('workspace').value = 'demo';
   const pendingData = {
     envelope: { id: 'sale-tx-991', revision: 3, command: { type: 'sale', date: '2026-11-16' } },
     kind: 'trade',

@@ -20,6 +20,7 @@ async function fixture({ damaged = false } = {}) {
   const controller = { usable: !damaged, mode: 'success', delay: null, calls: [], file: null, stateReads: 0, stateFailure: null, failedStateStatus: 500 };
   const dom = new JSDOM(html, { url: 'http://127.0.0.1:4317/', runScripts: 'outside-only' });
   const { window } = dom, document = window.document;
+  window.localStorage.setItem('defter-workspace', 'demo');
   window.fetch = async (url, options) => {
     const selected = new URL(url, window.location.href), route = selected.pathname, workspace = selected.searchParams.get('workspace');
     const ok = value => ({ ok: true, status: 200, json: async () => value });

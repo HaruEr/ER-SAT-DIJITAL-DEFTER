@@ -4,7 +4,7 @@ const normalized = value => value.toLocaleLowerCase('tr-TR').normalize('NFD').re
 const units = { TL:[100,2,'TL'],USD:[100,2,'USD'],EUR:[100,2,'EUR'],HAS:[1000,3,'has gr'],SILVER:[1000,3,'saf gümüş gr'],GRAM:[1000,3,'gr'],ADET:[1,0,'adet'] };
 function amount(value, unit = 'TL') { const [scale,digits,label] = units[unit] || [100,2,unit]; return new Intl.NumberFormat('tr-TR',{minimumFractionDigits:digits,maximumFractionDigits:digits}).format(value/scale)+' '+label; }
 function dateLabel(value) { return value ? new Date(value+'T12:00:00').toLocaleDateString('tr-TR',{day:'numeric',month:'long',year:'numeric'}) : 'Açılış bekleniyor'; }
-let workspace='demo', view='overview', data=null, sequence=0, busy=false, journalPage=null;
+let workspace='dukkan', view='overview', data=null, sequence=0, busy=false, journalPage=null;
 
 
 // Session-only display context, isolated per ledger. No persisted business data.

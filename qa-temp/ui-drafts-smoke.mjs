@@ -27,6 +27,7 @@ async function fixture() {
   for (const repo of Object.values(repos)) repo.execute({ id: randomUUID(), revision: 0, command: { type: 'opening', date: '2026-10-28', balances: Object.fromEntries(INITIAL_ACCOUNTS.filter(a => !a.retired).map(a => [a.id, a.id === 'nakit' ? '10000' : a.id === 'gramToplam' ? '20' : '0'])) } });
   const dom = new JSDOM(html, { url: 'http://127.0.0.1:4317/', runScripts: 'outside-only' });
   const { window } = dom, document = window.document, commands = [];
+  window.localStorage.setItem('defter-workspace', 'demo');
   Object.defineProperty(window.crypto, 'randomUUID', { value: randomUUID });
   const control = { fail: false };
   window.fetch = async (url, options) => {
@@ -55,7 +56,7 @@ check('sale draft survives navigation, operation changes and explicit refresh wi
   c.document.querySelector('[data-tab="purchase"]').click(); c.document.querySelector('[data-tab="sale"]').click();
   assert.equal(c.document.querySelector('[data-item-field="quantity"]').value, '2');
   c.document.querySelector('#refresh').click(); await tick(); assert.equal(c.document.querySelector('#f-note').value, 'Satış taslağı');
-  assert.deepEqual({ ...c.window.localStorage }, { 'defter-theme': 'light' }, 'Only the display preference may persist; no draft fields'); verifyControlledDraftStorage(c.window.sessionStorage);
+  assert.deepEqual({ ...c.window.localStorage }, { 'defter-theme': 'light', 'defter-workspace': 'demo' }, 'Only the display preference may persist; no draft fields'); verifyControlledDraftStorage(c.window.sessionStorage);
 });
 check('dynamic purchase products and HAS payment rows survive round trip', async c => {
   const repo = c.repos.demo; repo.execute({ id: randomUUID(), revision: repo.state().revision, command: { type: 'fundAccount', date: repo.state().date, name: 'Has kasa', unit: 'HAS', opening: '20', physical: true } });
@@ -139,7 +140,7 @@ check('routed account cannot silently validate a sale draft already stale before
 });
 check('leaving a dirty page warns without persisting draft content', async c => {
   c.tab('sale'); c.set('#f-note', 'Yalnız RAM'); const event = new c.window.Event('beforeunload', { cancelable: true }); c.window.dispatchEvent(event);
-  assert.equal(event.defaultPrevented, true); assert.deepEqual({ ...c.window.localStorage }, { 'defter-theme': 'light' }, 'No draft payload may persist'); verifyControlledDraftStorage(c.window.sessionStorage);
+  assert.equal(event.defaultPrevented, true); assert.deepEqual({ ...c.window.localStorage }, { 'defter-theme': 'light', 'defter-workspace': 'demo' }, 'No draft payload may persist'); verifyControlledDraftStorage(c.window.sessionStorage);
 });
 check('restore is blocked until current workspace drafts are explicitly discarded', async c => {
   c.tab('sale'); c.set('#f-note', 'Korunacak taslak'); c.nav('backup');

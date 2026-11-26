@@ -14,6 +14,7 @@ const dom = new JSDOM(readFileSync(new URL('../public/index.html', import.meta.u
   url: 'http://127.0.0.1:4317/', runScripts: 'outside-only'
 });
 const { window } = dom;
+window.localStorage.setItem('defter-workspace', 'demo');
 Object.defineProperty(window.crypto, 'randomUUID', { value: randomUUID });
 let backupFailure = 'Gün kapandı ve kayıtlar SQLite’a işlendi; geçmiş desteklenen 64 MiB JSON yedek sınırını aşıyor. Bu geçmiş için ayrı kurtarma desteği gerekir; kayıtları silmeyin veya kaynak veritabanını değiştirmeyin.';
 let restores = 0;

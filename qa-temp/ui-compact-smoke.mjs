@@ -30,6 +30,7 @@ async function fixture(){
     return {...full,view:'compact',journal:full.journal.slice(-4),overview:{todaysCount:today.length,revenue:today.reduce((n,e)=>n+(e.meta.revenue||0),0),expenses:today.reduce((n,e)=>n+(e.meta.expense||0),0),salesCash:sales.flatMap(e=>e.entries).filter(entry=>entry.accountId==='nakit').reduce((n,e)=>n+e.delta,0),closingCount:full.closings.length},journalMeta:{total:full.journal.length,totalEntries:full.journal.reduce((n,e)=>n+e.entries.length,0)}};
   }
   const dom=new JSDOM(html,{url:'http://127.0.0.1:4317/',runScripts:'outside-only'}),{window}=dom,document=window.document;
+  window.localStorage.setItem('defter-workspace','demo');
   Object.defineProperty(window.crypto,'randomUUID',{value:randomUUID});
   const controller={delays:new Map(),overlap:false,native:false},calls=[];
   window.fetch=async(url,options)=>{

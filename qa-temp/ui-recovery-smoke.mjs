@@ -29,6 +29,7 @@ async function fixture({ pending = false, committedPending = false } = {}) {
   if (committedPending) repo.db.exec('UPDATE meta SET revision=3 WHERE id=1');
   const dom = new JSDOM(html, { url: 'http://127.0.0.1:4317/', runScripts: 'outside-only' });
   const { window } = dom, document = window.document;
+  window.localStorage.setItem('defter-workspace', 'demo');
   if (pending || committedPending) window.sessionStorage.setItem('defter-pending-demo', JSON.stringify(pendingEnvelope));
   const calls = { metadata: 0, restore: 0, state: 0, command: 0, commandStatus: null };
   const controller = { metadata: { workspace: 'demo', revision: 0, canRestore: true }, metadataDelay: null, restoreDelay: null, mode: 'success', usable: false };
