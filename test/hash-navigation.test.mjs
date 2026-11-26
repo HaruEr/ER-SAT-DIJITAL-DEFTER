@@ -36,6 +36,7 @@ async function createAppEnv(url = 'http://127.0.0.1:4317/') {
   const dom = new JSDOM(indexHtml, { url, runScripts: 'outside-only' });
   const { window } = dom;
   const document = window.document;
+  window.localStorage.setItem('defter-workspace', 'demo');
   Object.defineProperty(window.crypto, 'randomUUID', { value: randomUUID });
 
   const postedCommands = [];
@@ -266,6 +267,7 @@ test('Hash navigation: pre-seeded pending envelope blocks popstate navigation an
   const dom = new JSDOM(indexHtml, { url: 'http://127.0.0.1:4317/#v=transaction', runScripts: 'outside-only' });
   const { window } = dom;
   const document = window.document;
+  window.localStorage.setItem('defter-workspace', 'demo');
   try {
     Object.defineProperty(window.crypto, 'randomUUID', { value: randomUUID });
     window.HTMLElement.prototype.scrollIntoView = () => {};

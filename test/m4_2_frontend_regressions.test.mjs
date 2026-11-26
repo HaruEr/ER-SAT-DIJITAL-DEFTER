@@ -179,6 +179,7 @@ async function createOwnerApp(t, {
   const dom = new JSDOM(indexHtml, { url, runScripts: 'outside-only' });
   const { window } = dom;
   const { document } = window;
+  window.localStorage.setItem('defter-workspace', 'demo');
   Object.defineProperty(window.crypto, 'randomUUID', { value: randomUUID });
   window.HTMLElement.prototype.scrollIntoView = () => {};
   window.confirm = () => true;
@@ -310,6 +311,7 @@ async function createEmployeeCheckout(t, { repoOverride = null, withCodec = true
   const dom = new JSDOM(checkoutHtml, { url: 'http://127.0.0.1:4317/checkout', runScripts: 'outside-only' });
   const { window } = dom;
   const { document } = window;
+  if (document.getElementById('workspace')) document.getElementById('workspace').value = 'demo';
   Object.defineProperty(window.crypto, 'randomUUID', { value: randomUUID });
   window.HTMLElement.prototype.scrollIntoView = () => {};
 
@@ -1277,7 +1279,7 @@ test('M2-F20: All data tables in app.js, suppliers.js, and reports.js expose exp
   const repDoc = repWin.document;
   repWin.HTMLElement.prototype.scrollIntoView = () => {};
   const repState = app.repos.demo.state();
-  const repSummary = { ...workdaySummary(repState, repState.date), workspace: 'demo', revision: repState.revision };
+  const repSummary = { ...workdaySummary(repState, repState.date), workspace: 'dukkan', revision: repState.revision };
   repSummary.accounts = repSummary.accounts.slice(0, 5).map(row => ({ ...row, name: row.accountId }));
   repWin.fetch = async reqUrl => {
     const p = new URL(String(reqUrl), 'http://127.0.0.1:4318');
@@ -1286,7 +1288,7 @@ test('M2-F20: All data tables in app.js, suppliers.js, and reports.js expose exp
         ok: true,
         status: 200,
         json: async () => ({
-          workspace: 'demo',
+          workspace: 'dukkan',
           revision: repState.revision,
           initialized: true,
           date: repState.date,

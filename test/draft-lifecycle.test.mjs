@@ -52,6 +52,8 @@ async function createEnvironment({
   const dom = new JSDOM(html, { url, runScripts: 'outside-only' });
   const { window } = dom;
   const document = window.document;
+  window.localStorage.setItem('defter-workspace', workspace);
+  if (document.getElementById('workspace')) document.getElementById('workspace').value = workspace;
 
   Object.defineProperty(window.crypto, 'randomUUID', { value: randomUUID });
 
