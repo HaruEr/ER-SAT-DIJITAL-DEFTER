@@ -33,7 +33,7 @@ const stockOrder = ['bilezikAdet','ceyrek','yarim','ziynet','cumhuriyet','resat'
 for (const a of INITIAL_ACCOUNTS) a.displayOrder = stockOrder.includes(a.id) ? stockOrder.indexOf(a.id) : 100;
 
 const editableTypes = new Set(['sale', 'purchase', 'movement', 'collection', 'transfer', 'settlement', 'stock']);
-const optionalNoteTypes = new Set(['sale', 'purchase', 'collection', 'transfer', 'settlement', 'stock', 'movement']);
+const optionalNoteTypes = new Set(['sale', 'purchase', 'collection', 'transfer', 'currencyExchange', 'settlement', 'stock', 'movement']);
 const scrapAdvanceTypes = new Set(['scrapAdvanceTransfer', 'scrapAdvanceUndo']);
 const orderTypes = new Set(['customerOrder', 'orderUpdate', 'orderAdvance', 'orderRefund', 'orderCancel', ...scrapAdvanceTypes]);
 export const ORDER_CATEGORIES = new Set(['bilezik', 'urun', 'sarrafiye', 'gram']);
@@ -71,7 +71,15 @@ function usesAutoSupplierUnit(command) {
     || (typeof command.fromAccountId === 'string' && command.fromAccountId.startsWith('auto-unit:'))
     || (typeof command.toAccountId === 'string' && command.toAccountId.startsWith('auto-unit:'));
 }
+function usesV19OrderFeature(command) {
+  if (!command || typeof command !== 'object') return false;
+  if (command.type === 'customerOrder' && command.initialAdvance && command.initialAdvance.carryover === true) return true;
+  if (command.type === 'orderAdvance' && command.carryover === true) return true;
+  if (command.type === 'orderRefund' && command.carryoverVoid === true) return true;
+  return false;
+}
 export function eventVersion(command, state) {
+  if (command?.type === 'currencyExchange' || command?.type === 'supplierOpening' || (command?.type === 'movement' && command?.category === 'Tamir / Hizmet Geliri') || usesV19OrderFeature(command)) return 19;
   if (isSupplierCommand(command)) return usesAutoSupplierUnit(command) ? 18 : 17;
   if (['close', 'stocktake'].includes(command.type) && state?.accounts?.some(a => !a.retired && a.physical && a.unit === 'SILVER')) return 18;
   if (command.type === 'fundAccount' && command.autoSupplierUnits === true) return 18;
@@ -433,8 +441,8 @@ function prepareOrder(state, event) {
   const fields = {
     customerOrder: ['type','date','customerId','description','category','productAccountId','weightAccountId','orderUnit','targetQuantity','deliveryDate','targetSpec','estimatedTotalTL','initialAdvance'],
     orderUpdate: ['type','date','orderId','category','productAccountId','weightAccountId','orderUnit','targetQuantity','deliveryDate','targetSpec','estimatedTotalTL','description','note'],
-    orderAdvance: ['type','date','orderId','accountId','amountTL','receivedQuantity','creditedQuantity','weightAccount','weight','note'],
-    orderRefund: ['type','date','orderId','advanceId','accountId','amountTL','refundedQuantity','creditedQuantity','weightAccount','weight','note'],
+    orderAdvance: ['type','date','orderId','accountId','amountTL','receivedQuantity','creditedQuantity','weightAccount','weight','note','carryover'],
+    orderRefund: ['type','date','orderId','advanceId','accountId','amountTL','refundedQuantity','creditedQuantity','weightAccount','weight','note','carryoverVoid'],
     scrapAdvanceTransfer: ['type','date','orderId','purchaseId','customerId','amountTL','note'],
     scrapAdvanceUndo: ['type','date','orderId','advanceId','amountTL','note'],
     orderCancel: ['type','date','orderId','note']
@@ -483,8 +491,40 @@ function prepareOrder(state, event) {
       revenue: 0
     };
     if (c.initialAdvance !== undefined && c.initialAdvance !== null) {
-      if (typeof c.initialAdvance !== 'object' || Array.isArray(c.initialAdvance)
-        || Object.keys(c.initialAdvance).some(k => !['accountId','receivedQuantity','creditedQuantity','weightAccount','weight'].includes(k))) {
+      if (typeof c.initialAdvance !== 'object' || Array.isArray(c.initialAdvance)) {
+        fail('Açılış kaporası bilgileri geçersiz.');
+      }
+      if (c.initialAdvance.carryover === true) {
+        if (Object.keys(c.initialAdvance).some(k => !['carryover', 'creditedQuantity', 'note'].includes(k))) {
+          fail('Devir kaporasında yalnızca siparişe sayılan miktar ve açıklama girilebilir; kasa/stok seçilmez.');
+        }
+        const creditedQty = quantity(c.initialAdvance.creditedQuantity, orderUnit, { zero: false });
+        if (!Number.isSafeInteger(creditedQty) || creditedQty <= 0 || creditedQty > 1e12) fail('Siparişe sayılan kapora miktarı geçersiz.');
+        const carryNote = text(c.initialAdvance.note, 'Devir kapora açıklaması');
+        order.advances.push({
+          id: event.id,
+          unit: orderUnit,
+          receivedTL: orderUnit === 'TL' ? creditedQty : 0,
+          refundedTL: 0,
+          appliedTL: 0,
+          creditedQuantity: creditedQty,
+          refundedQuantity: 0,
+          appliedQuantity: 0,
+          carryover: true,
+          note: carryNote
+        });
+        order.availableQuantity = creditedQty;
+        order.availableTL = orderUnit === 'TL' ? creditedQty : 0;
+        Object.assign(meta, {
+          advanceId: event.id,
+          carryover: true,
+          creditedQuantity: creditedQty,
+          note: carryNote,
+          ...(orderUnit === 'TL' ? { amountTL: creditedQty } : {})
+        });
+        return { orders: [...orders, order], entries, label: 'Müşteri siparişi (devir kapora)', meta };
+      }
+      if (Object.keys(c.initialAdvance).some(k => !['accountId','receivedQuantity','creditedQuantity','weightAccount','weight'].includes(k))) {
         fail('Açılış kaporası bilgileri geçersiz.');
       }
       const asset = orderAssetAccount(state, c.initialAdvance.accountId);
@@ -651,6 +691,34 @@ function prepareOrder(state, event) {
     order.status = 'fulfilled';
     order.saleId = event.id;
   } else if (c.type === 'orderAdvance') {
+    if (c.carryover === true) {
+      if (['accountId', 'amountTL', 'receivedQuantity', 'weightAccount', 'weight'].some(k => c[k] !== undefined && c[k] !== '')) {
+        fail('Devir kaporasında kasa, banka veya stok hesabı seçilmez.');
+      }
+      const creditedQty = quantity(c.creditedQuantity, orderUnit, { zero: false });
+      const carryNote = text(c.note, 'Devir kapora açıklaması');
+      order.availableQuantity += creditedQty;
+      if (orderUnit === 'TL') order.availableTL += creditedQty;
+      if (!Number.isSafeInteger(order.availableQuantity) || order.availableQuantity > 1e12) fail('Avans toplamı sınırı aşıyor.');
+      order.advances.push({
+        id: event.id,
+        unit: orderUnit,
+        receivedTL: orderUnit === 'TL' ? creditedQty : 0,
+        refundedTL: 0,
+        appliedTL: 0,
+        creditedQuantity: creditedQty,
+        refundedQuantity: 0,
+        appliedQuantity: 0,
+        carryover: true,
+        note: carryNote
+      });
+      label = 'Sipariş devir kaporası';
+      meta.advanceId = event.id;
+      meta.carryover = true;
+      meta.creditedQuantity = creditedQty;
+      meta.note = carryNote;
+      if (orderUnit === 'TL') meta.amountTL = creditedQty;
+    } else {
     const isV18 = Object.hasOwn(c, 'receivedQuantity') || Object.hasOwn(c, 'creditedQuantity') || orderUnit !== 'TL';
     if (!isV18) {
       const fund = moneyAccount(state, c.accountId);
@@ -699,9 +767,34 @@ function prepareOrder(state, event) {
       if (orderUnit === 'TL') meta.amountTL = creditedQty;
       if (c.note) meta.note = optionalText(c.note, 'Kapora açıklaması');
     }
+    }
   } else {
-    const isV18 = Object.hasOwn(c, 'refundedQuantity') || Object.hasOwn(c, 'creditedQuantity') || orderUnit !== 'TL';
     const advance = receipt(c.advanceId);
+    if (c.carryoverVoid === true) {
+      if (!advance.carryover) fail('Kasa etkisiz iptal yalnızca sistem öncesi devir kaporası makbuzlarında kullanılabilir.');
+      if (['accountId', 'amountTL', 'refundedQuantity', 'weightAccount', 'weight'].some(k => c[k] !== undefined && c[k] !== '')) {
+        fail('Devir kaporası iptalinde kasa, banka veya stok hesabı girilmez.');
+      }
+      const rem = remaining(advance);
+      const creditedQty = c.creditedQuantity !== undefined && c.creditedQuantity !== ''
+        ? quantity(c.creditedQuantity, orderUnit, { zero: false })
+        : rem;
+      if (creditedQty <= 0 || creditedQty > rem) fail('İptal miktarı makbuzdaki kullanılmamış devir tutarını aşıyor.');
+      const voidNote = text(c.note, 'Devir iptal gerekçesi');
+      advance.refundedQuantity = (advance.refundedQuantity ?? advance.refundedTL ?? 0) + creditedQty;
+      if (orderUnit === 'TL') {
+        advance.refundedTL = (advance.refundedTL || 0) + creditedQty;
+        order.availableTL -= creditedQty;
+      }
+      order.availableQuantity -= creditedQty;
+      label = 'Sipariş devir kaporası iptali';
+      meta.advanceId = advance.id;
+      meta.carryoverVoid = true;
+      meta.creditedQuantity = creditedQty;
+      meta.note = voidNote;
+      if (orderUnit === 'TL') meta.amountTL = creditedQty;
+    } else {
+    const isV18 = Object.hasOwn(c, 'refundedQuantity') || Object.hasOwn(c, 'creditedQuantity') || orderUnit !== 'TL';
     if (!isV18) {
       const fund = moneyAccount(state, c.accountId);
       if (fund.unit !== 'TL') fail('TL sipariş avansı için TL kasa veya banka seçin.');
@@ -740,6 +833,7 @@ function prepareOrder(state, event) {
       meta.creditedQuantity = creditedQty;
       if (orderUnit === 'TL') meta.amountTL = creditedQty;
       if (c.note) meta.note = optionalText(c.note, 'İade açıklaması');
+    }
     }
   }
   return { orders: orders.map(o => o === original ? order : o), meta, entries, label };
@@ -909,7 +1003,7 @@ export function priorScrapChoices(state, saleId, resolveParty = scrapCustomerRes
 }
 
 export function applyEvent(previous, event, replayContext, validationMode, exchangeAppliedTL = 0) {
-  if ((event?.schemaVersion === 17 && !isSupplierCommand(event?.command)) || (isSupplierCommand(event?.command) && ![17, 18].includes(event?.schemaVersion))) fail('Toptancı işlemi için geçerli olay sürümü gerekli.');
+  if ((event?.schemaVersion === 17 && !isSupplierCommand(event?.command)) || (isSupplierCommand(event?.command) && ![17, 18, 19].includes(event?.schemaVersion))) fail('Toptancı işlemi için geçerli olay sürümü gerekli.');
   if (event?.schemaVersion === 10) {
     // Validate optional data before applying any stock, cash or revision changes.
     if (![3, 5, 6, 7, 8, 11, 18].includes(event.tradeVersion) || !event.command) fail('Fiyatlı satışın temel olay sürümü geçersiz.');
@@ -940,8 +1034,8 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
   }
   if ((event.schemaVersion === 16) !== scrapAdvanceTypes.has(event.command.type)) fail('Hurda borcu avans aktarımı için geçerli olay sürümü gerekli.');
   if (event.schemaVersion === 16) event = { ...event, schemaVersion:11 };
-  const orderItem = (event.schemaVersion === 11 || (event.schemaVersion === 18 && orderFeature(event.command))) && usesInventory(event.command);
-  if ((event.schemaVersion === 11 || (event.schemaVersion === 18 && orderFeature(event.command))) && Object.hasOwn(event,'saleInventoryVersion') && (event.saleInventoryVersion !== 1 || !orderItem)) {
+  const orderItem = (event.schemaVersion === 11 || ([18, 19].includes(event.schemaVersion) && orderFeature(event.command))) && usesInventory(event.command);
+  if ((event.schemaVersion === 11 || ([18, 19].includes(event.schemaVersion) && orderFeature(event.command))) && Object.hasOwn(event,'saleInventoryVersion') && (event.saleInventoryVersion !== 1 || !orderItem)) {
     fail('Sipariş satışının tekil ürün sürümü geçersiz.');
   }
   // Early order-only ledgers had no serialized stock. The first combined writer
@@ -951,12 +1045,12 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
     if (!usesInventory(event.command)) fail('Tekil ürün için geçersiz olay sürümü.');
     event = { ...event, schemaVersion: event.command.type === 'saleReturn' ? 9 : financialVersion(event.command, s) };
   }
-  if (event.schemaVersion !== undefined && ![2, 3, 4, 5, 6, 7, 9, 11, 12, 14, 17, 18].includes(event.schemaVersion)) fail('Desteklenmeyen olay sürümü.');
-  if ((event.schemaVersion === 11 && !orderFeature(event.command)) || (orderTypes.has(event.command.type) && ![11, 18].includes(event.schemaVersion))) fail('Sipariş işlemi için güncel olay sürümü gerekli.');
-  if ((event.schemaVersion === 11 || (event.schemaVersion === 18 && orderFeature(event.command))) && event.audit?.actor?.role === 'employee') fail('Sipariş işlemi için yönetici gerekli.');
+  if (event.schemaVersion !== undefined && ![2, 3, 4, 5, 6, 7, 9, 11, 12, 14, 17, 18, 19].includes(event.schemaVersion)) fail('Desteklenmeyen olay sürümü.');
+  if ((event.schemaVersion === 11 && !orderFeature(event.command)) || (orderTypes.has(event.command.type) && ![11, 18, 19].includes(event.schemaVersion))) fail('Sipariş işlemi için güncel olay sürümü gerekli.');
+  if ((event.schemaVersion === 11 || ([18, 19].includes(event.schemaVersion) && orderFeature(event.command))) && event.audit?.actor?.role === 'employee') fail('Sipariş işlemi için yönetici gerekli.');
   if ((event.schemaVersion === 12) !== (event.command.type === 'linkScrapPurchase')) fail('Hurda alış bağlantısı için olay sürümü geçersiz.');
   if (event.schemaVersion === 9 && (event.command.type !== 'saleReturn' || !Object.hasOwn(event.command, 'outgoing'))) fail('Karma iade karşılıkları gerekli.');
-  if (![7, 9, 14, 17, 18].includes(event.schemaVersion) && supplierUnitFeature(event.command, s)) fail('Bağlı toptancı veya saf gümüş için güncel olay sürümü gerekli.');
+  if (![7, 9, 14, 17, 18, 19].includes(event.schemaVersion) && supplierUnitFeature(event.command, s)) fail('Bağlı toptancı veya saf gümüş için güncel olay sürümü gerekli.');
   if (event.schemaVersion === 7 && !supplierUnitFeature(event.command, s)) fail('Bu işlem için desteklenmeyen olay sürümü.');
   if (event.schemaVersion === 4 && !['close', 'settlement', 'saleReturn'].includes(event.command.type)) fail('Bu işlem için desteklenmeyen olay sürümü.');
   if (event.schemaVersion === 5 && legacyEventVersion(event.command, s) !== 5) fail('Bu işlem için desteklenmeyen olay sürümü.');
@@ -994,7 +1088,7 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
     const reversed = applyEvent(s, { ...event, id: `${event.id}:undo`, schemaVersion: 3, command: { type: 'reverse', date: c.date, originalId: c.originalId, note: reason } }, undefined, amendmentValidation);
     const replacement = { ...c.replacement, date: c.date };
     // v8 predates order and pricing metadata. Its replacement sale stays in the v8 dialect.
-    const revised = applyEvent(reversed, { ...event, schemaVersion: inventoryTagged ? 8 : event.schemaVersion === 7 ? financialVersion(replacement, reversed) : event.schemaVersion === 6 ? priorEventVersion(replacement, reversed) : legacyEventVersion(replacement, reversed), command: replacement }, undefined, amendmentValidation);
+    const revised = applyEvent(reversed, { ...event, schemaVersion: replacement.type === 'movement' && replacement.category === 'Tamir / Hizmet Geliri' ? 19 : inventoryTagged ? 8 : event.schemaVersion === 7 ? financialVersion(replacement, reversed) : event.schemaVersion === 6 ? priorEventVersion(replacement, reversed) : legacyEventVersion(replacement, reversed), command: replacement }, undefined, amendmentValidation);
     for (const a of revised.accounts) if (a.kind === 'asset' && revised.balances[a.id] < 0) fail(`${a.name}: yetersiz mevcut. Düzenleme bütünüyle reddedildi.`);
     checkReserved(revised);
     revised.journal.at(-2).meta.amendmentId = event.id;
@@ -1036,8 +1130,8 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
   } else {
     if (!s.initialized) fail('Önce başlangıç devrini onaylayın.');
     if (c.date !== s.date) fail('İşlem yalnız açık iş gününe yazılabilir. Ekranı yenileyin.');
-    if (event.schemaVersion === 11 || (event.schemaVersion === 18 && orderFeature(c))) orderChange = prepareOrder(s, event);
-    if (event.schemaVersion === 17 || (event.schemaVersion === 18 && isSupplierCommand(c))) {
+    if (event.schemaVersion === 11 || ([18, 19].includes(event.schemaVersion) && orderFeature(c))) orderChange = prepareOrder(s, event);
+    if (event.schemaVersion === 17 || ([18, 19].includes(event.schemaVersion) && isSupplierCommand(c))) {
       supplierChange = prepareSupplier(s,event,{stockLines,moneyAccount,partyProfile,optionalText,isReplay:Boolean(replayContext)});
       ({entries,meta,label} = supplierChange);
       if (supplierChange.addAccounts?.length) {
@@ -1295,7 +1389,7 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
       if (event.schemaVersion >= 3 && a.retired) fail('Eski gram altın hesabı yeni harekete kapalı.');
       if (event.schemaVersion >= 3 && a.id === 'gramToplam' && s.nominalUnconfirmed) fail('Önce gram altının mevcut toplamını açıkça onaylayın.');
       if (!['in', 'out'].includes(c.direction)) fail('Giriş veya çıkış seçin.');
-      if (!['Sermaye', 'İşletmeden çekiş', 'Stok girişi', 'Gider', 'Cari tahsilat/ödeme', 'Açılış düzeltmesi'].includes(c.category)) fail('Hareket nedeni geçersiz.');
+      if (!['Sermaye', 'İşletmeden çekiş', 'Stok girişi', 'Gider', 'Tamir / Hizmet Geliri', 'Cari tahsilat/ödeme', 'Açılış düzeltmesi'].includes(c.category)) fail('Hareket nedeni geçersiz.');
       const q = quantity(c.quantity, a.unit, { zero: false });
       if (c.category === 'Cari tahsilat/ödeme') fail('Cari işlemi için bağlı tahsilat/ödeme formunu kullanın.');
       if (event.schemaVersion >= 2 && c.category !== 'Açılış düzeltmesi' && ((a.pairedGroups?.length || 0) > 0 || getAccountIndex(s.accounts).pairedTargets.has(a.id))) fail('Bu ürün adet ve gram birlikte izlenir. Bağlı stok girişi/çıkışı formunu kullanın.');
@@ -1305,10 +1399,20 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
         if (event.schemaVersion >= 5) moneyAccount(s, a.id);
         if ((event.schemaVersion < 5 && !['nakit', 'banka'].includes(a.id)) || c.direction !== 'out') fail('Gider, kasa veya banka hesabından çıkış olmalı.');
       }
+      if (c.category === 'Tamir / Hizmet Geliri') {
+        if (event.schemaVersion !== 19) fail('Tamir / Hizmet Geliri için güncel olay sürümü gerekli.');
+        moneyAccount(s, a.id, true);
+        if (c.direction !== 'in') fail('Tamir / Hizmet Geliri yalnız kasa, banka veya POS girişi olmalı.');
+      }
       if (c.category === 'Sermaye' && (c.direction !== 'in' || a.id === 'pos')) fail('Sermaye, işletme varlığına giriş olmalı; POS tahsilatı değildir.');
       if (c.category === 'İşletmeden çekiş' && (c.direction !== 'out' || a.id === 'pos')) fail('İşletmeden çekiş varlık çıkışı olmalı; POS hareketi değildir.');
       entries = [{ accountId: a.id, delta: q * (c.direction === 'in' ? 1 : -1) }];
-      label = c.category; meta = { note: note('Gerekçe'), expense: c.category === 'Gider' && a.unit === 'TL' && c.direction === 'out' ? q : 0 };
+      label = c.category;
+      meta = {
+        note: note('Gerekçe'),
+        expense: c.category === 'Gider' && a.unit === 'TL' && c.direction === 'out' ? q : 0,
+        ...(c.category === 'Tamir / Hizmet Geliri' && a.unit === 'TL' && c.direction === 'in' ? { revenue: q } : {})
+      };
     } else if (c.type === 'collection') {
       if (event.schemaVersion === 6 || (event.schemaVersion === 7 && (Object.hasOwn(c, 'received') || Object.hasOwn(c, 'given')))) {
         noMixedPayments(c, ['items', 'target', 'direction', 'quantity']);
@@ -1342,6 +1446,35 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
       const q = quantity(c.quantity, from.unit, { zero: false });
       entries = [{ accountId: from.id, delta: -q }, { accountId: to.id, delta: q }];
       label = 'Kasa / banka transferi'; meta = { note: note('Transfer açıklaması'), revenue: 0 };
+    } else if (c.type === 'currencyExchange') {
+      if (event.schemaVersion !== 19) fail('Döviz işlemi için güncel olay sürümü gerekli.');
+      if (actor?.role === 'employee') fail('Döviz işlemi için yönetici gerekli.');
+      if (Object.keys(c).some(key => !['type', 'date', 'received', 'given', 'note'].includes(key))) fail('Döviz işleminde desteklenmeyen alan.');
+      if (!Array.isArray(c.received) || !c.received.length || c.received.length > 30 || !Array.isArray(c.given) || !c.given.length || c.given.length > 30) {
+        fail('Döviz işleminde en az 1, en çok 30 giren ve çıkan satır girin.');
+      }
+      const fxUnits = new Set();
+      const receivedLines = [], givenLines = [];
+      const readFxRows = (inputRows, sign, targetLines) => {
+        for (const row of inputRows) {
+          if (!row || typeof row !== 'object' || Array.isArray(row) || Object.keys(row).some(k => !['accountId', 'quantity'].includes(k))) {
+            fail('Döviz satırında yalnızca hesap ve miktar girilebilir.');
+          }
+          const a = moneyAccount(s, row.accountId, false);
+          if (a.id === 'pos' || ['GRAM', 'ADET', 'HAS', 'SILVER'].includes(a.unit)) {
+            fail('Döviz işleminde yalnızca para birimi (TL veya döviz) kasa/banka hesapları seçilebilir.');
+          }
+          const q = quantity(row.quantity, a.unit, { zero: false });
+          fxUnits.add(a.unit);
+          entries.push({ accountId: a.id, delta: sign * q });
+          targetLines.push({ accountId: a.id, unit: a.unit, quantity: q });
+        }
+      };
+      readFxRows(c.received, 1, receivedLines);
+      readFxRows(c.given, -1, givenLines);
+      if (fxUnits.size < 2) fail('Döviz işlemi farklı para birimleri arasında olmalı. Aynı birimde aktarım için Kasa / Banka Transferi kullanın.');
+      label = 'Döviz alış / satış';
+      meta = { receivedLines, givenLines, note: optionalText(c.note, 'Döviz işlem açıklaması'), revenue: 0 };
     } else if (c.type === 'settlement') {
       const gross = quantity(c.gross, 'TL', { zero: false }), fee = quantity(c.fee, 'TL');
       if (fee > gross) fail('Komisyon POS tutarından büyük olamaz.');
@@ -1361,7 +1494,7 @@ export function applyEvent(previous, event, replayContext, validationMode, excha
       }
       if ((s.customerOrders || []).some(order => order.advances.some(a => a.sourcePurchaseId === c.originalId && a.receivedTL > (a.returnedToPayableTL || 0)))) fail('Bu alıştan avansa ayrılmış tutar var. Kullanılmamış aktarımı geri alın; ödenmiş veya satışta kullanılmış tutarı önce bağlantılı işlemlerde kontrol edin.');
       if (original?.meta.orderId) fail('Siparişe bağlı işlem doğrudan ters çevrilemez.');
-      if (!original || !['sale', 'saleReturn', 'purchase', 'stock', 'movement', 'collection', 'transfer', 'settlement','linkScrapPurchase'].includes(original.type)) fail('Bu kayıt ters çevrilemez.');
+      if (!original || !['sale', 'saleReturn', 'purchase', 'stock', 'movement', 'collection', 'transfer', 'currencyExchange', 'settlement','linkScrapPurchase'].includes(original.type)) fail('Bu kayıt ters çevrilemez.');
       if (s.journal.some(x => x.type === 'reverse' && x.meta.originalId === original.id)) fail('İşlem zaten ters çevrilmiş.');
       if (original.type === 'sale' && activeSaleReturns(s, original.id).length) fail('Aktif iadesi bulunan satış bütünüyle ters çevrilemez. Önce bağlı iadeleri kontrol edin.');
       entries = original.entries.map(e => ({ ...e, delta: -e.delta }));

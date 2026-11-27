@@ -46,7 +46,7 @@ window.eval(readFileSync(new URL('../public/app.js', import.meta.url), 'utf8').r
 
 checks.push(['four clear categories, optional notes and hidden unused fields', async c => {
   c.tab('sale');
-  assert.equal(c.document.querySelectorAll('.transaction-primary [data-tab]').length, 4);
+  assert.equal(c.document.querySelectorAll('.transaction-primary [data-tab]').length, 5);
   assert.equal(c.document.querySelector('[data-tab="account"]'), null);
   assert.equal(c.document.querySelector('[data-tab="fund"]'), null);
   assert.equal(c.document.querySelector('#f-note').required, false);

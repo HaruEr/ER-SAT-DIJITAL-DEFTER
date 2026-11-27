@@ -6,7 +6,7 @@ import { applyEvent, emptyState, fail, validDate, currentCountPolicy, priorScrap
 
 export const LEDGER_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 const blankTotals = () => ({ todaysCount: 0, revenue: 0, expenses: 0, salesCash: 0, totalEntries: 0, items: [], flowByUnit: {} });
-const ordinaryMoneyFlow = entry => entry && (['sale','saleReturn','purchase','collection','orderAdvance','orderRefund','supplierPurchase','supplierPayment','supplierReturn'].includes(entry.type) || (entry.type === 'movement' && entry.label !== 'Açılış düzeltmesi'));
+const ordinaryMoneyFlow = entry => entry && (['sale','saleReturn','purchase','collection','orderAdvance','orderRefund','supplierPurchase','supplierPayment','supplierReturn','currencyExchange'].includes(entry.type) || (entry.type === 'movement' && entry.label !== 'Açılış düzeltmesi'));
 function financialRows(accounts, entries) {
   const byId = getAccountIndex(accounts).byId;
   return entries.flatMap(row => {
@@ -152,10 +152,10 @@ export function projectLedger(ledger, compact = false) {
   });
 }
 
-const types = new Set(['all', 'linkScrapPurchase', 'customerOrder', 'orderUpdate', 'orderAdvance', 'orderRefund', 'orderCancel', 'scrapAdvanceTransfer', 'scrapAdvanceUndo', 'opening', 'nominalOpening', 'account', 'accountUpdate', 'fundAccount', 'fundUpdate', 'stockAccount', 'stockUpdate', 'sale', 'saleReturn', 'purchase', 'stock', 'movement', 'collection', 'transfer', 'settlement', 'reverse', 'stocktake', 'close', 'registerItem', 'releaseItem', 'itemCostSource']);
-const supplierEventTypes = ['supplierFirm','supplierFirmUpdate','supplierUnit','supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierTransfer','supplierReturn','supplierReverse','supplierLegacyReceiptLink'];
+const types = new Set(['all', 'linkScrapPurchase', 'customerOrder', 'orderUpdate', 'orderAdvance', 'orderRefund', 'orderCancel', 'scrapAdvanceTransfer', 'scrapAdvanceUndo', 'opening', 'nominalOpening', 'account', 'accountUpdate', 'fundAccount', 'fundUpdate', 'stockAccount', 'stockUpdate', 'sale', 'saleReturn', 'purchase', 'stock', 'movement', 'collection', 'transfer', 'currencyExchange', 'settlement', 'reverse', 'stocktake', 'close', 'registerItem', 'releaseItem', 'itemCostSource']);
+const supplierEventTypes = ['supplierFirm','supplierFirmUpdate','supplierUnit','supplierOpening','supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierTransfer','supplierReturn','supplierReverse','supplierLegacyReceiptLink'];
 export const typeGroups = {
-  money: ['movement','transfer','settlement'],
+  money: ['movement','transfer','currencyExchange','settlement'],
   inventory: ['stock','stocktake','registerItem','releaseItem','itemCostSource'],
   setup: ['opening','nominalOpening','account','accountUpdate','fundAccount','fundUpdate','stockAccount','stockUpdate','close'],
   supplier: [...supplierEventTypes],

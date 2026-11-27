@@ -1,6 +1,6 @@
 const TASKS = [
   ['purchase','Ürün Al'],['payment','Ödeme Yap'],['offset','Hesap Mahsup Et'],
-  ['transfer','Firmalar Arası Virman'],['return','Ürün İade Et'],['history','Hareketleri İncele'],['statement','Ekstre / Mutabakat']
+  ['transfer','Firmalar Arası Virman'],['return','Ürün İade Et'],['opening','Devir / Açılış Bakiyesi'],['history','Hareketleri İncele'],['statement','Ekstre / Mutabakat']
 ];
 const STANDARD_UNITS = ['TL', 'USD', 'EUR', 'GBP', 'CHF', 'HAS', 'SILVER'];
 const isSupplierScrap = a => Boolean(a && (a.scrap || /^hurda\d+$/.test(a.id)) && a.id !== 'hurda24');
@@ -179,7 +179,7 @@ export function renderSupplierWorkspace(container, context) {
         subtitle: firm && kind !== 'create' ? firm.name : '',
         content: panel,
         size: modalSize,
-        closeOnBackdrop: true,
+        closeOnBackdrop: isReadTask,
         trigger: trigger || container.ownerDocument.activeElement,
         onClose: reason => {
           if (activeModal === modal) activeModal = null;
@@ -207,6 +207,9 @@ export function renderSupplierWorkspace(container, context) {
     if(context.onTask && handled!==false)taskCleanup=handled;
     else if(kind==='transfer'){
       taskCleanup=renderSupplierTransfer(panel,{...taskCtx,partyId:selectedId});
+    }
+    else if(kind==='opening'){
+      taskCleanup=renderSupplierOpening(panel,{...taskCtx,partyId:selectedId});
     }
     else if(['create','profile','reverse','unit','purchase','payment'].includes(kind)){
       const store=getDraftStore(),key=supplierDraftKey(context,kind,selectedId),legacyKey='supplier:draft:'+JSON.stringify([context.workspace||'default',selectedId||'',kind]);
@@ -379,6 +382,147 @@ function renderSupplierTransfer(panel, context) {
     }
   });
   return () => { destroyComboboxesIn(form); };
+}
+
+function renderSupplierOpening(panel, context) {
+  const { escape: esc, format, state, partyId } = context, doc = panel.ownerDocument;
+  const firm = state.supplierParties?.find(p => p.id === partyId);
+  const unitAccounts = firm ? allFirmUnitAccounts(firm) : [];
+  const form = doc.createElement('form');
+  form.dataset.supplierForm = 'opening';
+  form.dataset.kind = 'opening';
+  form.className = 'supplier-task-form';
+  const status = doc.createElement('p');
+  status.setAttribute('role', 'status');
+  status.setAttribute('aria-live', 'polite');
+
+  form.innerHTML =
+    '<p class="info neutral">Sistem öncesinden devreden toptancı borç veya alacak bakiyelerini girin. <strong>Kasa, banka ve stok bakiyeleriniz etkilenmez.</strong></p>' +
+    '<div data-opening-rows class="supplier-opening-rows"></div>' +
+    '<div class="form-actions"><button type="button" class="button secondary compact" data-add-opening-row>+ Birim satırı ekle</button></div>' +
+    '<div class="form-grid"><label class="field full"><span>Devir açıklaması</span><input name="note" required maxlength="160" placeholder="Örn: Sistem öncesi mutabakat devri (27.11.2026)"></label></div>' +
+    '<div data-opening-preview class="info neutral" aria-live="polite"></div>';
+
+  const actions = doc.createElement('div');
+  actions.className = 'form-actions';
+  if (context.onCancel) {
+    const cancel = doc.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'button secondary';
+    cancel.textContent = 'İptal';
+    cancel.addEventListener('click', () => context.onCancel());
+    actions.append(cancel);
+  }
+  const save = doc.createElement('button');
+  save.type = 'submit';
+  save.className = 'button';
+  save.textContent = 'Devir bakiyesini kaydet';
+  actions.append(save);
+  form.append(actions, status);
+  panel.append(form);
+
+  const rowsHost = form.querySelector('[data-opening-rows]');
+  const previewEl = form.querySelector('[data-opening-preview]');
+  const fmtSigned = (n, unit) => (n < 0 ? 'Borcumuz ' : n > 0 ? 'Alacağımız ' : 'Sıfır ') + format(Math.abs(n), unit);
+
+  const updatePreview = () => {
+    const rowEls = [...rowsHost.querySelectorAll('[data-opening-row]')];
+    const parts = [];
+    for (const rowEl of rowEls) {
+      const acc = unitAccounts.find(a => a.id === rowEl.querySelector('[data-field="accountId"]').value);
+      const dir = rowEl.querySelector('[data-field="direction"]').value;
+      const qtyEl = rowEl.querySelector('[data-field="quantity"]');
+      if (!acc || !qtyEl.value.trim()) continue;
+      const parsed = context.parseAmount ? context.parseAmount(qtyEl, acc.unit, true) : null;
+      if (!Number.isSafeInteger(parsed) || parsed <= 0) continue;
+      const before = acc.balance || 0;
+      const after = before + (dir === 'credit' ? parsed : -parsed);
+      parts.push(`${unitLabel(acc.unit)}: ${fmtSigned(before, acc.unit)} → ${fmtSigned(after, acc.unit)}`);
+    }
+    previewEl.textContent = parts.length
+      ? 'Önizleme (kasa/stok etkisiz): ' + parts.join(' | ')
+      : 'Birim, yön (borcumuz / alacağımız) ve devir miktarı girin.';
+  };
+
+  const addRow = (defaults = {}) => {
+    const usedIds = new Set([...rowsHost.querySelectorAll('[data-field="accountId"]')].map(el => el.value));
+    const defaultAcc = defaults.accountId || unitAccounts.find(a => !usedIds.has(a.id))?.id || unitAccounts[0]?.id || '';
+    const rowEl = doc.createElement('div');
+    rowEl.className = 'form-grid';
+    rowEl.dataset.openingRow = '1';
+    rowEl.innerHTML =
+      '<label class="field"><span>Birim</span><select data-field="accountId" required>' +
+      unitAccounts.map(a => '<option value="' + esc(a.id) + '"' + (a.id === defaultAcc ? ' selected' : '') + '>' + esc(unitLabel(a.unit)) + '</option>').join('') +
+      '</select></label>' +
+      '<label class="field"><span>Bakiye yönü</span><select data-field="direction" required>' +
+      '<option value="debt"' + (defaults.direction === 'credit' ? '' : ' selected') + '>Toptancıya Borcumuz (−)</option>' +
+      '<option value="credit"' + (defaults.direction === 'credit' ? ' selected' : '') + '>Toptancıdan Alacağımız (+)</option>' +
+      '</select></label>' +
+      '<label class="field"><span>Devir miktarı</span><input data-field="quantity" required inputmode="decimal" maxlength="24" placeholder="Örn: 150,000"></label>' +
+      '<button type="button" class="button text compact" data-remove-opening-row>Kaldır</button>';
+    const qtyEl = rowEl.querySelector('[data-field="quantity"]');
+    const accEl = rowEl.querySelector('[data-field="accountId"]');
+    const dirEl = rowEl.querySelector('[data-field="direction"]');
+    accEl.addEventListener('change', () => { clearAmountInputState(qtyEl); updatePreview(); });
+    dirEl.addEventListener('change', updatePreview);
+    qtyEl.addEventListener('input', updatePreview);
+    rowEl.querySelector('[data-remove-opening-row]').addEventListener('click', () => {
+      if (rowsHost.querySelectorAll('[data-opening-row]').length <= 1) return;
+      rowEl.remove();
+      updatePreview();
+    });
+    rowsHost.append(rowEl);
+    updatePreview();
+  };
+
+  form.querySelector('[data-add-opening-row]').addEventListener('click', () => {
+    if (rowsHost.querySelectorAll('[data-opening-row]').length >= 30) return;
+    addRow();
+  });
+  addRow();
+
+  let sending = false;
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    if (sending || context.isPending?.()) return;
+    const rowEls = [...rowsHost.querySelectorAll('[data-opening-row]')];
+    const balances = [];
+    const seenUnits = new Set();
+    for (const rowEl of rowEls) {
+      const accId = rowEl.querySelector('[data-field="accountId"]').value;
+      const acc = unitAccounts.find(a => a.id === accId);
+      const qtyEl = rowEl.querySelector('[data-field="quantity"]');
+      if (!acc) { status.textContent = 'Geçerli bir birim seçin.'; return; }
+      if (seenUnits.has(acc.unit)) { status.textContent = 'Aynı birim birden fazla satırda girilemez.'; return; }
+      seenUnits.add(acc.unit);
+      if (context.parseAmount) context.parseAmount(qtyEl, acc.unit, true);
+      balances.push({
+        accountId: acc.id,
+        direction: rowEl.querySelector('[data-field="direction"]').value,
+        quantity: canonicalAmount(context, qtyEl, acc.unit, true)
+      });
+    }
+    if (!form.reportValidity()) { getUIKit()?.toast?.('İşaretli alanları kontrol edin.', { kind: 'error' }); return; }
+    const command = {
+      type: 'supplierOpening',
+      date: state.date,
+      supplierId: firm.id,
+      balances,
+      note: form.elements.note.value.trim()
+    };
+    sending = true;
+    save.disabled = true;
+    try {
+      const ok = await context.submit(command, 'Toptancı devir bakiyesi kaydedildi.', { supplierDraftKey: `opening:${firm.id}` });
+      if (ok && context.onCancel) context.onCancel();
+    } catch (error) {
+      status.textContent = error.message || 'Devir bakiyesi kaydedilemedi.';
+    } finally {
+      sending = false;
+      if (form.isConnected) save.disabled = false;
+    }
+  });
+  return () => {};
 }
 
 function renderSupplierForm(panel, context) {
@@ -775,7 +919,7 @@ function renderSupplierRead(panel, context) {
         ([...(meta.allocations||[]),...(meta.sourceUses||[]),...(meta.debtUses||[]),...(meta.uses||[])].length?'<h4>Açık kaynak bağlantıları</h4><ul>'+[...(meta.allocations||[]),...(meta.sourceUses||[]),...(meta.debtUses||[]),...(meta.uses||[])].map(link=>{const linked=snapshot?.events.find(e=>e.id===link.sourceId);return '<li>'+esc((linked?day(linked.date)+' · '+linked.label:'Kaynak kayıt: '+(link.sourceId||event.id))+((link.unit||account(link.accountId)?.unit)&&Number.isSafeInteger(link.quantity)?' · '+format(link.quantity,link.unit||account(link.accountId).unit):'')+(link.purchaseId?' · Bağlanan belge: '+(snapshot?.events.find(e=>e.id===link.purchaseId)?.label||link.purchaseId):'')+(link.reason?' · '+link.reason:''))+'</li>';}).join('')+'</ul>':'')+
         (event.relatedEventIds?.length?'<details><summary>Bağlı kayıtlar</summary><ul>'+event.relatedEventIds.map(id=>{const linked=snapshot?.events.find(e=>e.id===id);return '<li>'+esc(linked?day(linked.date)+' · '+linked.label:id)+'</li>';}).join('')+'</ul></details>':'')+
         '<ul>'+(event.balances||[]).map(row=>'<li>'+esc(unitLabel(row.unit)+' · '+signed(row.before,row.unit)+' → '+signed(row.after,row.unit)+' · Etki '+signed(row.delta,row.unit))+'</li>').join('')+'</ul>'+
-        (interactive&&event.status==='active'&&['supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierReturn','supplierLegacyReceiptLink'].includes(event.type)?'<button type="button" class="button secondary" data-reverse-supplier-event="'+esc(event.id)+'">Ters kayıtla iptal et</button>'+(['supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierReturn'].includes(event.type)&&(event.editableCommand||event.meta?.editableCommand)?'<button type="button" class="button secondary" data-edit-supplier-event="'+esc(event.id)+'">İşlemi düzelt</button>':''):'')+'<p>Kaydeden: '+esc(event.actor?.displayName||event.actor?.name||'Belirtilmedi')+'</p></details><details><summary>Teknik kayıt bilgileri</summary><p>'+esc(event.id)+'</p></details></article>';
+        (interactive&&event.status==='active'&&['supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierReturn','supplierLegacyReceiptLink','supplierOpening'].includes(event.type)?'<button type="button" class="button secondary" data-reverse-supplier-event="'+esc(event.id)+'">Ters kayıtla iptal et</button>'+(['supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierReturn'].includes(event.type)&&(event.editableCommand||event.meta?.editableCommand)?'<button type="button" class="button secondary" data-edit-supplier-event="'+esc(event.id)+'">İşlemi düzelt</button>':''):'')+'<p>Kaydeden: '+esc(event.actor?.displayName||event.actor?.name||'Belirtilmedi')+'</p></details><details><summary>Teknik kayıt bilgileri</summary><p>'+esc(event.id)+'</p></details></article>';
     }).join('')||'<p>Seçilen dönemde hareket yok.</p>';
   }
   function totalsMarkup(page){
