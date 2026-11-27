@@ -36,7 +36,7 @@ export function supplierGivenScrapBalances(state, supplierId) {
   return result;
 }
 
-const supplierTypes = new Set(['supplierFirm','supplierFirmUpdate','supplierUnit','supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierTransfer','supplierReturn','supplierReverse','supplierAmend','supplierLegacyReceiptLink']);
+const supplierTypes = new Set(['supplierFirm','supplierFirmUpdate','supplierUnit','supplierOpening','supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierTransfer','supplierReturn','supplierReverse','supplierAmend','supplierLegacyReceiptLink']);
 export function isSupplierCommand(command) {
   return supplierTypes.has(command?.type);
 }
@@ -141,14 +141,14 @@ export function supplierDocuments(state, supplierId) {
     const transferFrom=e.type==='supplierTransfer'&&e.meta.fromSupplierId===supplierId;
     const transferTo=e.type==='supplierTransfer'&&e.meta.toSupplierId===supplierId;
     const legacyPurchase=e.type==='purchase' && e.meta.source==='supplier' && e.entries.some(r=>ids.has(r.accountId));
-    if ((own && (['supplierPurchase','supplierReturn'].includes(e.type)||e.type==='supplierPayment'&&e.meta.receiptChargeLines?.length)) || (transferFrom && e.meta.receiptChargeLines?.length) || legacyPurchase) {
+    if ((own && (['supplierPurchase','supplierReturn'].includes(e.type)||(e.type==='supplierOpening'&&e.meta.chargeLines?.length)||e.type==='supplierPayment'&&e.meta.receiptChargeLines?.length)) || (transferFrom && e.meta.receiptChargeLines?.length) || legacyPurchase) {
       const chargeRows=(own||transferFrom) ? [...(e.meta.chargeLines||[]),...(e.meta.receiptChargeLines||[])] : e.meta.debtLines?.length ? e.meta.debtLines : e.entries.filter(r=>ids.has(r.accountId)&&r.delta<0).map(r=>({accountId:r.accountId,quantity:-r.delta}));
       const pObj = {id:e.id,date:e.date,...display(e),legacy:!(own||transferFrom),kind:e.type,...(e.meta.originalId&&{originalId:e.meta.originalId}),...(e.meta.agreementId&&{agreementId:e.meta.agreementId}),lines:(e.meta.lines||[]).map((r,lineIndex)=>({...r,lineIndex,remainingQuantity:r.quantity,remainingWeight:r.weight||0})),
         charges:totals(state,ids,chargeRows).map(r=>({...r,allocated:0,reduced:0,remaining:r.quantity}))};
       purchases.push(pObj);
       purchasesById.set(pObj.id, pObj);
     }
-    const eligible=(own && ['supplierPurchase','supplierPayment','supplierReturn','supplierOffset'].includes(e.type)) || transferTo || legacyPurchase || ['collection','account','sale'].includes(e.type);
+    const eligible=(own && ['supplierPurchase','supplierPayment','supplierReturn','supplierOffset','supplierOpening'].includes(e.type)) || transferTo || legacyPurchase || ['collection','account','sale'].includes(e.type);
     const creditRows=own && e.type==='supplierOffset' ? [e.meta.to] : own && e.type==='supplierReturn' ? e.meta.availableCreditLines : (own || transferTo || legacyPurchase) ? e.meta.creditLines : e.type==='collection' ? collectionNativeNet(e,ids).filter(r=>r.quantity>0) : e.entries.filter(r=>ids.has(r.accountId)&&r.delta>0).map(r=>({accountId:r.accountId,quantity:r.delta}));
     const credits=eligible ? totals(state,ids,creditRows) : [];
     if(credits.length) {
@@ -332,7 +332,7 @@ export function prepareSupplier(state, event, helpers) {
   if(c.type==='supplierReverse') {
     fields(c,[...common,'originalId','note']);
     const original=state.journal.find(e=>e.id===c.originalId);
-    if(!original||!['supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierTransfer','supplierReturn','supplierLegacyReceiptLink'].includes(original.type))fail('Bu toptancı kaydı ters çevrilemez.');
+    if(!original||!['supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierTransfer','supplierReturn','supplierLegacyReceiptLink','supplierOpening'].includes(original.type))fail('Bu toptancı kaydı ters çevrilemez.');
     if(state.journal.some(e=>['reverse','supplierReverse'].includes(e.type)&&e.meta.originalId===original.id))fail('İşlem zaten ters çevrilmiş.');
     assertSupplierUndoAllowed(state,original.id);
     if((state.inventoryItems||[]).some(item=>item.costSource?.id===original.id||(item.purchaseLine?.id===original.id&&item.status!=='released')))fail('Bu alış tekil ürün kartına bağlı. Önce ürün eşlemesini kontrol edin.');
@@ -554,6 +554,46 @@ export function prepareSupplier(state, event, helpers) {
     const a = {id:'supplier-unit-'+event.id,name:firm.name,unit,physical:false,kind:'receivable',partyType:'supplier',supplierId:firm.id,
       phone:firm.phone,taxId:firm.taxId,address:firm.address,owner:'işletme',location:'cari hesap'};
     return {entries:[{accountId:a.id,delta:0}],meta:{supplierId:firm.id,accountId:a.id},label:'Toptancı birim hesabı açılışı',addAccount:a};
+  }
+  if (c.type === 'supplierOpening') {
+    fields(c, [...common, 'supplierId', 'balances', 'note']);
+    const note = text(c.note, 'Devir açıklaması');
+    const inputRows = rows(c.balances);
+    if (!inputRows.length) fail('En az bir devir bakiye satırı girin.');
+    const allowed = new Set(supplierAccountIds(state, firm.id));
+    const createdAccounts = [];
+    const seenUnits = new Set();
+    const entries = [];
+    const chargeLines = [];
+    const creditLines = [];
+    for (const row of inputRows) {
+      fields(row, ['accountId', 'direction', 'quantity', 'referenceTL']);
+      if (!['debt', 'credit'].includes(row.direction)) fail('Devir yönü borç veya alacak olmalı.');
+      let a = state.accounts.find(x => x.id === row.accountId);
+      if (!a && typeof row.accountId === 'string' && row.accountId.startsWith(`auto-unit:${firm.id}:`)) {
+        const unitCode = row.accountId.slice(`auto-unit:${firm.id}:`.length);
+        a = ensureSupplierUnitAccount(state, event, firm, unitCode, createdAccounts);
+        allowed.add(a.id);
+      }
+      if (!allowed.has(a?.id) || !a || a.retired) fail('Devir satırı seçili firmanın etkin birim hesabına ait olmalı.');
+      if (seenUnits.has(a.unit)) fail('Aynı devir kaydında her birim en fazla bir kez girilebilir.');
+      seenUnits.add(a.unit);
+      const amount = quantity(row.quantity, a.unit, { zero: false });
+      const sign = row.direction === 'credit' ? 1 : -1;
+      entries.push({ accountId: a.id, delta: sign * amount });
+      const line = { accountId: a.id, unit: a.unit, quantity: amount, ...reference(row) };
+      if (sign < 0) chargeLines.push(line);
+      else creditLines.push(line);
+    }
+    const finalEntries = [...createdAccounts.map(acc => ({ accountId: acc.id, delta: 0 })), ...entries];
+    const meta = {
+      supplierId: firm.id,
+      chargeLines,
+      creditLines,
+      ...(createdAccounts.length ? { createdAccountIds: createdAccounts.map(a => a.id) } : {}),
+      note
+    };
+    return { entries: finalEntries, meta, label: 'Toptancı devir / açılış bakiyesi', ...(createdAccounts.length ? { addAccounts: createdAccounts } : {}) };
   }
   const purchase = c.type === 'supplierPurchase';
   fields(c,[...common,'supplierId','given','received','credits','debts','debtUses','note','referenceTL','agreementId',...(purchase ? ['items','charges','allocations'] : ['advanceScope'])]);

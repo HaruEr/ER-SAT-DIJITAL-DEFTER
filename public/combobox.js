@@ -386,6 +386,9 @@
     const panelEl = doc.createElement('div');
     panelEl.className = 'defter-combobox-panel';
     panelEl.hidden = true;
+    panelEl.addEventListener('pointerdown', event => { event.stopPropagation(); });
+    panelEl.addEventListener('mousedown', event => { event.stopPropagation(); });
+    panelEl.addEventListener('click', event => { event.stopPropagation(); });
 
     const statusEl = doc.createElement('div');
     statusEl.className = 'defter-combobox-status';

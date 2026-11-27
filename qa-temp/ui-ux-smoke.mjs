@@ -87,8 +87,8 @@ check('summary announces short loading, success and safe error states outside it
 
 check('four primary operation choices keep keyboard focus and move setup to its own pages', async ({ window, document }) => {
   window.__ux.setView('transaction');
-  assert.equal(document.querySelectorAll('.transaction-primary [data-tab]').length, 4);
-  assert.deepEqual([...document.querySelectorAll('.transaction-primary [data-tab]')].map(button => button.dataset.tab), ['sale', 'purchase', 'movement', 'collection']);
+  assert.equal(document.querySelectorAll('.transaction-primary [data-tab]').length, 5);
+  assert.deepEqual([...document.querySelectorAll('.transaction-primary [data-tab]')].map(button => button.dataset.tab), ['sale', 'purchase', 'fx', 'movement', 'collection']);
   assert.equal(document.querySelector('[data-tab="account"], [data-tab="fund"]'), null);
   document.querySelector('[data-tab="purchase"]').focus();
   document.querySelector('[data-tab="purchase"]').click();

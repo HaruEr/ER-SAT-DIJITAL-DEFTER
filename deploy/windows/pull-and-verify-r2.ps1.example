@@ -5,11 +5,11 @@
 #   salt okunur (`backup-reader`) anahtarıyla ($0 egress) `C:\er-sat-backups` klasörüne çeker
 #   ve en yeni `.enc` dosyasını izole geçici klasörde `backup-bundle.mjs restore` ile doğrular.
 #
-# Ön koşullar (Mağaza Ana Windows PC — Yönetici hesabı):
+# Ön koşullar (Mağaza Ana Windows PC — Yönetici / SYSTEM hesabı):
 #   1. `setup-backup-dir.ps1.example` ile `C:\er-sat-backups` NTFS kilidi uygulanmış olmalı.
-#   2. Node.js 24 LTS ve `restic` (SHA-256 doğrulamalı) kurulu olmalı.
-#   3. Sırlar bu betiğin içine YAZILMAMALIDIR; yalnızca Yönetici okuma izinli bir ortamdan
-#      veya Windows Credential Manager / korumalı görev ortamından sağlanmalıdır:
+#   2. Node.js 24 LTS ve `restic` (SHA-256 doğrulamalı; SYSTEM görevi için `C:\Windows\System32\restic.exe` veya Sistem PATH) kurulu olmalı.
+#   3. Sırlar bu betiğin içine YAZILMAMALIDIR; yalnızca Administrators + SYSTEM okuma izinli
+#      `C:\er-sat-backups\r2-secrets.json` dosyasından veya korumalı görev ortamından sağlanmalıdır:
 #        - AWS_ACCESS_KEY_ID     (R2 backup-reader, salt okunur)
 #        - AWS_SECRET_ACCESS_KEY (R2 backup-reader, salt okunur)
 #        - RESTIC_REPOSITORY     (s3:https://<CF-ACCOUNT-ID>.r2.cloudflarestorage.com/<R2-BUCKET>)
@@ -20,10 +20,20 @@ $ErrorActionPreference = 'Stop'
 
 $BackupDir = 'C:\er-sat-backups'
 $RepoRoot = 'C:\er-sat-defter'
+$SecretsFile = Join-Path $BackupDir 'r2-secrets.json'
 $VerifyTemp = Join-Path 'C:\er-sat-verify-tmp' ([guid]::NewGuid().ToString('N'))
 
+if (Test-Path -LiteralPath $SecretsFile) {
+  $loaded = Get-Content -LiteralPath $SecretsFile -Raw | ConvertFrom-Json
+  foreach ($p in $loaded.PSObject.Properties) {
+    if (-not [Environment]::GetEnvironmentVariable($p.Name)) {
+      [Environment]::SetEnvironmentVariable($p.Name, [string]$p.Value, 'Process')
+    }
+  }
+}
+
 foreach ($varName in @('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'RESTIC_REPOSITORY', 'RESTIC_PASSWORD', 'BACKUP_PASSPHRASE')) {
-  if (-not (Get-Item -Path "Env:$varName" -ErrorAction SilentlyContinue)?.Value) {
+  if (-not [Environment]::GetEnvironmentVariable($varName)) {
     throw "Eksik ortam değişkeni: $varName"
   }
 }

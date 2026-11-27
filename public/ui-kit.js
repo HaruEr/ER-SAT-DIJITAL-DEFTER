@@ -951,6 +951,9 @@
     const handleKeydown = event => {
       if (topLayer() !== entry) return;
       if (event.key === 'Escape') {
+        if (dialog.querySelector('.defter-combobox-panel:not([hidden])')) {
+          return;
+        }
         if (closeOnEsc) {
           event.preventDefault();
           event.stopPropagation();
@@ -981,9 +984,29 @@
       if (topLayer() === entry && closeOnEsc) close('escape');
     };
 
+    let backdropPointerDown = false;
+    const isOutsideDialogBox = event => {
+      const rect = typeof dialog.getBoundingClientRect === 'function' ? dialog.getBoundingClientRect() : null;
+      if (!rect || (rect.width === 0 && rect.height === 0)) return true;
+      if (typeof event.clientX !== 'number' || typeof event.clientY !== 'number') return true;
+      if (event.clientX === 0 && event.clientY === 0 && event.detail === 0) return false;
+      return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+    };
+
+    const handlePointerDown = event => {
+      if (topLayer() !== entry) { backdropPointerDown = false; return; }
+      backdropPointerDown = closeOnBackdrop && event.target === dialog && isOutsideDialogBox(event);
+    };
+
     const handleClick = event => {
-      if (topLayer() !== entry) return;
-      if (closeOnBackdrop && event.target === dialog) close('backdrop');
+      const allowFromPointer = backdropPointerDown;
+      backdropPointerDown = false;
+      if (topLayer() !== entry || !closeOnBackdrop) return;
+      if (event.target !== dialog) return;
+      const rect = typeof dialog.getBoundingClientRect === 'function' ? dialog.getBoundingClientRect() : null;
+      const hasLayoutBox = Boolean(rect && (rect.width > 0 || rect.height > 0));
+      if (hasLayoutBox && (!allowFromPointer || !isOutsideDialogBox(event))) return;
+      close('backdrop');
     };
 
     function close(reason = 'programmatic') {
@@ -995,6 +1018,8 @@
       if (idx !== -1) layerStack.splice(idx, 1);
       dialog.removeEventListener('keydown', handleKeydown);
       dialog.removeEventListener('cancel', handleCancel);
+      dialog.removeEventListener('pointerdown', handlePointerDown);
+      dialog.removeEventListener('mousedown', handlePointerDown);
       dialog.removeEventListener('click', handleClick);
       animateExit(dialog, kind === 'drawer' ? (sheetMode() ? 'sheet' : 'drawer') : 'modal', { backdrop: layerStack.length === 0 });
       if (typeof dialog.close === 'function' && dialog.open) {
@@ -1071,6 +1096,8 @@
 
     dialog.addEventListener('keydown', handleKeydown);
     dialog.addEventListener('cancel', handleCancel);
+    dialog.addEventListener('pointerdown', handlePointerDown);
+    dialog.addEventListener('mousedown', handlePointerDown);
     dialog.addEventListener('click', handleClick);
     closeBtn.addEventListener('click', () => close('close-button'));
     if (kind === 'drawer') attachSheetDrag(dialog, header, close);
