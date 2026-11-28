@@ -55,7 +55,7 @@ async function fixture(){
     }catch(error){return{ok:false,status:error.status||400,json:async()=>({error:error.message})};}
   };
   window.eval(source+'\nwindow.__compact={setView,submit};');await tick();
-  return{repo,window,document,controller,calls,compact,run,async nav(name){window.__compact.setView(name);await tick();},async input(selector,value,event='input'){const element=document.querySelector(selector);assert.ok(element,selector);element.value=value;element.dispatchEvent(new window.Event(event,{bubbles:true}));if(selector==='#journal-search'&&event==='input')await new Promise(resolve=>setTimeout(resolve,220));await tick();},close(){window.close();repo.close();other.close();}};
+  return{repo,window,document,controller,calls,compact,run,async nav(name){window.__compact.setView(name);await tick();if(name==='journal')document.querySelector('[data-journal-mode="detailed"]')?.click();},async input(selector,value,event='input'){const element=document.querySelector(selector);assert.ok(element,selector);element.value=value;element.dispatchEvent(new window.Event(event,{bubbles:true}));if(selector==='#journal-search'&&event==='input')await new Promise(resolve=>setTimeout(resolve,220));await tick();},close(){window.close();repo.close();other.close();}};
 }
 
 check('compact state is requested and dashboard uses complete server aggregates rather than four recent events',async context=>{

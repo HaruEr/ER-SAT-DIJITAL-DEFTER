@@ -661,6 +661,7 @@ function fillCheckoutSale(env, noteText) {
     el.value = value;
     el.dispatchEvent(new window.Event(el.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true }));
   };
+  set('[data-item] [data-product-search]', 'gramToplam');
   set('[data-item] [data-product]', 'gramToplam');
   set('[data-item] [data-quantity]', '1');
   set('[data-item] [data-value]', '100');

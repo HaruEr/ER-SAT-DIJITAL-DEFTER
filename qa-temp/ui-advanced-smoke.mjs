@@ -35,6 +35,7 @@ window.fetch=async(url,options)=>{
   }catch(error){return {ok:false,status:400,json:async()=>({error:error.message})};}
 };
 window.__supplierModule=supplierModule;
+window.eval(readFileSync(new URL('../public/amount-codec.js',import.meta.url),'utf8'));
 window.eval(readFileSync(new URL('../public/app.js',import.meta.url),'utf8').replace("import(\'./suppliers.js\')","Promise.resolve(window.__supplierModule)")+'\nwindow.__ui={setView,beginTransactionEdit};');
 const tick=async()=>{for(let i=0;i<4;i++)await new Promise(resolve=>setTimeout(resolve,0));};
 await tick();
@@ -59,7 +60,7 @@ const eurCari=repo.state().accounts.find(a=>a.name==='Euro tedarikçi');
 repo.execute({id:randomUUID(),revision:repo.state().revision,command:{type:'purchase',date:repo.state().date,source:'customer',items:[{accountId:'gramToplam',quantity:'10',value:'1500'}],payments:[{accountId:hasFund.id,quantity:'0.250',valueTL:'500'}],debts:[{accountId:hasCari.id,quantity:'0.125',valueTL:'500'},{accountId:usdCari.id,quantity:'10',valueTL:'300'},{accountId:eurCari.id,quantity:'5',valueTL:'200'}],note:'Eski çok birimli alış'}});
 const legacyPurchase=repo.state().journal.at(-1);document.querySelector('#refresh').click();await tick();window.__ui.beginTransactionEdit(legacyPurchase);await tick();
 assert.equal(document.querySelectorAll('[data-allocation-kind="debt"]').length,3);assert.equal(document.querySelector('[data-add-allocation="counterpayment"]').disabled,true);fill('#amend-reason','Eski kaydı kontrol');fill('#f-note','Çok birimli alış');
-assert.equal(document.querySelector('#sale-remainder').textContent,'Tam dengeli');document.querySelector('#add-sale-item').click();assert.equal(document.querySelector('[data-item-field="quantity"]').value,'10');document.querySelectorAll('[data-remove-item]')[1].click();
+assert.equal(document.querySelector('#sale-remainder').textContent,'Tam dengeli');document.querySelector('#add-sale-item').click();assert.equal(document.querySelectorAll('[data-item-field="quantity"]')[1].value,'10');document.querySelectorAll('[data-remove-item]')[0].click();
 await send('#sale-form');assert.equal(commands.at(-1).command.type,'amend');assert.equal(commands.at(-1).command.replacement.received,undefined);assert.equal(commands.at(-1).command.replacement.debts.length,3);assert.equal(repo.state().journal.at(-1).meta.amendsOriginalId,legacyPurchase.id,document.querySelector('#notice').textContent);assert.equal(repo.state().balances.gramToplam,253000);assert.equal(repo.state().balances[hasFund.id],9750);assert.equal(repo.state().balances[hasCari.id],-125);assert.equal(repo.state().balances[usdCari.id],-1000);assert.equal(repo.state().balances[eurCari.id],-500);
 
 tab('collection');fill('#f-customerAccount',hasCari.id,'change');assert.equal(document.querySelector('#f-target').options.length,1);assert.equal(document.querySelector('#f-target').value,hasFund.id);fill('#f-direction','pay','change');fill('#f-quantity','0.125');fill('#f-note','Has borç kapama');await send('#collection-form');assert.equal(repo.state().balances[hasCari.id],0);assert.equal(repo.state().balances[hasFund.id],9625);
@@ -68,7 +69,7 @@ tab('sale');fill('[data-item-field="accountId"]','gramToplam','change');fill('[d
 assert.equal(repo.state().balances.gramToplam,243000);assert.equal(repo.state().balances[gbpFund.id],5200);assert.equal(document.querySelector('#retry-bar').hidden,false,'5xx must retain pending ID');
 const uncertainId=commands.at(-1).id;document.querySelector('#retry').click();await tick();assert.equal(commands.at(-1).id,uncertainId);assert.equal(repo.state().balances[gbpFund.id],5200,'Retry cannot duplicate committed sale');assert.equal(document.querySelector('#retry-bar').hidden,true);
 window.__ui.setView('summary');await tick();assert.match(document.querySelector('#summary-result').textContent,/GBP banka/);assert.match(document.querySelector('#summary-result').textContent,/1\.500,00 TL/);
-window.__ui.setView('journal');assert.equal(document.querySelector('img'),null);assert.match(document.querySelector('#main').textContent,/0,125 has gr/);assert.match(document.querySelector('#main').textContent,/Anlaşılmış TL karşılığı/);
+window.__ui.setView('journal');document.querySelector('[data-journal-mode="detailed"]').click();assert.equal(document.querySelector('img'),null);assert.match(document.querySelector('#main').textContent,/0,125 has gr/);assert.match(document.querySelector('#main').textContent,/Anlaşılmış TL karşılığı/);
 // CASH-OTHER01: one physical cash fund per explicit currency, never a mixed balance.
 const otherFunds={};
 for(const code of ['SAR','AED']){
@@ -82,9 +83,9 @@ for(const code of ['SAR','AED']){
 assert.notEqual(otherFunds.SAR.id,otherFunds.AED.id);
 window.__ui.setView('banks');document.querySelector(`[data-bank-rename="${otherFunds.SAR.id}"]`).click();fill('#f-name','Nakit Diğer SAR kasa');await send('#bank-rename-form');assert.equal(repo.state().accounts.find(a=>a.id===otherFunds.SAR.id).unit,'SAR');
 window.__ui.setView('closing');const countState=repo.state();
-for(const control of document.querySelectorAll('#close-form [data-measure]')){const a=countState.accounts.find(a=>a.id===control.dataset.measure);fill('#'+control.id,decimal(countState.balances[a.id],a.unit));}
+for(const control of document.querySelectorAll('#close-form [data-measure]')){const a=countState.accounts.find(a=>a.id===control.dataset.measure);fill('#'+control.id,decimal(countState.balances[a.id],a.unit).replace('.',','));}
 fill('#f-dailyApprovedBy','Sentetik sayım');fill('#daily-count-'+otherFunds.SAR.id,'');const beforeClose=commands.length;document.querySelector('#close-form').requestSubmit();await tick();assert.equal(commands.length,beforeClose,'blank SAR daily count rejects close');
-fill('#daily-count-'+otherFunds.SAR.id,'0');assert.equal(document.querySelector('#daily-count-'+otherFunds.AED.id).value,'0.00');await send('#close-form');assert.equal(commands.at(-1).command.type,'close');assert.equal(repo.state().balances[otherFunds.SAR.id],0);assert.equal(repo.state().balances[otherFunds.AED.id],0);
+fill('#daily-count-'+otherFunds.SAR.id,'0');assert.equal(document.querySelector('#daily-count-'+otherFunds.AED.id).value,'0,00');await send('#close-form');assert.equal(commands.at(-1).command.type,'close');assert.equal(repo.state().balances[otherFunds.SAR.id],0);assert.equal(repo.state().balances[otherFunds.AED.id],0);
 for(const [code,quantity] of [['SAR','1000'],['AED','500']])run({type:'movement',date:repo.state().date,accountId:otherFunds[code].id,direction:'in',category:'Sermaye',quantity,note:'Sentetik döviz açılış desteği'});
 document.querySelector('#refresh').click();await tick();window.__ui.setView('suppliers');await tick();document.querySelector('[data-create-firm]').click();fill('[data-supplier-form] [name="name"]','SAR Firma');await send('[data-supplier-form]');
 const sarFirm=repo.state().supplierFirms.find(a=>a.name==='SAR Firma');assert.ok(sarFirm);

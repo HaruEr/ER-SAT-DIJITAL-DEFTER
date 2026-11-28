@@ -20,7 +20,7 @@ async function fixture(){
     else throw new Error('Unexpected route');return {ok:true,status:200,json:async()=>result};
   }catch(e){return {ok:false,status:e.status||500,json:async()=>({error:e.message})};}};
   const openReturns=()=>{for(const d of w.document.querySelectorAll('details[data-sale-return]')){if(!d.open){d.open=true;d.dispatchEvent(new w.Event('toggle'));}}};
-  w.eval(readFileSync(new URL('../public/app.js',import.meta.url),'utf8')+'\nwindow.__returnView=setView;');await tick();w.__returnView('journal');await tick();openReturns();
+  w.eval(readFileSync(new URL('../public/app.js',import.meta.url),'utf8')+'\nwindow.__returnView=setView;');await tick();w.__returnView('journal');await tick();w.document.querySelector('[data-journal-mode="detailed"]')?.click();await tick();openReturns();
   const set=(selector,value)=>{const el=w.document.querySelector(selector);assert.ok(el,selector);el.value=value;el.dispatchEvent(new w.Event(el.tagName==='SELECT'?'change':'input',{bubbles:true}));};
   return {w,doc:w.document,repo,commands,set,close(){w.close();repo.close();}};
 }

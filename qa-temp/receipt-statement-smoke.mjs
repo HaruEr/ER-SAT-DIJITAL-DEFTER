@@ -74,7 +74,7 @@ const cases=[
   assert.match(snapshot.querySelector('[data-statement-record="sale-1"]').textContent,/İptal edilmiş kayıt/);
   f.w.dispatchEvent(new f.w.Event('afterprint'));f.d.querySelector('#statement-download').click();await tick();const csv=await f.csv();
   assert.match(csv.split('\r\n').find(line=>line.includes('"sale-2";')),/Düzeltilmiş eski kayıt/);
-  f.w.__receiptTest.setView('journal');await tick();const search=f.d.querySelector('#journal-search');search.value='sale-2';search.dispatchEvent(new f.w.Event('input',{bubbles:true}));await new Promise(r=>setTimeout(r,220));await tick();
+  f.w.__receiptTest.setView('journal');await tick();f.d.querySelector('[data-journal-mode="detailed"]')?.click();await tick();const search=f.d.querySelector('#journal-search');search.value='sale-2';search.dispatchEvent(new f.w.Event('input',{bubbles:true}));await new Promise(r=>setTimeout(r,220));await tick();
   assert.ok([...f.d.querySelectorAll('.receipt-record-meta')].some(node=>node.textContent.includes('Kayıt: sale-2')&&node.textContent.includes('Düzeltilmiş eski kayıt')));
  }],
  ['long printed receipts retain every line in repeatable direction tables',async f=>{

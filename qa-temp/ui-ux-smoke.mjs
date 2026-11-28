@@ -98,6 +98,7 @@ check('four primary operation choices keep keyboard focus and move setup to its 
 
 check('journal search, operation filter and clear preserve scope and escape user text', async ({ window, document }) => {
   window.__ux.setView('journal');
+  document.querySelector('[data-journal-mode="detailed"]').click();
   const search = document.querySelector('#journal-search'), type = document.querySelector('#journal-type');
   assert.ok(search); assert.ok(type);
   search.value = 'istanbul'; search.dispatchEvent(new window.Event('input', { bubbles: true }));
@@ -176,8 +177,8 @@ check('dynamic product rows retain draft values and focus the added or surviving
   const quantity = document.querySelector('[data-item-field="quantity"]'); quantity.value = '2';
   document.querySelector('#add-sale-item').click();
   const rows = document.querySelectorAll('.sale-item'); assert.equal(rows.length, 2);
-  assert.equal(document.activeElement, rows[1].querySelector('[data-item-field="accountId"]'));
-  const remove = rows[1].querySelector('[data-remove-item]'); remove.focus(); remove.click();
+  assert.equal(document.activeElement, rows[0].querySelector('[data-item-field="accountId"]'));
+  const remove = rows[0].querySelector('[data-remove-item]'); remove.focus(); remove.click();
   assert.equal(document.querySelectorAll('.sale-item').length, 1);
   assert.equal(document.activeElement, document.querySelector('[data-item-field="accountId"]'));
   assert.equal(quantity.value, '2');

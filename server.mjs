@@ -92,6 +92,7 @@ const CHECKOUT_ALLOWED_API = new Set([
   '/api/pending-approvals',
   '/api/command'
 ]);
+const PENDING_WITHDRAW_RE = /^\/api\/pending-approvals\/([^/]+)\/withdraw$/;
 const validatedDeployConfigs = new WeakSet();
 
 function sha256Buffer(value) {
@@ -692,7 +693,7 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
         res.writeHead(200, { ...headers, 'Content-Type': type }); return res.end(content);
       }
       if (!url.pathname.startsWith('/api/')) return json(404, { error: 'Sayfa bulunamadı.' });
-      if (channel === 'store-checkout' && (CHECKOUT_BLOCKED_API.has(url.pathname) || url.pathname === '/api/security' || url.pathname.startsWith('/api/security/') || !CHECKOUT_ALLOWED_API.has(url.pathname))) {
+      if (channel === 'store-checkout' && (CHECKOUT_BLOCKED_API.has(url.pathname) || url.pathname === '/api/security' || url.pathname.startsWith('/api/security/') || (!CHECKOUT_ALLOWED_API.has(url.pathname) && !PENDING_WITHDRAW_RE.test(url.pathname)))) {
         return json(403, { error: 'Bu işlem mağaza kasa kanalında kullanılamaz.' });
       }
       const authHeaderValues = rawHeaderValues(req, 'authorization');
@@ -773,7 +774,7 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
       };
       const worker = actor.role === 'employee';
       if (actor.role !== 'owner' && !worker) deny();
-      if (worker && !(req.method === 'POST' && (operation === 'command' || url.pathname === '/api/pending-approvals')) &&
+      if (worker && !(req.method === 'POST' && (operation === 'command' || url.pathname === '/api/pending-approvals' || PENDING_WITHDRAW_RE.test(url.pathname))) &&
           !(req.method === 'GET' && ['/api/checkout','/api/customers','/api/pending-approvals'].includes(url.pathname))) deny();
       if (url.pathname === '/api/security/audit' || url.pathname.startsWith('/api/security/')) {
         if (url.pathname !== '/api/security/audit') return json(404, { error: 'İşlem bulunamadı.' });
@@ -836,8 +837,16 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
         const employees = [...knownEmployees.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, 'tr'));
         return json(200, { pendingCount, items, analytics, employees });
       }
+      const withdrawMatch = req.method === 'POST' ? url.pathname.match(PENDING_WITHDRAW_RE) : null;
+      if (withdrawMatch) {
+        let pendingId;
+        try { pendingId = decodeURIComponent(withdrawMatch[1]); }
+        catch { return json(400, { error: 'Geçersiz bildirim anahtarı.' }); }
+        const repository = repo(requestedWorkspace);
+        return json(200, repository.withdrawPending(pendingId, actor));
+      }
       if (req.method === 'POST' && ['/api/pending-approvals', '/api/pending-approvals/approve', '/api/pending-approvals/reject'].includes(url.pathname)) {
-        if (!req.headers['content-type']?.startsWith('application/json')) return json(415, { error: 'JSON içeriği gerekli.' });
+        if (req.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'application/json') return json(415, { error: 'JSON içeriği gerekli.' });
         const data = await readJson(2 * 1024 * 1024);
         if (!data) return;
         actor = requireSession(idStore, token);
@@ -945,9 +954,9 @@ export function createApp({ dataDirectory = path.join(directory, 'data'), logger
           active: url.searchParams.get('active') === '1' || url.searchParams.get('active') === 'true'
         }));
       }
-      if (req.method === 'GET' && url.pathname === '/api/backup') return json(200, repository.backup(), { 'Content-Disposition': `attachment; filename="kuyumcu-${url.searchParams.get('workspace') || 'demo'}-${new Date().toISOString().slice(0, 10)}.json"` });
+      if (req.method === 'GET' && url.pathname === '/api/backup') return json(200, repository.backup(), { 'Content-Disposition': `attachment; filename="kuyumcu-${repository.workspace}-${new Date().toISOString().slice(0, 10)}.json"` });
       if (req.method !== 'POST' || !['/api/command', '/api/restore'].includes(url.pathname)) return json(404, { error: 'İşlem bulunamadı.' });
-      if (!req.headers['content-type']?.startsWith('application/json')) return json(415, { error: 'JSON içeriği gerekli.' });
+      if (req.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'application/json') return json(415, { error: 'JSON içeriği gerekli.' });
       // Restore includes a small JSON envelope around a supported backup file.
       const bodyLimit = url.pathname === '/api/restore' ? BACKUP_MAX_BYTES + 64 * 1024 : 8 * 1024 * 1024;
       const data = await readJson(bodyLimit);

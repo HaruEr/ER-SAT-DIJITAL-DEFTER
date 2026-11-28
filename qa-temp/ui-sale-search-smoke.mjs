@@ -86,7 +86,7 @@ test('search preserves draft values, supports multiple rows, and stays scoped to
   key(input, 'Enter');
   write(get('[data-item-field="value"]'), '2000');
   get('#add-sale-item').click();
-  const second = document.querySelectorAll('[data-product-search]')[1];
+  const second = document.querySelectorAll('[data-product-search]')[0];
   write(second, 'yuzuk');
   key(second, 'ArrowDown');
   assert.equal(document.activeElement.dataset.productResult, 'yuzuk');
@@ -94,8 +94,8 @@ test('search preserves draft values, supports multiple rows, and stays scoped to
   get('[data-tab="purchase"]').click();
   assert.equal(get('[data-product-search]'), null);
   get('[data-tab="sale"]').click();
-  assert.deepEqual([...document.querySelectorAll('[data-item-field="accountId"]')].map(s => s.value), ['ceyrek','yuzuk']);
-  assert.equal(get('[data-item-field="value"]').value, '2000');
+  assert.deepEqual([...document.querySelectorAll('[data-item-field="accountId"]')].map(s => s.value), ['yuzuk','ceyrek']);
+  assert.equal(document.querySelectorAll('[data-item-field="value"]')[1].value, '2.000');
   get('[data-view="suppliers"]').click();
   await new Promise(resolve=>setTimeout(resolve,0)); assert.ok(get('[data-create-firm]'));
   assert.equal(get('[data-product-search]'), null);

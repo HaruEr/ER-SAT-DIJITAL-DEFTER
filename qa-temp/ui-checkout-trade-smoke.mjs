@@ -46,13 +46,13 @@ test('multi-row checkout retains native quantities and requires review before on
   const f=await setup(t),{get,fill,doc,tick,calls}=f;
   fill('[data-item] [data-quantity]','1');fill('[data-item] [data-value]','100');
   get('#add-item').click();
-  const row=doc.querySelectorAll('[data-item]')[1];fill(row.querySelector('[data-quantity]'),'2');fill(row.querySelector('[data-value]'),'200');
+  const row=doc.querySelectorAll('[data-item]')[0];fill(row.querySelector('[data-quantity]'),'2');fill(row.querySelector('[data-value]'),'200');
   get('[data-add="received"][data-category="money"]').click();
   const receipt=get('[data-allocation="received"]');fill(receipt.querySelector('[data-account]'),'usd');fill(receipt.querySelector('[data-quantity]'),'10');fill(receipt.querySelector('[data-value]'),'300');
   get('#trade').requestSubmit();assert.equal(calls.length,0);assert.equal(get('#review').hidden,false);
   assert.match(get('#review-content').textContent,/10,00 USD/);
   get('#confirm').click();await tick();await tick();assert.equal(calls.length,1);
-  assert.deepEqual(JSON.parse(JSON.stringify(calls[0].command.items)).map(row=>row.quantity),['1','2']);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0].command.items)).map(row=>row.quantity),['2','1']);
   assert.deepEqual(JSON.parse(JSON.stringify(calls[0].command.received)),[{accountId:'usd',quantity:'10',valueTL:'300'}]);
 });
 test('uncertain write retries exact id, revision and body across a newer snapshot, with draft edits blocked',async t=>{
@@ -109,7 +109,7 @@ test('mixed products, USD cash, TL change and selected USD current account prese
   function add(kind,id,quantity,value) {
     const category=['credits','debts'].includes(kind)?'':id==='hurda14'?'scrap':id==='ceyrek'?'product':'money';
     f.get('[data-add="'+kind+'"]'+(category?'[data-category="'+category+'"]':'')).click();
-    const row=[...f.doc.querySelectorAll('[data-allocation="'+kind+'"]')].at(-1);
+    const row=f.doc.querySelector('[data-allocation="'+kind+'"]');
     f.fill(row.querySelector('[data-account]'),id);f.fill(row.querySelector('[data-quantity]'),quantity);
     if(value)f.fill(row.querySelector('[data-value]'),value);
   }
@@ -182,7 +182,7 @@ test('received and given categories expose only money, non-scrap product or flag
  const f=await setup(t);
  for(const direction of ['received','given'])for(const category of ['money','product','scrap']){
   const button=f.get('[data-add="'+direction+'"][data-category="'+category+'"]');assert.ok(button);
-  button.click();const row=[...f.doc.querySelectorAll('[data-allocation="'+direction+'"]')].at(-1);
+  button.click();const row=f.doc.querySelector('[data-allocation="'+direction+'"]');
   const ids=[...row.querySelector('[data-account]').options].map(o=>o.value).filter(Boolean);
   assert.deepEqual(ids,category==='money'?(direction==='received'?['nakit','usd','pos']:['nakit','usd']):category==='product'?['ceyrek']:['hurda14']);
   assert.equal(row.dataset.category,category);

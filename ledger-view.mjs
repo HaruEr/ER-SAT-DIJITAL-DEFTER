@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
 import { projectSupplierParties, projectSupplierDetail } from './supplier-view.mjs';
-import { supplierDocuments, supplierFirms, supplierAccountIds, ledgerActiveSupplierUnits } from './supplier-ledger.mjs';
+import { supplierDocuments, supplierFirms, supplierAccountIds, ledgerActiveSupplierUnits, isSupplierScrap, supplierGivenScrapBalances } from './supplier-ledger.mjs';
 import { purchaseCostOffer } from './inventory.mjs';
 import { applyEvent, emptyState, fail, validDate, currentCountPolicy, priorScrapChoices, scrapCustomerResolver, scrapAdvanceSources, getAccountIndex } from './domain.mjs';
 
 export const LEDGER_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 const blankTotals = () => ({ todaysCount: 0, revenue: 0, expenses: 0, salesCash: 0, totalEntries: 0, items: [], flowByUnit: {} });
-const ordinaryMoneyFlow = entry => entry && (['sale','saleReturn','purchase','collection','orderAdvance','orderRefund','supplierPurchase','supplierPayment','supplierReturn','currencyExchange'].includes(entry.type) || (entry.type === 'movement' && entry.label !== 'Açılış düzeltmesi'));
+const ordinaryMoneyFlow = entry => entry && (['sale','saleReturn','purchase','collection','customerOrder','orderAdvance','orderDeliver','orderRefund','supplierPurchase','supplierPayment','supplierReturn','currencyExchange'].includes(entry.type) || (entry.type === 'movement' && entry.label !== 'Açılış düzeltmesi'));
 function financialRows(accounts, entries) {
   const byId = getAccountIndex(accounts).byId;
   return entries.flatMap(row => {
@@ -73,6 +73,7 @@ function indexEntry(ledger, entry, { measureBytes = true } = {}) {
   ledger.orderById.set(entry.id, orderIndex);
   for (const id of [entry.meta.originalId, entry.meta.amendsOriginalId, entry.meta.amendmentId, entry.meta.exchangeId, ...(['scrapAdvanceTransfer','scrapAdvanceUndo'].includes(entry.type) ? [entry.meta.purchaseId] : []), entry.meta.orderId, entry.meta.advanceId,
     ...(entry.meta.advanceAllocations || []).map(row => row.advanceId),
+    ...(entry.meta.leftoverAllocations || []).map(row => row.advanceId),
     ...(entry.meta.allocations || []).flatMap(row=>[row.sourceId,row.purchaseId]),
     ...(entry.meta.sourceUses || []).map(row=>row.sourceId),...(entry.meta.debtUses || []).map(row=>row.sourceId),...(entry.meta.uses || []).map(row=>row.sourceId)]) {
     connectReceiptLink(ledger, entry.id, id);
@@ -152,14 +153,14 @@ export function projectLedger(ledger, compact = false) {
   });
 }
 
-const types = new Set(['all', 'linkScrapPurchase', 'customerOrder', 'orderUpdate', 'orderAdvance', 'orderRefund', 'orderCancel', 'scrapAdvanceTransfer', 'scrapAdvanceUndo', 'opening', 'nominalOpening', 'account', 'accountUpdate', 'fundAccount', 'fundUpdate', 'stockAccount', 'stockUpdate', 'sale', 'saleReturn', 'purchase', 'stock', 'movement', 'collection', 'transfer', 'currencyExchange', 'settlement', 'reverse', 'stocktake', 'close', 'registerItem', 'releaseItem', 'itemCostSource']);
-const supplierEventTypes = ['supplierFirm','supplierFirmUpdate','supplierUnit','supplierOpening','supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierTransfer','supplierReturn','supplierReverse','supplierLegacyReceiptLink'];
+const types = new Set(['all', 'linkScrapPurchase', 'customerOrder', 'orderUpdate', 'orderAdvance', 'orderDeliver', 'orderRefund', 'orderCancel', 'scrapAdvanceTransfer', 'scrapAdvanceUndo', 'opening', 'nominalOpening', 'account', 'accountUpdate', 'fundAccount', 'fundUpdate', 'stockAccount', 'stockUpdate', 'sale', 'saleReturn', 'purchase', 'stock', 'movement', 'collection', 'customerAdjustment', 'transfer', 'currencyExchange', 'settlement', 'reverse', 'stocktake', 'close', 'registerItem', 'releaseItem', 'itemCostSource']);
+const supplierEventTypes = ['supplierFirm','supplierFirmUpdate','supplierUnit','supplierOpening','supplierBind','supplierAdjust','supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierTransfer','supplierReturn','supplierReverse','supplierLegacyReceiptLink'];
 export const typeGroups = {
   money: ['movement','transfer','currencyExchange','settlement'],
   inventory: ['stock','stocktake','registerItem','releaseItem','itemCostSource'],
   setup: ['opening','nominalOpening','account','accountUpdate','fundAccount','fundUpdate','stockAccount','stockUpdate','close'],
   supplier: [...supplierEventTypes],
-  orders: ['customerOrder','orderUpdate','orderAdvance','orderRefund','orderCancel','scrapAdvanceTransfer','scrapAdvanceUndo'],
+  orders: ['customerOrder','orderUpdate','orderAdvance','orderDeliver','orderRefund','orderCancel','scrapAdvanceTransfer','scrapAdvanceUndo'],
   reverse: ['reverse','supplierReverse']
 };
 for(const type of supplierEventTypes)types.add(type);
@@ -367,6 +368,7 @@ export function entryLinkIds(entry) {
     ...(['scrapAdvanceTransfer', 'scrapAdvanceUndo'].includes(entry.type) ? [entry.meta.purchaseId] : []),
     entry.meta.orderId, entry.meta.advanceId,
     ...(entry.meta.advanceAllocations || []).map(row => row.advanceId),
+    ...(entry.meta.leftoverAllocations || []).map(row => row.advanceId),
     ...(entry.meta.allocations || []).flatMap(row => [row.sourceId, row.purchaseId]),
     ...(entry.meta.sourceUses || []).map(row => row.sourceId),
     ...(entry.meta.debtUses || []).map(row => row.sourceId),
@@ -443,7 +445,7 @@ function buildSupplierOwners(state) {
 function resolveEntrySupplierOwners(entry, firmIds, owners, byIdLookup, visited = new Set()) {
   if (!entry || visited.has(entry.id)) return new Set();
   visited.add(entry.id);
-  const ids = new Set([entry.meta?.supplierId, entry.meta?.counterpartyId, ...entry.entries.map(row => owners.get(row.accountId))].filter(id => firmIds.has(id)));
+  const ids = new Set([entry.meta?.supplierId, entry.meta?.fromSupplierId, entry.meta?.toSupplierId, entry.meta?.counterpartyId, ...entry.entries.map(row => owners.get(row.accountId))].filter(id => firmIds.has(id)));
   if (['reverse', 'supplierReverse', 'supplierReturn', 'supplierAmend'].includes(entry.type) && entry.meta?.originalId) {
     const orig = byIdLookup(entry.meta.originalId);
     for (const id of resolveEntrySupplierOwners(orig?.entry || orig, firmIds, owners, byIdLookup, visited)) ids.add(id);
@@ -492,6 +494,9 @@ export function extractHotState(ledger) {
     if (['account', 'fundAccount', 'stockAccount', 'supplierUnit'].includes(e.type) && e.meta?.accountId) {
       accountCreatedDates.set(e.meta.accountId, e.date);
       if (e.type === 'account') accountCreatedSeq.set(e.meta.accountId, i + 1);
+    }
+    if (Array.isArray(e.meta?.createdAccountIds)) {
+      for (const id of e.meta.createdAccountIds) accountCreatedDates.set(id, e.date);
     }
   }
   const hot = {
@@ -557,6 +562,39 @@ export function applyHotState(hot, nextState, newEntries, lookupById, startSeq) 
       if (entry.type === 'account') {
         if (accountCreatedSeq === hot.accountCreatedSeq) accountCreatedSeq = new Map(hot.accountCreatedSeq);
         accountCreatedSeq.set(entry.meta.accountId, startSeq + i);
+      }
+    }
+    if (Array.isArray(entry.meta?.createdAccountIds) && entry.meta.createdAccountIds.length) {
+      if (accountCreatedDates === hot.accountCreatedDates) accountCreatedDates = new Map(hot.accountCreatedDates);
+      for (const id of entry.meta.createdAccountIds) accountCreatedDates.set(id, entry.date);
+    }
+    if (['reverse', 'supplierReverse'].includes(entry.type) && entry.meta?.originalId) {
+      const orig = resolvedById(entry.meta.originalId);
+      const origSid = orig?.meta?.supplierId;
+      const byId = getAccountIndex(nextState.accounts).byId;
+      const hasScrap = origSid && [...(orig.meta?.givenLines || []), ...(orig.meta?.receivedLines || [])].some(r => isSupplierScrap(byId.get(r.accountId)));
+      if (hasScrap) {
+        if (supplierGivenScrap === hot.supplierGivenScrap) supplierGivenScrap = new Map(hot.supplierGivenScrap);
+        const recomputed = supplierGivenScrapBalances(nextState, origSid);
+        if (Object.keys(recomputed).length) supplierGivenScrap.set(origSid, recomputed);
+        else supplierGivenScrap.delete(origSid);
+      }
+    } else if (entry.meta?.supplierId && (entry.meta?.givenLines?.length || entry.meta?.receivedLines?.length)) {
+      const byId = getAccountIndex(nextState.accounts).byId;
+      const sid = entry.meta.supplierId;
+      const scrapGiven = (entry.meta.givenLines || []).filter(r => isSupplierScrap(byId.get(r.accountId)));
+      const scrapReceived = (entry.meta.receivedLines || []).filter(r => isSupplierScrap(byId.get(r.accountId)));
+      if (scrapGiven.length || scrapReceived.length) {
+        if (supplierGivenScrap === hot.supplierGivenScrap) supplierGivenScrap = new Map(hot.supplierGivenScrap);
+        const nextMap = { ...(supplierGivenScrap.get(sid) || {}) };
+        for (const r of scrapGiven) nextMap[r.accountId] = (nextMap[r.accountId] || 0) + r.quantity;
+        for (const r of scrapReceived) {
+          const val = Math.max(0, (nextMap[r.accountId] || 0) - r.quantity);
+          if (val > 0) nextMap[r.accountId] = val;
+          else delete nextMap[r.accountId];
+        }
+        if (Object.keys(nextMap).length) supplierGivenScrap.set(sid, nextMap);
+        else supplierGivenScrap.delete(sid);
       }
     }
     if (entry.type === 'registerItem') {

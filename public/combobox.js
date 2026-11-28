@@ -1041,7 +1041,8 @@
 
       const q = searchQuery !== null ? searchQuery : inputEl.value;
       if (isAsync) {
-        triggerAsyncSearch(q, { immediate });
+        const effectiveAsyncQuery = q === committedLabel && committedValue !== '' ? (committedItem?.label || '') : q;
+        triggerAsyncSearch(effectiveAsyncQuery, { immediate });
       } else {
         ensureIndexed();
         const effectiveQuery = q === committedLabel && committedValue !== '' ? '' : q;
@@ -1226,6 +1227,16 @@
       }
     }
 
+    function onInputClick() {
+      if (inputEl.disabled) return;
+      if (!isOpen) {
+        const reopenQuery = committedValue !== '' && inputEl.value === committedLabel
+          ? (isAsync ? (committedItem?.label || '') : '')
+          : null;
+        open({ searchQuery: reopenQuery, immediate: true });
+      }
+    }
+
     function onKeydown(event) {
       if (inputEl.disabled) return;
       if (event.key === 'ArrowDown') {
@@ -1340,6 +1351,7 @@
 
     inputEl.addEventListener('input', onInput);
     inputEl.addEventListener('focus', onFocus);
+    inputEl.addEventListener('click', onInputClick);
     inputEl.addEventListener('keydown', onKeydown);
     inputEl.addEventListener('blur', onBlur);
     clearBtn.addEventListener('mousedown', onClearMousedown);
@@ -1424,6 +1436,7 @@
         detachPortalListeners();
         inputEl.removeEventListener('input', onInput);
         inputEl.removeEventListener('focus', onFocus);
+        inputEl.removeEventListener('click', onInputClick);
         inputEl.removeEventListener('keydown', onKeydown);
         inputEl.removeEventListener('blur', onBlur);
         clearBtn.removeEventListener('mousedown', onClearMousedown);

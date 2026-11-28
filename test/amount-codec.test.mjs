@@ -203,3 +203,59 @@ test('Paket 1B extra regressions: table-driven multi-unit matrix, resolution inv
     repo.close();
   }
 });
+
+test('v22 hardening: 100x dot-decimal inflation prevention, dataset.amountUnit reset, 4-decimal kur & Turkish boundaries', () => {
+  // K1: Canonical dot-decimal inputs NEVER inflate 100x
+  assert.deepEqual(codec.formatLiveMoneyValue('100000.00', 9), { value: '100.000,00', cursor: 10 });
+  assert.deepEqual(codec.formatLiveMoneyValue('4500.50', 7), { value: '4.500,50', cursor: 8 });
+  assert.deepEqual(codec.formatLiveMoneyValue('0.50', 4), { value: '0,50', cursor: 4 });
+  assert.deepEqual(codec.formatLiveMoneyValue('12.50', 5, { treatDotAsDecimal: true }), { value: '12,50', cursor: 5 });
+  // Backspace safety preserved: "1.000" -> "1.00" => "100"
+  assert.deepEqual(codec.formatLiveMoneyValue('1.00', 4), { value: '100', cursor: 3 });
+  assert.deepEqual(codec.formatLiveMoneyValue('10.00', 5), { value: '1.000', cursor: 5 });
+
+  // K2: isMoneyUnit rejects RATE; clearInputState resets dataset.amountUnit; inferInputUnit handles kur, Turkish chars, ISO-3
+  assert.equal(codec.isMoneyUnit('RATE'), false);
+  assert.equal(codec.isMoneyUnit('SAR'), true);
+  assert.equal(codec.isMoneyUnit('AED'), true);
+
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <label>Tutar (TL)<input id="m" inputmode="decimal"></label>
+    <label>Anlaşılan birim fiyat / kur<input id="bind-calc-rate" inputmode="decimal"></label>
+    <label>Döviz kuru<input id="r" inputmode="decimal"></label>
+    <label>Saf gümüş miktarı<input id="g" inputmode="decimal"></label>
+    <label>Tartı sonucu<input id="t" inputmode="decimal"></label>
+    <label>Tutar (SAR)<input id="sar" inputmode="decimal"></label>
+  </body></html>`);
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  globalThis.HTMLInputElement = dom.window.HTMLInputElement;
+  dom.window.eval(readFileSync(new URL('../public/amount-codec.js', import.meta.url), 'utf8'));
+  const domCodec = dom.window.DefterAmountCodec;
+
+  const m = dom.window.document.getElementById('m');
+  domCodec.setFormattedInputValue(m, 10000000, 'TL');
+  assert.equal(m.value, '100.000,00');
+  assert.equal(m.dataset.amountUnit, 'TL');
+  domCodec.setFormattedInputValue(m, '12.50', 'TL');
+  assert.equal(m.value, '12,50');
+
+  // Switching TL -> clearInputState MUST clear dataset.amountUnit
+  domCodec.clearInputState(m);
+  assert.equal(m.dataset.amountUnit, undefined);
+
+  // 4-decimal kur is NOT treated as 2-decimal money
+  const rateEl = dom.window.document.getElementById('bind-calc-rate');
+  const kurEl = dom.window.document.getElementById('r');
+  assert.equal(domCodec.inferInputUnit(rateEl), 'RATE');
+  assert.equal(domCodec.inferInputUnit(kurEl), 'RATE');
+  assert.equal(domCodec.isMoneyUnit(domCodec.inferInputUnit(kurEl)), false);
+  kurEl.value = '38,5450';
+  assert.equal(domCodec.applyLiveMoneyGrouping(kurEl, domCodec.inferInputUnit(kurEl)), false);
+  assert.equal(kurEl.value, '38,5450');
+
+  // Turkish boundaries (gümüş, tartı) -> GRAM, ISO-3 (SAR) -> TL money
+  assert.equal(domCodec.inferInputUnit(dom.window.document.getElementById('g')), 'GRAM');
+  assert.equal(domCodec.inferInputUnit(dom.window.document.getElementById('t')), 'GRAM');
+  assert.equal(domCodec.inferInputUnit(dom.window.document.getElementById('sar')), 'TL');
+});

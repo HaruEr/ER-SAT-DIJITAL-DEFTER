@@ -202,7 +202,7 @@ check('a routed creation cannot silently approve a caller draft changed by anoth
 check('journal amendment does not offer an owner-creation route that changes its captured revision', async c => {
   const state = c.repo.state();
   c.repo.execute({ id: 'editable-sale', revision: state.revision, command: { type: 'sale', date: state.date, items: [{ accountId: 'gramToplam', quantity: '2', value: '120' }], payments: [{ accountId: 'nakit', quantity: '120', valueTL: '120' }], credits: [], scrap: [], note: 'Düzenlenecek kayıt' } });
-  await c.click('#refresh'); await c.nav('journal'); await c.click('[data-edit-transaction]');
+  await c.click('#refresh'); await c.nav('journal'); await c.click('[data-journal-mode="detailed"]'); await c.click('[data-edit-transaction]');
   assert.ok(c.d.querySelector('#edit-operation #sale-form'));
   assert.equal(c.d.querySelector('#edit-operation [data-create-party]'), null, 'Amendment must keep its original revision and only offer existing parties');
   assert.equal(c.commands.length, 0);

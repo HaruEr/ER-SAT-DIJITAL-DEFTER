@@ -53,7 +53,7 @@ check('POS only offers TL banks; readonly fee and selected target receive exact 
  await start(f,'settlement');const s=f.repo.state();const choices=[...f.document.querySelector('[name="bankAccount"]').options];
  for(const o of choices){const a=s.accounts.find(a=>a.id===o.value);assert.equal(a.unit,'TL');assert.equal(a.physical,false);assert.notEqual(a.id,'pos');}
  input(f,'bankAccount',bank(f,'TL'));input(f,'gross','200');input(f,'expected','195');
- assert.equal(f.document.querySelector('[name="fee"]').readOnly,true);assert.equal(f.document.querySelector('[name="fee"]').value,'5.00');
+ assert.equal(f.document.querySelector('[name="fee"]').readOnly,true);assert.equal(f.document.querySelector('[name="fee"]').value,'5');
  f.document.querySelector('#settlement-form').dispatchEvent(new f.window.Event('submit',{bubbles:true,cancelable:true}));await tick();
  const after=f.repo.state();assert.equal(after.balances.pos,s.balances.pos-20000);assert.equal(after.balances[bank(f,'TL')],s.balances[bank(f,'TL')]+19500);assert.equal(after.balances.banka,s.balances.banka);assert.equal(after.revision,s.revision+1);
 });

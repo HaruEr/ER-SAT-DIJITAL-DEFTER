@@ -375,7 +375,7 @@ test('Paket4 A1: Owner retail sale & purchase start in Quick Mode and quick-fill
     assert.equal(quickFill.hidden, false, 'Quick-fill cash button must appear when total > 0 and no payment rows');
     quickFill.click();
     await tick(10);
-    assert.equal(document.querySelector('[data-allocation-kind="payment"] [data-allocation-field="quantity"]').value, '5000.00');
+    assert.equal(document.querySelector('[data-allocation-kind="payment"] [data-allocation-field="quantity"]').value, '5.000,00');
     assert.equal(document.querySelector('#sale-form button[type="submit"]').dataset.balanced, 'true');
 
     document.querySelector('#sale-form').dispatchEvent(new env.window.Event('submit', { bubbles: true, cancelable: true }));
@@ -430,12 +430,12 @@ test('Paket4 A2: Owner Quick -> Guided escalation on complexity preserves draft 
     assert.equal(document.querySelector('[data-step-panel="1"]').classList.contains('is-active'), true);
     assert.equal(document.activeElement.id, 'f-counterpartyId');
 
-    // Hazard 4: adding 2nd item keeps Step 1 active and focuses new select
+    // Hazard 4: adding 2nd item prepends at index 0, keeps Step 1 active, and focuses new select
     document.querySelector('#add-sale-item').click();
     const items = document.querySelectorAll('.sale-item');
     assert.equal(items.length, 2);
     assert.equal(document.querySelector('[data-step-panel="1"]').classList.contains('is-active'), true);
-    assert.equal(document.activeElement, items[1].querySelector('[data-item-field="accountId"]'));
+    assert.equal(document.activeElement, items[0].querySelector('[data-item-field="accountId"]'));
 
     // HAS / non-TL payment also escalates Quick -> Guided Step 2
     document.querySelector('[data-clear-draft]').click();
@@ -464,8 +464,9 @@ test('Paket4 A3: Manual mode toggle clean-draft safety and DefterDraftStore F5 p
     assert.equal(form.dataset.draftDirty, 'false');
     assert.equal(env1.window.DefterDraftStore.listDrafts({ workspace: 'demo' }).length, 0);
 
-    // Dirty the form (select non-paired item so Step 1 is valid) and move to Step 2
+    // Dirty the form (select non-paired item + quantity so Step 1 is valid) and move to Step 2
     env1.setVal('[data-item-field="accountId"]', 'ceyrek');
+    env1.setVal('[data-item-field="quantity"]', '1');
     env1.setVal('[data-item-field="value"]', '3500');
     env1.setVal('#f-note', 'F5 Guided Draft');
     env1.document.querySelector('[data-step-target="2"]').click();
@@ -484,7 +485,7 @@ test('Paket4 A3: Manual mode toggle clean-draft safety and DefterDraftStore F5 p
     assert.equal(form.dataset.flowMode, 'guided');
     assert.equal(form.classList.contains('stepper-active'), true);
     assert.equal(env2.document.querySelector('[data-step-panel="2"]').classList.contains('is-active'), true);
-    assert.equal(env2.document.querySelector('[data-item-field="value"]').value, '3500');
+    assert.equal(env2.document.querySelector('[data-item-field="value"]').value, '3.500');
     assert.equal(env2.document.querySelector('#f-note').value, 'F5 Guided Draft');
 
     // Clear draft -> resets to Quick Mode, clean
@@ -495,6 +496,7 @@ test('Paket4 A3: Manual mode toggle clean-draft safety and DefterDraftStore F5 p
 
     // Simple Quick draft persists & restores as Quick (no spurious escalation)
     env2.setVal('[data-item-field="accountId"]', 'ceyrek');
+    env2.setVal('[data-item-field="quantity"]', '1');
     env2.setVal('[data-item-field="value"]', '1500');
     env2.setVal('#f-note', 'Simple Quick F5');
     env2.window.dispatchEvent(new env2.window.Event('beforeunload'));
@@ -506,7 +508,7 @@ test('Paket4 A3: Manual mode toggle clean-draft safety and DefterDraftStore F5 p
     try {
       assert.equal(env3.document.querySelector('#sale-form').dataset.flowMode, 'quick');
       assert.equal(env3.document.querySelector('#sale-form').classList.contains('flow-quick'), true);
-      assert.equal(env3.document.querySelector('[data-item-field="value"]').value, '1500');
+      assert.equal(env3.document.querySelector('[data-item-field="value"]').value, '1.500');
       assert.equal(env3.document.querySelector('#f-note').value, 'Simple Quick F5');
     } finally {
       env3.close();
@@ -647,7 +649,7 @@ test('Paket4 D1: Owner Stock Drawer creates GRAM & paired ADET (opening=0), auto
     assert.ok(createdGram);
     assert.equal(document.querySelector('[data-item-field="accountId"]').value, createdGram.id);
     assert.equal(document.querySelector('#f-note').value, 'Stok drawer taslağı');
-    assert.equal(document.querySelector('[data-item-field="value"]').value, '4500');
+    assert.equal(document.querySelector('[data-item-field="value"]').value, '4.500');
     assert.equal(document.querySelector('#sale-form').dataset.draftStale, 'false');
 
     // ADET + pairedGroups enforces opening='0' (domain.mjs:696) and selects weightAccount
@@ -762,6 +764,8 @@ test('Paket4 D2: Stock Drawer handles 400 inline, 5xx retry, pending guard, stal
     await tick(40);
     document.querySelector('[data-view="journal"]').click();
     await tick(20);
+    document.querySelector('[data-journal-mode="detailed"]')?.click();
+    await tick(20);
     document.querySelector('[data-edit-transaction]').click();
     await tick(20);
     assert.equal(document.querySelector('#edit-operation [data-create-stock]'), null, 'Hidden in edit view');
@@ -859,7 +863,7 @@ test('Paket4 F1: Employee checkout Quick -> Guided escalation without draft loss
     assert.equal(env1.document.querySelector('[data-flow-mode="quick"]').disabled, true);
     assert.equal(env1.document.querySelector('[data-step-panel="2"]').classList.contains('is-active'), true);
     assert.equal(env1.document.querySelector('[data-item] [data-value]').value, '5000');
-    assert.equal(env1.document.querySelector('[data-allocation="received"] [data-quantity]').value, '3000');
+    assert.equal(env1.document.querySelector('[data-allocation="received"][data-category="money"] [data-quantity]').value, '3000');
     assert.equal(env1.document.querySelector('#note').value, 'Tezgâh escalation notu');
     assert.match(summary.querySelector('#summary-lines').textContent, /ÇEYREK/i);
 
@@ -1165,7 +1169,7 @@ test('Paket4 H1: Untouched Row 0 survives [data-create-party] and F5 without fal
     assert.equal(itemRows.length, 2);
     assert.equal(itemRows[0].querySelector('[data-item-field="accountId"]').value, 'ceyrek');
     assert.equal(itemRows[1].querySelector('[data-item-field="accountId"]').value, 'stock-' + stockCmd.id);
-    assert.equal(env3b.document.querySelector('#sale-form').dataset.flowMode, 'guided');
+    assert.equal(env3b.document.querySelector('#sale-form').dataset.flowMode, 'quick');
   } finally {
     env3b.close();
   }
@@ -1221,6 +1225,8 @@ test('Paket4 H3: view === "edit" on simple retail sale stays in Guided Mode (.st
     document.querySelector('#refresh').click();
     await tick(40);
     document.querySelector('[data-view="journal"]').click();
+    await tick(20);
+    document.querySelector('[data-journal-mode="detailed"]')?.click();
     await tick(20);
     document.querySelector('[data-edit-transaction]').click();
     await tick(20);

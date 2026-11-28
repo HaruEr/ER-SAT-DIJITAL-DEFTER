@@ -227,7 +227,6 @@ function parseReadOnlyAmount(inputOrValue, unit='TL') {
   return Number.isSafeInteger(amount) && amount > 0 && amount <= 1e12 ? amount : null;
 }
 function isComplexCheckoutState() {
-  if ($('items').children.length > 1) return true;
   const primaryKind = operation === 'sale' ? 'received' : 'given';
   const oppositeKind = operation === 'sale' ? 'given' : 'received';
   if ($(oppositeKind).children.length > 0) return true;
@@ -301,19 +300,31 @@ function configureItem(row,clear=false) {
   const {product,serial}=itemProduct(row), select=row.querySelector('[data-pool]');
   const previous=select.value;
   const pools=product?.weights || [];
+  const isBlind=Boolean(product && (product.blind || product.quantity === null || product.freeQuantity === null));
   select.innerHTML=pools.map(p=>{
     const qty=operation==='sale'?(p.freeQuantity ?? p.quantity):p.quantity;
-    return option(p.id,qty===undefined?p.name:p.name+' · '+format(qty,'GRAM'));
+    const hidePoolQty=isBlind || Boolean(p.blind) || qty === null || qty === undefined;
+    return option(p.id,hidePoolQty?p.name:p.name+' · '+format(qty,'GRAM'));
   }).join('');
   if (pools.some(p=>p.id===previous)) select.value=previous;
   row.querySelector('[data-weight-fields]').hidden=!pools.length;
   row.querySelector('[data-weight]').required=!!pools.length;
   row.querySelector('[data-quantity-label]').textContent=product?.unit==='ADET'?'Adet':'Miktar · '+(product?.unit || 'GRAM');
-  row.querySelector('[data-available]').textContent=product?'Toplu kullanım '+format(product.freeQuantity ?? product.quantity,product.unit)+(serial?' · Tekil ürün '+serial.code:''):'Ürün seçin.';
+  const qtyEl=row.querySelector('[data-quantity]');
+  if(qtyEl){
+    if(product?.unit) qtyEl.dataset.amountUnit=product.unit;
+    else delete qtyEl.dataset.amountUnit;
+  }
+  row.querySelector('[data-available]').textContent=product
+    ?(isBlind
+      ?(serial?'Tekil ürün '+serial.code:'')
+      :'Toplu kullanım '+format(product.freeQuantity ?? product.quantity,product.unit)+(serial?' · Tekil ürün '+serial.code:''))
+    :'Ürün seçin.';
   for(const key of ['quantity','weight']) row.querySelector('[data-'+key+']').readOnly=!!serial;
   select.disabled=!!serial || !pools.length;
   select.required=!!pools.length;
   if(clear) for(const key of ['quantity','weight','value','quoted','source']) { const el=row.querySelector('[data-'+key+']'); clearAmountInputState(el); el.value=''; }
+  if(clear && qtyEl && product?.unit) qtyEl.dataset.amountUnit=product.unit;
   if(clear) row.querySelector('[data-components]').replaceChildren();
   if(serial) {
     row.querySelector('[data-quantity]').value='1';
@@ -325,14 +336,15 @@ function productChoices() {
   const items = [], sale = operation === 'sale';
   for (const product of snapshot?.products || []) {
     if (!(sale ? product.canSell : product.canBuy)) continue;
-    const avail = product.freeQuantity ?? product.quantity ?? 0;
-    const hasPool = !product.weights?.length || product.weights.some(w => (w.freeQuantity === undefined && w.quantity === undefined) ? true : (w.freeQuantity ?? w.quantity ?? 0) > 0);
-    const isZeroStock = sale && (avail <= 0 || !hasPool);
+    const isBlind = Boolean(product.blind || product.quantity === null || product.freeQuantity === null);
+    const avail = isBlind ? null : (product.freeQuantity ?? product.quantity ?? 0);
+    const hasPool = !product.weights?.length || product.weights.some(w => (w.blind || w.freeQuantity === null || w.quantity === null || (w.freeQuantity === undefined && w.quantity === undefined)) ? true : (w.freeQuantity ?? w.quantity ?? 0) > 0);
+    const isZeroStock = sale && (isBlind ? product.available === false : (avail <= 0 || !hasPool));
     items.push({
       id: product.id,
       label: product.name,
       unit: product.unit,
-      subtitle: sale ? `Mevcut: ${format(avail, product.unit)}` : '',
+      subtitle: (sale && !isBlind) ? `Mevcut: ${format(avail, product.unit)}` : '',
       badge: product.scrap ? 'Hurda' : '',
       keywords: [product.id, ...product.weights.map(w => w.name)].join(' '),
       disabled: isZeroStock,
@@ -365,7 +377,7 @@ function syncProductSelect(row, items, selectedId) {
   const select = row.querySelector('[data-product]');
   if (!select) return;
   if (items.length <= 50) {
-    select.innerHTML = items.map(m => '<option value="' + esc(m.id) + '"' + (m.code ? ' data-code="' + esc(m.code) + '"' : '') + '>' + esc(m.label) + '</option>').join('');
+    select.innerHTML = '<option value="">Ürün seçin</option>' + items.map(m => '<option value="' + esc(m.id) + '"' + (m.code ? ' data-code="' + esc(m.code) + '"' : '') + '>' + esc(m.label) + '</option>').join('');
   } else {
     const selected = items.find(m => m.id === selectedId);
     select.innerHTML = '<option value="">Ürün seçin</option>' + (selected ? '<option value="' + esc(selected.id) + '"' + (selected.code ? ' data-code="' + esc(selected.code) + '"' : '') + '>' + esc(selected.label) + '</option>' : '');
@@ -378,7 +390,8 @@ function listProducts(row,preserve) {
   const matches=[],sale=operation==='sale';
   for(const product of snapshot?.products || []) {
     if(!(sale?product.canSell:product.canBuy)) continue;
-    if(normalize([product.id,product.name,...product.weights.map(p=>p.name)].join(' ')).includes(normalized)) matches.push({id:product.id,name:product.name,available:(product.freeQuantity ?? product.quantity)>0,exact:product.id.toLocaleLowerCase('tr')===literal});
+    const isBlind=Boolean(product.blind || product.quantity === null || product.freeQuantity === null);
+    if(normalize([product.id,product.name,...product.weights.map(p=>p.name)].join(' ')).includes(normalized)) matches.push({id:product.id,name:product.name,available:isBlind?(product.available!==false):(product.freeQuantity ?? product.quantity)>0,exact:product.id.toLocaleLowerCase('tr')===literal});
   }
   if(sale) for(const piece of snapshot?.inventoryItems || []) {
     const product=snapshot.products.find(p=>p.id===piece.accountId);
@@ -396,11 +409,11 @@ function listProducts(row,preserve) {
   row.querySelector('[data-results]').textContent=matches.length>12?'İlk 12 eşleşme. Aramayı daraltın.':matches.length?'':'Eşleşen ürün yok.';
   configureItem(row, !preserve && selected!==row.querySelector('[data-product]').value);
 }
-function addItem(data={}) {
+function addItem(data={}, { append = false } = {}) {
   if($('items').children.length>=30) return;
   const row=document.createElement('article');row.className='checkout-line';row.dataset.item='';
-  row.innerHTML='<div class="access-bar"><strong data-title></strong><button type="button" data-remove class="button text">Satırı kaldır</button></div><label>Ürün ara<input data-product-search type="search" autocomplete="off" maxlength="160" placeholder="Kod, barkod, ad veya ayar"></label><p data-results role="status"></p><label>Ürün<select data-product required></select></label><small data-available></small><div class="access-columns">'+numeric('data-quantity','<span data-quantity-label>Miktar</span>')+numeric('data-value','Satır toplamı · TL')+'</div><div data-weight-fields class="access-columns" hidden><label>Ayar hesabı<select data-pool></select></label>'+numeric('data-weight','Gerçek gram',false)+'</div><details data-price'+(operation==='purchase'?' hidden':'')+'><summary>Fiyat ayrıntıları · isteğe bağlı</summary><div class="access-columns">'+numeric('data-quoted','Teklif edilen satır bedeli · TL',false)+'<label>Fiyat kaynağı<input data-source maxlength="120"></label></div><div data-components></div><button type="button" data-add-component class="button secondary compact">Fiyat bileşeni ekle</button></details>';
-  $('items').append(row);
+  row.innerHTML='<div class="access-bar"><strong data-title></strong><button type="button" data-remove class="button text">Satırı kaldır</button></div><label>Ürün<input data-product-search type="search" autocomplete="off" maxlength="160" placeholder="Ürün seçin (kod, barkod, ad veya ayar)"></label><p data-results role="status"></p><label>Ürün<select data-product required></select></label><small data-available></small><div class="access-columns">'+numeric('data-quantity','<span data-quantity-label>Miktar</span>')+numeric('data-value','Satır toplamı · TL')+'</div><div data-weight-fields class="access-columns" hidden><label>Ayar hesabı<select data-pool></select></label>'+numeric('data-weight','Gerçek gram',false)+'</div><details data-price'+(operation==='purchase'?' hidden':'')+'><summary>Fiyat ayrıntıları · isteğe bağlı</summary><div class="access-columns">'+numeric('data-quoted','Teklif edilen satır bedeli · TL',false)+'<label>Fiyat kaynağı<input data-source maxlength="120"></label></div><div data-components></div><button type="button" data-add-component class="button secondary compact">Fiyat bileşeni ekle</button></details>';
+  if (append) $('items').append(row); else $('items').prepend(row);
   const searchInput=row.querySelector('[data-product-search]');
   const productSelect=row.querySelector('[data-product]');
   if(comboboxLib){
@@ -411,7 +424,7 @@ function addItem(data={}) {
     productSelect.tabIndex=-1;
     productSelect.setAttribute('aria-hidden','true');
     const items=productChoices();
-    const initialId=data.selection || items.find(it=>!it.disabled)?.id || '';
+    const initialId=data.selection || '';
     const cbItems=(data.selection && !items.some(it=>it.id===data.selection))
       ? [{id:data.selection,label:data.selection+' · yeniden seçin',disabled:false},...items]
       : items;
@@ -421,15 +434,15 @@ function addItem(data={}) {
     const productCb=comboboxLib.create({
       input:searchInput,
       label:'Ürün',
-      placeholder:'Kod, barkod, ad veya ayar',
+      placeholder:'Ürün seçin (kod, barkod, ad veya ayar)',
       items:cbItems,
       value:initialId,
       allowDisabled:Boolean(data.selection),
-      allowEmpty:false,
-      clearable:false,
+      allowEmpty:true,
+      clearable:true,
       required:true,
       maxResults:20,
-      openOnFocus:true,
+      openOnFocus:false,
       invalidTextBehavior:'error',
       emptyMessage:'Eşleşen ürün yok.',
       onChange:(val,_item,meta)=>{
@@ -535,6 +548,11 @@ function allocationOptions(row,preserve) {
 function configureAllocation(row) {
   const account=allocationAccount(row),unit=account?.unit,pool=row.querySelector('[data-pool]');
   row.querySelector('[data-quantity-label]').textContent=unit?'Miktar · '+unit:'Miktar';
+  const qtyEl=row.querySelector('[data-quantity]');
+  if(qtyEl){
+    if(unit) qtyEl.dataset.amountUnit=unit;
+    else delete qtyEl.dataset.amountUnit;
+  }
   const previous=pool.value;
   pool.innerHTML=(account?.weights || []).map(a=>option(a.id,a.name)).join('');
   if([...pool.options].some(o=>o.value===previous))pool.value=previous;
@@ -545,18 +563,19 @@ function configureAllocation(row) {
   row.querySelector('[data-value]').required=unit!=='TL';
   if(unit==='TL')row.querySelector('[data-value]').value=row.querySelector('[data-quantity]').value;
 }
-function addAllocation(kind,data={}) {
+function addAllocation(kind,data={}, { append = false } = {}) {
   if($(kind).children.length>=30)return;
   const row=document.createElement('div');row.className='checkout-line';row.dataset.allocation=kind;
   row.dataset.category=allocationCategory(kind,data);
   const label={money:'Para hesabı',product:'Ürün',scrap:'Hurda hesabı',customer:'Seçilen müşterinin cari hesabı'}[row.dataset.category];
   row.innerHTML='<label><span>'+label+'</span><select data-account required></select></label><div class="access-columns">'+numeric('data-quantity','<span data-quantity-label>Miktar</span>')+'<div data-reference>'+numeric('data-value','Anlaşılmış TL karşılığı')+'</div></div><div data-weight-fields class="access-columns" hidden><label>Ayar hesabı<select data-pool></select></label>'+numeric('data-weight','Gerçek gram',false)+'</div><button type="button" data-remove class="button text">Karşılığı kaldır</button>';
-  $(kind).append(row);
+  if (append) $(kind).append(row); else $(kind).prepend(row);
   const accountSelect=row.querySelector('[data-account]');
   if(comboboxLib?.enhanceSelect){
     row._accountCombobox=comboboxLib.enhanceSelect(accountSelect,{label,smallListThreshold:50,maxNativeOptions:2,allowEmpty:true,emptyLabel:'Hesap seçin',placeholder:'Hesap veya ürün ara…',invalidTextBehavior:'revert',formatSelectedText:item=>item.unit?`${item.label} · ${item.unit}`:item.label});
   }
-  allocationOptions(row,data.accountId);
+  const defaultAccountId = data.accountId || (row.dataset.category === 'money' ? ((snapshot?.payments || []).find(p => p.id === 'nakit')?.id || (snapshot?.payments || []).find(p => p.unit === 'TL')?.id || '') : '');
+  allocationOptions(row, defaultAccountId);
   for(const key of ['quantity','weight'])row.querySelector('[data-'+key+']').value=data[key] || '';
   row.querySelector('[data-value]').value=data.valueTL || '';
   if(data.weightAccount)row.querySelector('[data-pool]').value=data.weightAccount;
@@ -594,6 +613,8 @@ function saveDraft() {
 function changed(event) {
   if(rendering)return;
   event?.target?.setCustomValidity?.('');
+  const stepPanel = event?.target?.closest?.('[data-step-panel]');
+  if (stepPanel) setStepValidationError(stepPanel, '');
   draftDirty=true;
   review=null;$('review').hidden=true;
   totals();
@@ -629,9 +650,12 @@ function renderLiveSummary() {
     const items = [];
     for (const row of $('items').children) {
       const { product } = itemProduct(row);
+      const qtyVal = row.querySelector('[data-quantity]')?.value.trim() || '';
+      const valStr = row.querySelector('[data-value]')?.value.trim() || '';
+      if (!product && !qtyVal && !valStr) continue;
       const qty = parseReadOnlyAmount(row.querySelector('[data-quantity]'), product?.unit || 'ADET');
       const val = parseReadOnlyAmount(row.querySelector('[data-value]'), 'TL');
-      items.push(`<li><span>${esc(product?.name || 'Ürün')} · ${esc(qty === null ? 'Eksik' : format(qty, product?.unit || 'ADET'))}</span><strong>${esc(val === null ? 'Eksik' : format(val, 'TL'))}</strong></li>`);
+      items.push(`<li><span>${esc(product?.name || 'Ürün seçin')} · ${esc(qty === null ? 'Eksik' : format(qty, product?.unit || 'ADET'))}</span><strong>${esc(val === null ? 'Eksik' : format(val, 'TL'))}</strong></li>`);
     }
     const shortLabels = { received: 'Alınan', given: 'Verilen', credits: 'Cari alacak', debts: 'Cari borç' };
     for (const kind of groups) {
@@ -685,8 +709,8 @@ function restoreDraft(saved) {
   draftDirty=Boolean(saved);
   manualFlowMode=saved?.manualFlowMode ?? (saved?.flowMode === 'guided' ? 'guided' : null);
   activeStep=[1,2,3].includes(Number(saved?.activeStep)) ? Number(saved.activeStep) : 1;
-  for(const item of saved?.items || [{}])addItem(item);
-  for(const kind of groups)for(const row of saved?.[kind] || [])addAllocation(kind,row);
+  for(const item of saved?.items || [{}])addItem(item,{append:true});
+  for(const kind of groups)for(const row of saved?.[kind] || [])addAllocation(kind,row,{append:true});
   $('note').value=saved?.note || '';
   $('items-title').textContent=operation==='sale'?'Satılan ürünler':'Alınan ürünler';
   $('total-label').textContent=operation==='sale'?'Satış bedeli':'Alış bedeli';
@@ -788,9 +812,13 @@ function renderReview(c) {
 function stockTable() {
   const query=normalize($('stock-search').value);
   const rows=(snapshot?.stocks || snapshot?.products || []).filter(a=>normalize(a.id+' '+a.name+' '+a.unit).includes(query));
+  const hideCounts = current()?.actor?.role === 'employee';
   stockPage=Math.max(0,Math.min(stockPage,Math.ceil(rows.length/30)-1));
-  $('stock-list').innerHTML=rows.slice(stockPage*30,stockPage*30+30).map(a=>'<tr><td>'+esc(a.name)+'</td><td class="numeric">'+esc(format(a.quantity ?? 0,a.unit))+'</td><td class="numeric">'+esc(a.freeQuantity===undefined?'—':format(a.freeQuantity,a.unit))+'</td></tr>').join('');
-  $('stock-status').textContent=rows.length?(stockPage*30+1)+'–'+Math.min(rows.length,stockPage*30+30)+' / '+rows.length+' hesap':'Eşleşen stok veya hesap yok.';
+  $('stock-list').innerHTML=rows.slice(stockPage*30,stockPage*30+30).map(a=>{
+    const blindRow = hideCounts || Boolean(a.blind || a.quantity === null);
+    return '<tr><td>'+esc(a.name)+'</td><td class="numeric">'+esc(blindRow?'Gizli (Kör Sayım)':format(a.quantity ?? 0,a.unit))+'</td><td class="numeric">'+esc(blindRow?'Gizli (Kör Sayım)':(a.freeQuantity===undefined?'—':format(a.freeQuantity,a.unit)))+'</td></tr>';
+  }).join('');
+  $('stock-status').textContent=rows.length?(stockPage*30+1)+'–'+Math.min(rows.length,stockPage*30+30)+' / '+rows.length+' hesap'+(hideCounts?' (Kör sayım gizliliği aktif)':''):'Eşleşen stok veya hesap yok.';
   $('stock-prev').disabled=stockPage===0;$('stock-next').disabled=(stockPage+1)*30>=rows.length;
 }
 async function refresh() {
@@ -805,7 +833,11 @@ async function refresh() {
     const fresh=await api(route('checkout',selected));
     if(sequence!==loadSequence || selected!==workspace)return;
     snapshot=fresh;externalRevision=Math.max(externalRevision,fresh.revision);
-    $('date').textContent=fresh.initialized?'Açık iş günü · '+day(fresh.date):'Bu defterin açılışını işletme sahibi yapmalı.';
+    $('date').textContent=fresh.initialized?'Açık iş günü · '+day(fresh.date):'';
+    if ($('unopened-banner')) $('unopened-banner').hidden = Boolean(fresh.initialized);
+    const custSection = document.querySelector('.checkout-customer');
+    if (custSection) custSection.hidden = !fresh.initialized;
+    if ($('stock-panel')) $('stock-panel').hidden = !fresh.initialized;
     restoreDraft(readStoredDraft(workspace, operation));stockTable();renderBlindCountRows();$('trade').hidden=!fresh.initialized;
     if(selectedCustomer && !pending) await lookupCustomer(selectedCustomer.id);
     if(sequence!==loadSequence || selected!==workspace)return;
@@ -836,6 +868,9 @@ async function refreshMySubmissions() {
     listEl.innerHTML = items.map(item => {
       const stLabel = item.status === 'pending' ? 'Onay bekliyor' : item.status === 'rejected' ? 'Reddedildi' : item.wasEdited ? 'Düzenlenerek onaylandı' : 'Onaylandı';
       const stCls = item.status === 'pending' ? 'gold' : item.status === 'rejected' ? 'order-badge-overdue' : 'order-badge-fulfilled';
+      const withdrawMarkup = item.status === 'pending'
+        ? `<div class="access-bar"><button type="button" class="button secondary compact" data-withdraw-submission="${esc(item.id)}">Geri Çek</button></div>`
+        : '';
       if (item.type === 'dailyCount') {
         const cnt = item.summary?.countedCount || 0;
         const noted = item.summary?.notedCount || 0;
@@ -844,6 +879,7 @@ async function refreshMySubmissions() {
           (item.summary?.note ? `<p class="context-note wrap-anywhere">${esc(item.summary.note)}</p>` : '') +
           (item.status === 'rejected' && item.rejectionReason ? `<p class="context-note"><strong>Red gerekçesi:</strong> ${esc(item.rejectionReason)}</p>` : '') +
           (item.reviewedBy ? `<small class="context-note">İşlem: ${esc(item.reviewedBy.name)}</small>` : '') +
+          withdrawMarkup +
           `</article>`;
       }
       const lineText = (item.summary?.lines || []).map(l => `${l.name} (${l.weight ? format(l.weight, 'GRAM') : format(l.quantity, l.unit)})`).join(' · ');
@@ -852,10 +888,29 @@ async function refreshMySubmissions() {
         `<p class="context-note wrap-anywhere">${esc(lineText)}</p>` +
         (item.status === 'rejected' && item.rejectionReason ? `<p class="context-note"><strong>Red gerekçesi:</strong> ${esc(item.rejectionReason)}</p>` : '') +
         (item.reviewedBy ? `<small class="context-note">İşlem: ${esc(item.reviewedBy.name)}</small>` : '') +
+        withdrawMarkup +
         `</article>`;
     }).join('');
   } catch {}
 }
+$('my-submissions-list')?.addEventListener('click', async e => {
+  const btn = e.target.closest('[data-withdraw-submission]');
+  if (!btn || btn.disabled || writing) return;
+  const id = btn.dataset.withdrawSubmission;
+  if (!id) return;
+  if (uiKit?.guardConfirm && !uiKit.guardConfirm(btn)) return;
+  btn.disabled = true;
+  try {
+    await api(route('pending-approvals/' + encodeURIComponent(id) + '/withdraw', workspace), {});
+    await refreshMySubmissions();
+    const msg = 'Bekleyen bildirim geri çekildi.';
+    if (uiKit?.toast) uiKit.toast(msg, { kind: 'success' }); else status(msg);
+  } catch (err) {
+    if (btn.isConnected) btn.disabled = false;
+    const errMsg = err.message || 'Bildirim geri çekilemedi.';
+    if (uiKit?.toast) uiKit.toast(errMsg, { kind: 'error' }); else status(errMsg);
+  }
+});
 async function lookupCustomer(id) {
   const sequence=++customerSequence,selected=workspace;
   if(!id){selectedPerson(null,{syncCombobox:true});changed();return;}
@@ -973,10 +1028,10 @@ function syncFlowMode({ preferredStep = null, notify = false } = {}) {
   if (titleEl && noteEl) {
     if (flowMode === 'quick') {
       titleEl.textContent = 'Hızlı tezgâh modu';
-      noteEl.textContent = 'Tek ürün, tek TL ödeme ve not için tek ekran.';
+      noteEl.textContent = 'Çoklu ürün, tek TL ödeme ve not için tek ekran.';
     } else if (complex) {
       titleEl.textContent = 'Rehberli adımlar (karma işlem)';
-      noteEl.textContent = 'Çoklu ürün, hurda, verilen karşılık, TL dışı ödeme veya cari satırı nedeniyle adım adım kontrol açık.';
+      noteEl.textContent = 'Hurda, verilen karşılık, TL dışı ödeme veya cari satırı nedeniyle adım adım kontrol açık.';
     } else {
       titleEl.textContent = 'Rehberli adımlar';
       noteEl.textContent = 'Ürünler, ödeme/karşılık ve onay adımlarıyla ilerleyin.';
@@ -992,8 +1047,35 @@ function syncFlowMode({ preferredStep = null, notify = false } = {}) {
   }
   setCheckoutStep(activeStep);
 }
+const setStepValidationError = (panel, message = '') => {
+  if (!panel) return;
+  let errEl = panel.querySelector('[data-step-error]');
+  if (!message) {
+    if (errEl) { errEl.textContent = ''; errEl.hidden = true; }
+    return;
+  }
+  if (!errEl) {
+    errEl = document.createElement('p');
+    errEl.className = 'field-error';
+    errEl.dataset.stepError = '';
+    errEl.setAttribute('role', 'alert');
+    const nav = panel.querySelector('.stepper-nav');
+    if (nav) nav.before(errEl);
+    else panel.append(errEl);
+  }
+  errEl.textContent = message;
+  errEl.hidden = false;
+};
 const validateCheckoutStep = stepNum => {
+  const panel = $('trade').querySelector(`[data-step-panel="${stepNum}"]`);
+  setStepValidationError(panel, '');
   if (stepNum === 1) {
+    if (!$('items').children.length) {
+      const msg = 'Devam etmek için en az bir ürün satırı ekleyin.';
+      setStepValidationError(panel, msg);
+      status(msg);
+      return false;
+    }
     for (const row of $('items').children) {
       const { product } = itemProduct(row);
       validateRow(row, product, true);
@@ -1005,12 +1087,15 @@ const validateCheckoutStep = stepNum => {
       }
     }
   }
-  const panel = $('trade').querySelector(`[data-step-panel="${stepNum}"]`);
   const invalid = panel && [...panel.querySelectorAll('input,select,textarea')].find(el => !el.disabled && !el.checkValidity());
   if (invalid) {
     openAncestorDetails(invalid);
     if (flowMode === 'guided') setCheckoutStep(stepNum);
+    const msg = invalid.validationMessage || (stepNum === 1 ? 'Devam etmek için ürün, miktar ve tutar alanlarını doldurun.' : 'Devam etmek için işaretli alanları tamamlayın.');
+    setStepValidationError(panel, msg);
+    status(msg);
     invalid.reportValidity();
+    invalid.focus?.({ preventScroll: true });
     return false;
   }
   return true;
@@ -1074,7 +1159,47 @@ $('edit').addEventListener('click',()=>{review=null;$('review').hidden=true;cont
 $('trade').addEventListener('input',changed);
 $('trade').addEventListener('change',changed);
 $('add-item').addEventListener('click',()=>{const row=addItem();changed({preferredStep:1});row?.querySelector('input').focus();});
-for(const button of document.querySelectorAll('[data-add]'))button.addEventListener('click',()=>{const kind=button.dataset.add;const row=addAllocation(kind,{category:button.dataset.category});changed({preferredStep:2});if(!row)return;const select=row.querySelector('select');const preboundCari=['credits','debts'].includes(kind)&&Boolean(select?.value);if(preboundCari){row.querySelector('[data-quantity]')?.focus({preventScroll:true});}else if(row._accountCombobox){row._accountCombobox.focus({preventScroll:true,open:false});}else{select?.focus({preventScroll:true});}});
+for(const button of document.querySelectorAll('[data-add]'))button.addEventListener('click',()=>{const kind=button.dataset.add;const row=addAllocation(kind,{category:button.dataset.category});changed({preferredStep:2});if(!row)return;const select=row.querySelector('select');const preboundCari=['credits','debts'].includes(kind)&&Boolean(select?.value);if(preboundCari||row.dataset.category==='money'&&select?.value){row.querySelector('[data-quantity]')?.focus({preventScroll:true});}else if(row._accountCombobox){row._accountCombobox.focus({preventScroll:true,open:false});}else{select?.focus({preventScroll:true});}});
+for(const button of document.querySelectorAll('[data-quick-pay]'))button.addEventListener('click',()=>{
+  if(writing||pending||review||!snapshot)return;
+  const kind=button.dataset.quickKind, targetId=button.dataset.quickPay;
+  const acc=(snapshot?.payments || []).find(p=>p.id===targetId && (kind!=='given'||p.id!=='pos')) || (snapshot?.payments || []).find(p=>p.unit==='TL' && (kind!=='given'||p.id!=='pos'));
+  if(!acc)return;
+  const totalsRes=totals();
+  if(totalsRes.total<=0){status('Önce ürün tutarını girin.');return;}
+  const existingRows=[...$(kind).children];
+  let row=null;
+  let fillAmount=0;
+  if(existingRows.length===1 && existingRows[0].dataset.category==='money'){
+    const existingRow=existingRows[0];
+    const currentAcc=allocationAccount(existingRow);
+    const currentRowVal=parseReadOnlyAmount(existingRow.querySelector('[data-value]'), 'TL') || 0;
+    const isSameAcc=currentAcc?.id===acc.id;
+    if(!isSameAcc || totalsRes.difference!==0){
+      row=existingRow;
+      if(row._accountCombobox) row._accountCombobox.setValue(acc.id, { emitChange: false });
+      row.querySelector('[data-account]').value=acc.id;
+      const candidate=(operation==='sale' ? (kind==='received' ? totalsRes.difference : -totalsRes.difference) : (kind==='given' ? totalsRes.difference : -totalsRes.difference)) + currentRowVal;
+      fillAmount=candidate>0 ? candidate : totalsRes.total;
+    } else {
+      status('Bu ödeme yöntemi zaten seçili ve tutar dengeli.');
+      return;
+    }
+  } else {
+    fillAmount=totalsRes.difference>0?totalsRes.difference:(existingRows.length===0?totalsRes.total:0);
+    if(fillAmount<=0){status('TL dengesi zaten tamamlandı.');return;}
+    row=addAllocation(kind,{category:'money',accountId:acc.id});
+  }
+  if(!row)return;
+  const qtyInput=row.querySelector('[data-quantity]');
+  if(qtyInput){
+    if(codec?.setFormattedInputValue) codec.setFormattedInputValue(qtyInput, fillAmount, acc.unit || 'TL');
+    else qtyInput.value=(fillAmount/100).toFixed(2).replace('.',',');
+    configureAllocation(row);
+    changed({preferredStep:2});
+    qtyInput.focus({preventScroll:true});
+  }
+});
 function syncCustomerDrawerTrigger() {
   const openBtn = $('open-customer-drawer');
   const details = $('new-customer');
@@ -1128,8 +1253,9 @@ if(quickExtrasHost&&!$('quick-fill-cash')){
     if(!row)return;
     const qtyInput=row.querySelector('[data-quantity]');
     if(qtyInput){
-      qtyInput.value=codec?codec.canonicalFromScaled(totalsRes.total,'TL'):(totalsRes.total/100).toFixed(2);
-      qtyInput.dispatchEvent(new Event('input',{bubbles:true}));
+      if(codec?.setFormattedInputValue) codec.setFormattedInputValue(qtyInput, totalsRes.total, 'TL');
+      else qtyInput.value=(totalsRes.total/100).toFixed(2).replace('.',',');
+      configureAllocation(row);
     }
     changed({preferredStep:2});
     $('record')?.focus({preventScroll:true});
@@ -1390,6 +1516,22 @@ function initCheckoutCommandPalette(){
         badge:flowMode==='guided'?'Aktif':'',
         when:()=>Boolean(snapshot?.initialized),
         action:()=>{document.querySelector('[data-flow-mode="guided"]')?.click();}
+      },
+      {
+        id:'checkout-blind-count',
+        title:'Günlük Sayım (Kör Sayım)',
+        keywords:'gunluk sayim kor sayim fiziki sayim stok sayimi',
+        when:()=>Boolean(snapshot?.initialized && $('open-blind-count-btn')),
+        action:()=>{$('open-blind-count-btn')?.click();}
+      },
+      {
+        id:'checkout-change-pin',
+        group:'commands',
+        groupLabel:'Görünüm ve Araçlar',
+        title:'PIN Değiştir',
+        keywords:'pin degistir sifre parola guvenlik',
+        when:()=>Boolean($('change-pin-btn')),
+        action:()=>{$('change-pin-btn')?.click();}
       },
       {
         id:'checkout-refresh',

@@ -233,8 +233,137 @@
     };
   }
 
+  function isMoneyUnit(unit) {
+    if (!unit) return false;
+    const u = String(unit);
+    if (['GRAM', 'HAS', 'SILVER', 'ADET', 'RATE'].includes(u)) return false;
+    return units[u].digits === 2;
+  }
+
+  function formatLiveMoneyValue(raw, cursorPos = null, { treatDotAsDecimal = false } = {}) {
+    const str = String(raw ?? '');
+    if (!str) return { value: '', cursor: 0 };
+    const pos = typeof cursorPos === 'number' && cursorPos >= 0 ? Math.min(cursorPos, str.length) : str.length;
+    const isNeg = str.startsWith('-');
+    const rawBody = isNeg ? str.slice(1) : str;
+    const bodyPos = isNeg ? Math.max(0, pos - 1) : pos;
+
+    // Prevent 100x inflation on canonical dot-decimal values (e.g. "100000.00", "0.50", or pasted "12.50")
+    // while preserving Turkish backspace safety ("1.000" -> "1.00" => "100", "10.000" -> "10.00" => "1.000").
+    let body = rawBody;
+    if (!rawBody.includes(',') && /^\d+\.\d{1,2}$/.test(rawBody)) {
+      const [dotInt] = rawBody.split('.');
+      if (treatDotAsDecimal || dotInt.length >= 4 || dotInt === '0') {
+        body = rawBody.replace('.', ',');
+      }
+    }
+
+    // Count meaningful characters (digits + first comma) before cursor
+    let commaSeenBefore = false;
+    let meaningfulBefore = 0;
+    for (let i = 0; i < bodyPos; i++) {
+      const ch = body[i];
+      if (ch >= '0' && ch <= '9') meaningfulBefore++;
+      else if (ch === ',' && !commaSeenBefore) { commaSeenBefore = true; meaningfulBefore++; }
+    }
+
+    // Split on first comma: integer part strips dots/non-digits, frac part keeps max 2 digits
+    const commaIdx = body.indexOf(',');
+    const hasComma = commaIdx !== -1;
+    const rawInt = (hasComma ? body.slice(0, commaIdx) : body).replace(/\D/g, '');
+    const rawFrac = hasComma ? body.slice(commaIdx + 1).replace(/\D/g, '').slice(0, 2) : '';
+
+    // Normalize leading zeros in integer part (keep single '0' if followed by comma or if all zeros)
+    const cleanInt = rawInt.length > 1 ? rawInt.replace(/^0+(?=\d)/, '') : rawInt;
+    const groupedInt = cleanInt.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+    const formattedBody = hasComma ? `${groupedInt || (rawInt ? '0' : '')},${rawFrac}` : groupedInt;
+    const finalValue = (isNeg ? '-' : '') + formattedBody;
+
+    // Map meaningfulBefore back to new cursor index
+    let count = 0;
+    let newCursor = isNeg ? 1 : 0;
+    if (meaningfulBefore === 0) {
+      newCursor = isNeg && pos > 0 ? 1 : 0;
+    } else {
+      for (let i = 0; i < formattedBody.length; i++) {
+        const ch = formattedBody[i];
+        if ((ch >= '0' && ch <= '9') || ch === ',') {
+          count++;
+          if (count >= meaningfulBefore) {
+            newCursor = (isNeg ? 1 : 0) + i + 1;
+            break;
+          }
+        }
+      }
+      if (count < meaningfulBefore) newCursor = finalValue.length;
+    }
+    return { value: finalValue, cursor: newCursor };
+  }
+
+  function applyLiveMoneyGrouping(input, unit, options = {}) {
+    if (!input || !isMoneyUnit(unit)) return false;
+    const raw = input.value;
+    if (!raw) return false;
+    let start = null;
+    try { start = input.selectionStart; } catch {}
+    const { value, cursor } = formatLiveMoneyValue(raw, start, options);
+    if (value === raw) return false;
+    input.value = value;
+    try {
+      if (typeof input.setSelectionRange === 'function' && document?.activeElement === input) {
+        input.setSelectionRange(cursor, cursor);
+      }
+    } catch {}
+    return true;
+  }
+
+  function setFormattedInputValue(input, value, unit = 'TL') {
+    if (!input) return '';
+    clearInputState(input);
+    if (input.dataset && unit) input.dataset.amountUnit = String(unit);
+    if (value === null || value === undefined || value === '') {
+      input.value = '';
+      return '';
+    }
+    const spec = units[unit];
+    const canonicalStr = typeof value === 'number' && Number.isFinite(value)
+      ? canonicalFromScaled(value, unit)
+      : String(value).trim();
+    if (!canonicalStr) {
+      input.value = '';
+      return '';
+    }
+    let formatted;
+    if (isMoneyUnit(unit)) {
+      formatted = formatLiveMoneyValue(canonicalStr, null, { treatDotAsDecimal: true }).value;
+    } else if (spec.digits === 0) {
+      formatted = canonicalStr.replace(/[.,].*$/, '');
+    } else {
+      formatted = canonicalStr.replace('.', ',');
+    }
+    input.value = formatted;
+    return formatted;
+  }
+
+  function attachMoneyGrouping(input, unitOrGetter) {
+    if (!input || input.dataset?.moneyGroupingBound === '1') return;
+    if (input.dataset) input.dataset.moneyGroupingBound = '1';
+    const resolveUnit = () => (typeof unitOrGetter === 'function' ? unitOrGetter() : (unitOrGetter || input.dataset?.amountUnit || ''));
+    input.addEventListener('keydown', event => {
+      const u = resolveUnit();
+      if (isMoneyUnit(u) && event.key === '.') {
+        event.preventDefault();
+      }
+    });
+    input.addEventListener('input', () => {
+      const u = resolveUnit();
+      if (isMoneyUnit(u)) applyLiveMoneyGrouping(input, u);
+    });
+  }
+
   function parseInputElement(input, unit = 'TL', positive = false, options = {}) {
     if (!input) return null;
+    if (input.dataset) input.dataset.amountUnit = unit;
     const normOpts = normalizeInputOptions(positive, options);
     const resolution = input.dataset?.amountResolution || null;
     const result = parseUserAmount(input.value, unit, {
@@ -273,6 +402,7 @@
   function clearInputState(input) {
     if (!input) return;
     if (input.dataset) {
+      delete input.dataset.amountUnit;
       delete input.dataset.amountResolution;
       delete input.dataset.canonicalAmount;
       delete input.dataset.formattedPreview;
@@ -288,7 +418,27 @@
     return String(input.value ?? '').trim();
   }
 
+  function inferInputUnit(target) {
+    if (!target || !(target instanceof HTMLInputElement)) return '';
+    if (target.dataset?.amountUnit) return target.dataset.amountUnit;
+    if (target.id === 'bind-calc-rate' || target.id === 'fx-calc-rate') return 'RATE';
+    if (target.inputMode !== 'decimal' && target.getAttribute?.('inputmode') !== 'decimal') return '';
+    if (target.dataset?.itemField === 'value' || target.dataset?.allocationField === 'valueTL' || target.dataset?.field === 'referenceTL' || target.hasAttribute('data-value')) return 'TL';
+    const labelText = (target.closest?.('label')?.textContent || '').toLocaleLowerCase('tr-TR');
+    if (/(?:^|[^a-zçğıöşü0-9])(kur|kuru|oran)(?=$|[^a-zçğıöşü0-9])/.test(labelText)) return 'RATE';
+    if (/(?:^|[^a-zçğıöşü0-9])(gram|gr|has|gümüş|ağırlık|tartı)(?=$|[^a-zçğıöşü0-9])/.test(labelText)) return 'GRAM';
+    if (/(?:^|[^a-zçğıöşü0-9])(tl|tutar|bedel|fiyat|komisyon|usd|eur|gbp|chf|sar|aed|cad|aud|jpy|kwd|qar|sek|nok|dkk)(?=$|[^a-zçğıöşü0-9])/.test(labelText)) return 'TL';
+    return '';
+  }
+
   if (typeof document !== 'undefined') {
+    document.addEventListener('keydown', event => {
+      if (!event.isTrusted || event.key !== '.') return;
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement)) return;
+      const u = inferInputUnit(target);
+      if (isMoneyUnit(u)) event.preventDefault();
+    }, true);
     document.addEventListener('input', event => {
       if (!event.isTrusted) return;
       const target = event.target;
@@ -296,13 +446,21 @@
         if (target.dataset.amountResolution) delete target.dataset.amountResolution;
         if (target.dataset.canonicalAmount) delete target.dataset.canonicalAmount;
         if (target.dataset.formattedPreview) delete target.dataset.formattedPreview;
+        const u = inferInputUnit(target);
+        if (isMoneyUnit(u)) applyLiveMoneyGrouping(target, u, { treatDotAsDecimal: event.inputType === 'insertFromPaste' });
       }
     }, true);
   }
 
   const exportsObj = {
     units,
+    isMoneyUnit,
     formatAmount,
+    formatLiveMoneyValue,
+    applyLiveMoneyGrouping,
+    attachMoneyGrouping,
+    setFormattedInputValue,
+    inferInputUnit,
     canonicalFromScaled,
     parseUserAmount,
     parseInputElement,
