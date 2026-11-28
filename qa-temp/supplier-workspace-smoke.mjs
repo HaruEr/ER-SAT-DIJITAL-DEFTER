@@ -28,7 +28,7 @@ test('search handles Turkish names and preserves the query through updates',t=>{
 test('detail separates native balances and exposes exactly six business tasks',t=>{
  const f=fixture(t);f.root.querySelector('[data-open-firm="firm-multi"]').click();
  const tasks=[...f.root.querySelectorAll('[data-supplier-task]')];
- assert.deepEqual(tasks.map(b=>b.textContent),['Ürün Al','Ödeme Yap','Hesap Mahsup Et','Firmalar Arası Virman','Ürün İade Et','Devir / Açılış Bakiyesi','Hareketleri İncele','Ekstre / Mutabakat']);
+ assert.deepEqual(tasks.map(b=>b.dataset.supplierTask),['purchase','payment','bind','return','adjust','offset','transfer','opening','history','statement']);
  assert.match(f.root.querySelector('[data-balance="has"]').textContent,/Borcumuz.*−15000 HAS/);
  assert.match(f.root.querySelector('[data-balance="usd"]').textContent,/Alacağımız.*\+900 USD/);
  assert.equal(f.root.querySelector('[data-balance="tl"]'),null,'zero-balance unit hidden on summary card');

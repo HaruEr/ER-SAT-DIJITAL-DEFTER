@@ -500,10 +500,12 @@ test('2. /owner Comboboxes (#f-counterpartyId, item accountId, #f-customerAccoun
     sumSearch.dispatchEvent(new window.Event('input', { bubbles: true }));
     assert.match(document.querySelector('#main').textContent, /İSMAİL ŞAHİN/);
 
-    // Journal view: #journal-account combobox & R4 lazy <details data-sale-return>
+    // Journal view: #journal-account combobox & R4 lazy <details data-sale-return> in detailed card view
     document.querySelector('[data-view="journal"]').click();
     await tick(30);
     assert.ok(window.DefterCombobox.getInstance(document.querySelector('#journal-account')), '#journal-account enhanced');
+    document.querySelector('[data-journal-mode="detailed"]')?.click();
+    await tick(20);
 
     const detailsEl = document.querySelector('details[data-sale-return]');
     assert.ok(detailsEl, 'sale journal entry renders details[data-sale-return]');
@@ -847,7 +849,7 @@ test('7. /checkout Combobox (#search preserves value, 0-stock disabled, quick-fi
     assert.ok(window.DefterCombobox.getInstance(prodSearch), '[data-product-search] wrapped with DefterCombobox');
     assert.ok(prodSelect.options.length <= 2, `checkout native <option> count (${prodSelect.options.length}) <= 2 on >50 catalog`);
 
-    // 0-stock item disabled in sale mode
+    // Blind-count protection: workerCountCatalog items mask stock count so 0-stock is not leaked via aria-disabled
     prodSearch.focus();
     prodSearch.value = 'tukenen';
     prodSearch.dispatchEvent(new window.Event('input', { bubbles: true }));
@@ -855,7 +857,7 @@ test('7. /checkout Combobox (#search preserves value, 0-stock disabled, quick-fi
     const prodRoot = prodSearch.closest('.defter-combobox');
     const zeroOpt = prodRoot?.querySelector('.defter-combobox-listbox [role="option"]');
     assert.ok(zeroOpt && /TÜKENEN YÜZÜK/i.test(zeroOpt.textContent));
-    assert.equal(zeroOpt.getAttribute('aria-disabled'), 'true', '0-stock item has aria-disabled="true" in sale mode');
+    assert.equal(zeroOpt.getAttribute('aria-disabled'), null, 'blind-count item does not leak 0-stock via aria-disabled');
 
     // Select active item via Enter -> focuses [data-quantity] synchronously
     prodSearch.value = 'sirma';
@@ -878,8 +880,8 @@ test('7. /checkout Combobox (#search preserves value, 0-stock disabled, quick-fi
     quickFillBtn.click();
     assert.equal(document.querySelectorAll('#received [data-allocation]').length, 1, 'quick-fill creates 1 Nakit allocation row');
     assert.equal(document.querySelector('#received [data-account]').value, 'nakit');
-    assert.equal(document.querySelector('#received [data-quantity]').value, '3500.00');
-    assert.equal(document.querySelector('#received [data-value]').value, '3500.00');
+    assert.equal(document.querySelector('#received [data-quantity]').value, '3.500,00');
+    assert.equal(document.querySelector('#received [data-value]').value, '3.500,00');
     assert.equal(calls.length, 0, 'quick-fill does not auto-submit trade');
 
     // 2-stage #record -> #review -> #confirm still required; while in review, palette is safely blocked

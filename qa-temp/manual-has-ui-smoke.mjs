@@ -52,7 +52,7 @@ checks.push(['new bank currency excludes HAS including custom code; existing HAS
 }]);
 checks.push(['foreign and has chips keep units distinct and TL agreed value visible',async c=>{
  c.tab('sale');c.document.querySelector('[data-payment-type="foreign"]').click();let row=c.document.querySelector('[data-allocation-kind="payment"]');assert.ok(![...row.querySelector('select').options].some(o=>o.value===c.bankHAS));
- c.document.querySelector('[data-payment-type="has"]').click();row=c.document.querySelectorAll('[data-allocation-kind="payment"]')[1];assert.deepEqual([...row.querySelector('select').options].map(o=>o.value),[c.bankHAS]);assert.match(row.textContent,/has gr/);assert.equal(row.querySelector('[data-allocation-field="valueTL"]').closest('label').hidden,false);
+ c.document.querySelector('[data-payment-type="has"]').click();row=c.document.querySelectorAll('[data-allocation-kind="payment"]')[0];assert.deepEqual([...row.querySelector('select').options].map(o=>o.value),[c.bankHAS]);assert.match(row.textContent,/has gr/);assert.equal(row.querySelector('[data-allocation-field="valueTL"]').closest('label').hidden,false);
 }]);
 checks.push(['legacy foreign HAS draft and existing transaction restore preserve amount/account',async c=>{
  c.tab('sale');const form=c.document.querySelector('#sale-form');form.draftAdapter.restore({items:[{accountId:'gramToplam',quantity:'1',value:'100'}],payment:[{paymentType:'foreign',accountId:c.bankHAS,quantity:'0.250',valueTL:'100'}]});

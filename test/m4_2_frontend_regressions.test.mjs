@@ -495,6 +495,7 @@ test('M2-F02 & M2-F14: /checkout blocks invalid or unblurred #search text on #tr
   const { window, document } = emp;
 
   const firstItem = document.querySelector('#items [data-item]');
+  firstItem._productCombobox.setValue('ceyrek', { emitChange: true });
   setFieldValue(window, firstItem.querySelector('[data-quantity]'), '1');
   setFieldValue(window, firstItem.querySelector('[data-value]'), '1000');
 
@@ -503,18 +504,18 @@ test('M2-F02 & M2-F14: /checkout blocks invalid or unblurred #search text on #tr
   payRow._accountCombobox.setValue('nakit', { emitChange: true });
   setFieldValue(window, payRow.querySelector('[data-quantity]'), '1000');
 
-  // M2-F14: check accessible names on guided allocation comboboxes
+  // M2-F14: check accessible names on guided allocation comboboxes (new rows prepend at index 0)
   document.querySelector('[data-add="received"][data-category="product"]').click();
   document.querySelector('[data-add="received"][data-category="scrap"]').click();
   document.querySelector('[data-add="given"][data-category="money"]').click();
-  const expectedLabels = ['Para hesabı', 'Ürün', 'Hurda hesabı', 'Para hesabı'];
+  const expectedLabels = ['Hurda hesabı', 'Ürün', 'Para hesabı', 'Para hesabı'];
   const allocInputs = [...document.querySelectorAll('[data-allocation] .defter-combobox-input')];
   assert.equal(allocInputs.length, 4);
   allocInputs.forEach((inp, idx) => {
     assert.equal(inp.getAttribute('aria-label'), expectedLabels[idx]);
   });
-  // Clean up extra 3 allocation rows so totals balance
-  for (const row of [...document.querySelectorAll('[data-allocation]')].slice(1)) {
+  // Clean up extra 3 allocation rows so totals balance (preserve filled payRow)
+  for (const row of [...document.querySelectorAll('[data-allocation]')].filter(r => r !== payRow)) {
     row.querySelector('[data-remove]').click();
   }
 
@@ -1009,72 +1010,47 @@ test('M2-F09 & F-M3-005 (Owner Forms): All 8 Owner forms, attachSaleLinePricing,
   await tick(60);
   assert.equal(repos.demo.state().balances[repos.demo.state().accounts.find(a => a.name === 'Yeni Banka M4').id], 2500075);
 
-  // 6. customerOrders (orderAdvance, orderRefund, scrapAdvanceTransfer, scrapAdvanceUndo)
+  // 6. customerOrders (#v=orders modal & drawer: customerOrder, orderAdvance, orderRefund)
   const scrapCustRes = repos.demo.execute({
     id: randomUUID(),
     revision: repos.demo.state().revision,
     command: { type: 'account', date: '2026-11-10', name: 'Hurda Avans Müşterisi', unit: 'TL', opening: '0', partyType: 'customer' }
   });
   const scrapCust = scrapCustRes.state.accounts.find(a => a.name === 'Hurda Avans Müşterisi');
-  repos.demo.execute({
-    id: randomUUID(),
-    revision: repos.demo.state().revision,
-    command: {
-      type: 'purchase',
-      date: '2026-11-10',
-      source: 'customer',
-      counterpartyType: 'customer',
-      counterpartyId: scrapCust.id,
-      items: [{ accountId: 'hurda22', quantity: '2.000', value: '5000' }],
-      received: [],
-      given: [],
-      credits: [],
-      debts: [{ accountId: scrapCust.id, quantity: '5000', valueTL: '5000' }]
-    }
-  });
   document.querySelector('#refresh').click();
   await tick(50);
   document.querySelector('#navigation [data-view="accounts"]').click();
   await tick(30);
   document.querySelector(`[data-account-detail="${scrapCust.id}"]`).click();
   await tick(40);
-  const orderOpenForm = document.querySelector('form[data-order-action="customerOrder"]');
-  setFieldValue(window, orderOpenForm.elements.description, 'Özel Yüzük Siparişi');
-  orderOpenForm.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-  await tick(60);
-
-  const advForm = document.querySelector('form[data-order-action="orderAdvance"]');
-  setFieldValue(window, advForm.elements.amountTL, '1.500,50');
-  advForm.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-  await tick(60);
-  assert.equal(repos.demo.state().customerOrders[0].availableTL, 150050);
-
-  const refForm = document.querySelector('form[data-order-action="orderRefund"]');
-  setFieldValue(window, refForm.elements.amountTL, '500,25');
-  refForm.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-  await tick(60);
-  assert.equal(repos.demo.state().customerOrders[0].availableTL, 100025);
-
-  const scrapDetails = document.querySelector('[data-scrap-transfer]');
-  scrapDetails.open = true;
-  scrapDetails.dispatchEvent(new window.Event('toggle'));
+  document.querySelector('[data-customer-new-order]').click();
   await tick(50);
-  const scrapForm = scrapDetails.querySelector('form[data-order-action="scrapAdvanceTransfer"]');
-  const purOpt = [...scrapForm.elements.purchaseId.options].find(o => o.value);
-  assert.ok(purOpt, 'Expected scrap purchase option');
-  setFieldValue(window, scrapForm.elements.purchaseId, purOpt.value, 'change');
-  setFieldValue(window, scrapForm.elements.amountTL, '1.500,50');
-  setFieldValue(window, scrapForm.elements.note, 'Hurda borçtan avansa aktarım');
-  scrapForm.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-  await tick(60);
-  assert.equal(repos.demo.state().customerOrders[0].availableTL, 250075);
+  const orderOpenForm = document.querySelector('#new-order-form');
+  assert.ok(orderOpenForm, 'New order form modal should open on #v=orders');
+  setFieldValue(window, orderOpenForm.querySelector('#ord-unit'), 'TL', 'change');
+  setFieldValue(window, orderOpenForm.querySelector('#ord-desc'), 'Özel Yüzük Siparişi');
+  orderOpenForm.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await tick(70);
+  const createdOrder = repos.demo.state().customerOrders[0];
+  assert.ok(createdOrder, 'Order should be created');
 
-  const undoForm = document.querySelector('form[data-order-action="scrapAdvanceUndo"]');
-  setFieldValue(window, undoForm.elements.amountTL, '500,25');
-  setFieldValue(window, undoForm.elements.note, 'Kısmi geri alma');
-  undoForm.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-  await tick(60);
-  assert.equal(repos.demo.state().customerOrders[0].availableTL, 200050);
+  document.querySelector(`[data-open-order="${createdOrder.id}"]`).click();
+  await tick(40);
+  const advForm = document.querySelector('#order-add-advance-form');
+  assert.ok(advForm, 'Order advance form should open in order drawer');
+  setFieldValue(window, advForm.querySelector('[data-adv-recv]'), '1.500,50');
+  advForm.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await tick(70);
+  assert.equal(repos.demo.state().customerOrders[0].availableQuantity, 150050);
+
+  const refForm = document.querySelector('#order-refund-advance-form');
+  assert.ok(refForm, 'Order refund form should be available in order drawer');
+  setFieldValue(window, refForm.elements.refundedQuantity, '500,25');
+  refForm.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await tick(70);
+  assert.equal(repos.demo.state().customerOrders[0].availableQuantity, 100025);
+  document.querySelector('dialog.defter-drawer .defter-layer-close')?.click();
+  await tick(20);
 
   // 7. attachSaleLinePricing (preserve raw draft + canonicalize on submit)
   document.querySelector('#navigation [data-view="transaction"]').click();
@@ -1100,9 +1076,11 @@ test('M2-F09 & F-M3-005 (Owner Forms): All 8 Owner forms, attachSaleLinePricing,
   assert.equal(saleCmd.salePricing.lines[0].costTL, '10000.25');
   assert.equal(saleCmd.salePricing.lines[0].components[0].amountTL, '-1250.50');
 
-  // 8. bindSaleReturn canonicalization (wait for journal list & pick the sale with weightAccount)
+  // 8. bindSaleReturn canonicalization (switch journal to detailed mode & pick the sale with weightAccount)
   document.querySelector('#navigation [data-view="journal"]').click();
   await tick(80);
+  document.querySelector('[data-journal-mode="detailed"]')?.click();
+  await tick(40);
   const saleReturnDetails = [...document.querySelectorAll('[data-sale-return]')];
   const retDetails = saleReturnDetails.find(el => {
     el.open = true;
@@ -1588,6 +1566,7 @@ test('checkout.js parseSignedTL (Iter 2): rejects whitespace after minus (- 5) w
   const { window, document, commands } = emp;
 
   const firstItem = document.querySelector('#items [data-item]');
+  firstItem._productCombobox.setValue('ceyrek', { emitChange: true });
   setFieldValue(window, firstItem.querySelector('[data-quantity]'), '1');
   setFieldValue(window, firstItem.querySelector('[data-value]'), '5000');
 

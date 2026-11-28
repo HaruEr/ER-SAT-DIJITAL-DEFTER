@@ -6,8 +6,8 @@ export class ReportError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }
 }
 const unavailable = () => new ReportError('Rapor verileri şu anda okunamıyor. Ana bilgisayardaki defteri kontrol edin.', 503);
-const types = new Set(['scrapAdvanceTransfer','scrapAdvanceUndo','opening','account','fundAccount','sale','saleReturn','purchase','stock','movement','collection','transfer','settlement','reverse','stocktake','close','nominalOpening','registerItem','releaseItem']);
-for(const type of ['supplierFirm','supplierFirmUpdate','supplierUnit','supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierReturn','supplierReverse','supplierLegacyReceiptLink'])types.add(type);
+const types = new Set(['scrapAdvanceTransfer','scrapAdvanceUndo','opening','account','fundAccount','sale','saleReturn','purchase','stock','movement','collection','transfer','settlement','reverse','stocktake','close','nominalOpening','registerItem','releaseItem','customerOrder','orderUpdate','orderAdvance','orderDeliver','orderRefund','orderCancel','currencyExchange','customerAdjustment','linkScrapPurchase']);
+for(const type of ['supplierFirm','supplierFirmUpdate','supplierUnit','supplierOpening','supplierBind','supplierAdjust','supplierPurchase','supplierPayment','supplierAllocation','supplierOffset','supplierTransfer','supplierReturn','supplierReverse','supplierLegacyReceiptLink'])types.add(type);
 const normalize = value => value.toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i');
 function accountInfo(account) {
   const stock = account.isSaleable || account.isPurchasable || account.pairedGroups?.length || ['bilezik22','taki14','taki22','hurda22','gramaltin','gramAdet'].includes(account.id);

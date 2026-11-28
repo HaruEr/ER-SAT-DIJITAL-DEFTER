@@ -65,11 +65,11 @@ check('dynamic purchase products and HAS payment rows survive round trip', async
   const rows = c.document.querySelectorAll('.sale-item'); c.set('#' + rows[1].querySelector('[data-item-field="accountId"]').id, 'gramToplam'); c.set('#' + rows[1].querySelector('[data-item-field="quantity"]').id, '3,5'); c.set('#' + rows[1].querySelector('[data-item-field="value"]').id, '7000');
   c.cash('1000');
   const has = repo.state().accounts.find(a => a.kind === 'asset' && a.unit === 'HAS'); c.document.querySelector('[data-payment-type="has"]').click();
-  const allocation = c.document.querySelectorAll('[data-allocation-kind="payment"]')[1]; c.set('#' + allocation.querySelector('select').id, has.id); c.set('#' + allocation.querySelector('[data-allocation-field="quantity"]').id, '2,1'); c.set('#' + allocation.querySelector('[data-allocation-field="valueTL"]').id, '6000');
+  const allocation = c.document.querySelectorAll('[data-allocation-kind="payment"]')[0]; c.set('#' + allocation.querySelector('select').id, has.id); c.set('#' + allocation.querySelector('[data-allocation-field="quantity"]').id, '2,1'); c.set('#' + allocation.querySelector('[data-allocation-field="valueTL"]').id, '6000');
   c.nav('overview'); c.nav('transaction');
   assert.equal(c.document.querySelectorAll('.sale-item').length, 2); assert.equal(c.document.querySelectorAll('[data-allocation-kind="payment"]').length, 2);
-  assert.equal(c.document.querySelectorAll('[data-item-field="quantity"]')[1].value, '3,5'); assert.equal(c.document.querySelectorAll('[data-allocation-field="valueTL"]')[1].value, '6000');
-  assert.equal(c.document.querySelectorAll('[data-allocation-kind="payment"]')[1].querySelector('select').value,has.id);
+  assert.equal(c.document.querySelectorAll('[data-item-field="quantity"]')[1].value, '3,5'); assert.equal(c.document.querySelectorAll('[data-allocation-field="valueTL"]')[0].value, '6.000');
+  assert.equal(c.document.querySelectorAll('[data-allocation-kind="payment"]')[0].querySelector('select').value,has.id);
 });
 check('workspaces and operation types keep independent in-memory drafts', async c => {
   c.tab('sale'); c.set('#f-note', 'Örnek satış'); c.document.querySelector('[data-tab="purchase"]').click(); c.set('#f-note', 'Örnek alış');
@@ -96,12 +96,12 @@ check('stale count draft stays visible but cannot close the new revision', async
   c.document.querySelector('#close-form [data-clear-draft]').click(); assert.equal(c.document.querySelector('#daily-count-nakit').value, '');
 });
 check('pending uncertain command retains its identity and blocks account-creation shortcut', async c => {
-  c.tab('sale'); c.set('[data-item-field="accountId"]', 'gramToplam'); c.set('[data-item-field="value"]', '100'); c.cash('100'); c.set('#f-note', 'Belirsiz satış'); c.control.fail = true; c.submit('#sale-form'); await tick();
+  c.tab('sale'); c.set('[data-item-field="accountId"]', 'gramToplam'); c.set('[data-item-field="quantity"]', '1'); c.set('[data-item-field="value"]', '100'); c.cash('100'); c.set('#f-note', 'Belirsiz satış'); c.control.fail = true; c.submit('#sale-form'); await tick();
   assert.equal(c.document.querySelector('#inline-account-form'),null); const before = c.commands.length; c.document.querySelector('[data-create-party]').click(); await tick(); assert.ok(c.document.querySelector('#sale-form')); assert.equal(c.document.querySelector('#account-form'),null); assert.equal(c.commands.length, before);
   c.document.querySelector('#retry').click(); await tick(); assert.equal(c.commands.at(-1).id, c.commands[0].id);
 });
 check('TL customer opens on its owner page without losing sale and is selected safely', async c => {
-  c.tab('sale'); c.set('[data-item-field="accountId"]', 'gramToplam'); c.set('[data-item-field="value"]', '200'); c.set('#f-note', 'Cari bekleyen satış');
+  c.tab('sale'); c.set('[data-item-field="accountId"]', 'gramToplam'); c.set('[data-item-field="quantity"]', '1'); c.set('[data-item-field="value"]', '200'); c.set('#f-note', 'Cari bekleyen satış');
   assert.equal(c.document.querySelector('#inline-account-form'),null); c.document.querySelector('[data-create-party]').click(); c.set('#f-name', 'Yeni <img src=x> kişi'); c.submit('#account-form'); await tick();
   assert.equal(c.commands.at(-1).command.type, 'account'); assert.equal(c.commands.at(-1).command.opening, '0');
   assert.equal(c.document.querySelector('#f-note').value, 'Cari bekleyen satış'); assert.equal(c.document.querySelector('[data-item-field="value"]').value, '200');

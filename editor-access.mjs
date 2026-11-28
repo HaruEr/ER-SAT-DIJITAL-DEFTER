@@ -64,23 +64,31 @@ function paymentSources(state) {
 export function checkoutState(state, { hidePrivatePools = true } = {}) {
   const free = id => Math.max(0, (state.balances[id] || 0) - (state.inventoryReserved?.[id] || 0));
   const available = state.accounts.filter(a => !a.retired && (a.isSaleable || a.isPurchasable));
+  const countItems = workerCountCatalog(state);
+  const blindIds = hidePrivatePools ? new Set(countItems.map(item => item.id)) : new Set();
   return {
     initialized: state.initialized, date: state.date, revision: state.revision,
     payments: paymentSources(state).map(({ id, name, unit }) => ({ id, name, unit })),
     stocks: state.accounts
       .filter(a => a.kind === 'asset' && a.physical && !a.retired && ['GRAM','ADET'].includes(a.unit) && (!hidePrivatePools || !PRIVATE_WEIGHT_POOLS.has(a.id)))
-      .map(({id,name,unit}) => ({id,name,unit,quantity:state.balances[id] || 0,freeQuantity:free(id)})),
-    countItems: workerCountCatalog(state),
+      .map(({id,name,unit}) => blindIds.has(id)
+        ? { id, name, unit, quantity: null, freeQuantity: null, blind: true }
+        : { id, name, unit, quantity: state.balances[id] || 0, freeQuantity: free(id) }),
+    countItems,
     inventoryItems: (state.inventoryItems || []).filter(i => i.status === 'available')
       .map(({ code, barcode, description, accountId, weightAccount, actualWeight, status }) =>
         ({ code, barcode, description, accountId, weightAccount, actualWeight, status })),
     products: available.map(a => ({
-      id: a.id, name: a.name, unit: a.unit, scrap: a.scrap === true, quantity: state.balances[a.id] || 0, freeQuantity: free(a.id),
+      id: a.id, name: a.name, unit: a.unit, scrap: a.scrap === true,
+      ...(blindIds.has(a.id)
+        ? { quantity: null, freeQuantity: null, blind: true }
+        : { quantity: state.balances[a.id] || 0, freeQuantity: free(a.id) }),
       canSell: a.isSaleable && !(a.id === 'gramToplam' && state.nominalUnconfirmed),
       canBuy: a.isPurchasable && !(a.id === 'gramToplam' && state.nominalUnconfirmed),
       weights: a.pairedGroups.map(id => {
         const pool = state.accounts.find(account => account.id === id);
         if (hidePrivatePools && PRIVATE_WEIGHT_POOLS.has(id)) return { id, name: pool.name };
+        if (blindIds.has(id)) return { id, name: pool.name, quantity: null, freeQuantity: null, blind: true };
         return { id, name: pool.name, quantity: state.balances[id] || 0, freeQuantity: free(id) };
       })
     }))
@@ -140,6 +148,18 @@ function onlyKeys(value, keys) {
 export function requireWorkerAccounts(command, state) {
   if (command.type === 'account') return;
   const sources = new Set(state.accounts.filter(a => a.kind === 'asset' && !a.retired).map(a => a.id));
+  if (command.type === 'collection') {
+    const cust = state.accounts.find(a => a.id === command.customerAccount);
+    if (!cust || cust.kind !== 'receivable' || cust.retired || cust.partyType === 'supplier') deny();
+    const target = state.accounts.find(a => a.id === command.target);
+    if (!target || target.kind !== 'asset' || target.retired || target.id === 'pos') deny();
+    return;
+  }
+  if (command.type === 'currencyExchange') {
+    const fxSources = new Set(state.accounts.filter(a => a.kind === 'asset' && !a.retired && a.id !== 'pos' && !['GRAM', 'ADET', 'HAS', 'SILVER'].includes(a.unit)).map(a => a.id));
+    if ([...(command.received ?? []), ...(command.given ?? [])].some(row => !fxSources.has(row.accountId))) deny();
+    return;
+  }
   const customer = command.counterpartyId && state.accounts.find(a => a.id === command.counterpartyId);
   if (command.counterpartyId && (!customer || customer.kind !== 'receivable' || customer.retired || customer.partyType === 'supplier')) deny();
   if ([...(command.received ?? []), ...(command.given ?? [])].some(row => !sources.has(row.accountId))) deny();
@@ -149,6 +169,19 @@ export function requireWorkerAccounts(command, state) {
 // Administrative operations remain outside this command allowlist.
 export function requireWorkerTrade(command) {
   if (isWorkerCustomerCreation(command)) return;
+  if (command?.type === 'currencyExchange') {
+    if (!onlyKeys(command, ['type', 'date', 'received', 'given', 'note'])) deny();
+    if (!Array.isArray(command.received) || !command.received.length || command.received.length > 30 ||
+        !Array.isArray(command.given) || !command.given.length || command.given.length > 30) deny();
+    const validRow = r => onlyKeys(r, ['accountId', 'quantity']);
+    if (!command.received.every(validRow) || !command.given.every(validRow)) deny();
+    return;
+  }
+  if (command?.type === 'collection') {
+    if (!onlyKeys(command, ['type', 'date', 'customerAccount', 'target', 'direction', 'quantity', 'allowAdvance', 'note'])) deny();
+    if (!['collect', 'pay'].includes(command.direction)) deny();
+    return;
+  }
   const purchase = command?.type === 'purchase';
   if ((!purchase && command?.type !== 'sale') || !onlyKeys(command,
     ['type','date','items','source','counterpartyType','counterpartyId','received','given','credits','debts','note','salePricing'])) deny();

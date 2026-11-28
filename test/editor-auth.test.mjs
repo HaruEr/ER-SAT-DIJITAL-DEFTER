@@ -261,7 +261,10 @@ test('employee retail supports mixed native consideration and zero-balance custo
   assert.equal(checkout.revision,4);
   assert.ok(checkout.stocks.every(a=>['GRAM','ADET'].includes(a.unit)));
   assert.ok(checkout.payments.every(a=>!Object.hasOwn(a,'quantity') && !Object.hasOwn(a,'balance')));
-  assert.equal(checkout.stocks.find(a=>a.id==='hurda22').quantity,3300);
+  const hurda22Stock=checkout.stocks.find(a=>a.id==='hurda22');
+  assert.equal(hurda22Stock.quantity,null);
+  assert.equal(hurda22Stock.freeQuantity,null);
+  assert.equal(hurda22Stock.blind,true);
   const repo=[...repositories.values()][0];
   assert.equal(repo.backup().events.find(e=>e.id===create.id).audit.actor.id,employee.id);
 });

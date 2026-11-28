@@ -43,7 +43,7 @@ const HISTORY_COMMANDS = new Set([
   'amend', 'reverse', 'saleReturn', 'retailExchange', 'undoExchange',
   'linkScrapPurchase', 'scrapAdvanceTransfer', 'itemCostSource',
   'supplierReverse', 'supplierAmend', 'supplierReturn', 'supplierLegacyReceiptLink',
-  'supplierAllocation', 'supplierOffset'
+  'supplierAllocation', 'supplierOffset', 'supplierTransfer'
 ]);
 const RENAME_COMMANDS = new Set(['accountUpdate', 'stockUpdate', 'fundUpdate', 'supplierFirmUpdate']);
 const UUID_RE = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -217,7 +217,7 @@ export class Repository {
           workspace TEXT NOT NULL,
           status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
           date TEXT NOT NULL,
-          type TEXT NOT NULL CHECK(type IN ('sale','purchase','dailyCount')),
+          type TEXT NOT NULL CHECK(type IN ('sale','purchase','dailyCount','currencyExchange','collection')),
           submitted_by_id TEXT NOT NULL,
           submitted_by_name TEXT NOT NULL,
           submitted_via_master_pin INTEGER NOT NULL DEFAULT 0 CHECK(submitted_via_master_pin IN (0, 1)),
@@ -236,20 +236,42 @@ export class Repository {
         CREATE INDEX IF NOT EXISTS idx_ps_status ON pending_submissions(status, submitted_at);
         CREATE INDEX IF NOT EXISTS idx_ps_worker_date ON pending_submissions(submitted_by_id, date, status);`);
       const psSchema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='pending_submissions'").get();
-      if (psSchema?.sql && !psSchema.sql.includes("'dailyCount'")) {
+      if (psSchema?.sql && (!psSchema.sql.includes("'dailyCount'") || !psSchema.sql.includes("'currencyExchange'") || !psSchema.sql.includes("'collection'"))) {
+        const oldCols = this.db.prepare('PRAGMA table_info(pending_submissions)').all().map(col => col.name);
+        const newCols = [
+          'id', 'workspace', 'status', 'date', 'type',
+          'submitted_by_id', 'submitted_by_name',
+          'submitted_via_master_pin', 'submitted_master_actor_id',
+          'submitted_at', 'command_json', 'approved_command_json', 'summary_json',
+          'reviewed_by_id', 'reviewed_by_name', 'reviewed_at',
+          'was_edited', 'rejection_reason', 'approved_event_id'
+        ];
+        const copyCols = newCols.filter(c => oldCols.includes(c));
+        const colList = copyCols.join(', ');
         this.db.exec(`
           ALTER TABLE pending_submissions RENAME TO pending_submissions_old;
           CREATE TABLE pending_submissions(
-            id TEXT PRIMARY KEY NOT NULL, workspace TEXT NOT NULL,
+            id TEXT PRIMARY KEY NOT NULL,
+            workspace TEXT NOT NULL,
             status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
-            date TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('sale','purchase','dailyCount')),
-            submitted_by_id TEXT NOT NULL, submitted_by_name TEXT NOT NULL, submitted_at TEXT NOT NULL,
-            command_json TEXT NOT NULL, approved_command_json TEXT, summary_json TEXT NOT NULL,
-            reviewed_by_id TEXT, reviewed_by_name TEXT, reviewed_at TEXT,
+            date TEXT NOT NULL,
+            type TEXT NOT NULL CHECK(type IN ('sale','purchase','dailyCount','currencyExchange','collection')),
+            submitted_by_id TEXT NOT NULL,
+            submitted_by_name TEXT NOT NULL,
+            submitted_via_master_pin INTEGER NOT NULL DEFAULT 0 CHECK(submitted_via_master_pin IN (0, 1)),
+            submitted_master_actor_id TEXT,
+            submitted_at TEXT NOT NULL,
+            command_json TEXT NOT NULL,
+            approved_command_json TEXT,
+            summary_json TEXT NOT NULL,
+            reviewed_by_id TEXT,
+            reviewed_by_name TEXT,
+            reviewed_at TEXT,
             was_edited INTEGER NOT NULL DEFAULT 0 CHECK(was_edited IN (0, 1)),
-            rejection_reason TEXT, approved_event_id TEXT
+            rejection_reason TEXT,
+            approved_event_id TEXT
           );
-          INSERT INTO pending_submissions SELECT * FROM pending_submissions_old;
+          INSERT INTO pending_submissions(${colList}) SELECT ${colList} FROM pending_submissions_old;
           DROP TABLE pending_submissions_old;
           CREATE INDEX IF NOT EXISTS idx_ps_status ON pending_submissions(status, submitted_at);
           CREATE INDEX IF NOT EXISTS idx_ps_worker_date ON pending_submissions(submitted_by_id, date, status);`);
@@ -287,7 +309,7 @@ export class Repository {
   exportArchive(filename) { return exportLedgerArchive(this, filename); }
   async restoreArchive(source, options) {
     const result = await importLedgerArchive(this, source, options);
-    this.db.exec('DELETE FROM ledger_journal_accounts; DELETE FROM ledger_links; DELETE FROM ledger_journal;');
+    this.db.exec('DELETE FROM ledger_journal_accounts; DELETE FROM ledger_links; DELETE FROM ledger_journal; DELETE FROM pending_submissions;');
     this.#cache = null;
     this.#snapshotDirty = false;
     return result;
@@ -528,12 +550,20 @@ export class Repository {
     return this.db.prepare('SELECT body FROM ledger_journal ORDER BY seq').all().map(r => JSON.parse(r.body));
   }
   #loadSupplierJournalEntries(state, supplierId) {
-    const ids = supplierAccountIds(state, supplierId);
-    if (!ids.length) {
-      return this.db.prepare("SELECT body FROM ledger_journal WHERE supplier_id = ? OR type IN ('reverse', 'supplierReverse') ORDER BY seq").all(supplierId).map(r => JSON.parse(r.body));
+    return this.#loadSuppliersJournalEntries(state, [supplierId]);
+  }
+  #loadSuppliersJournalEntries(state, supplierIds) {
+    const uniqueFirms = [...new Set(supplierIds.filter(Boolean))];
+    if (!uniqueFirms.length) return [];
+    const accIds = [...new Set(uniqueFirms.flatMap(sid => {
+      try { return supplierAccountIds(state, sid); } catch { return []; }
+    }))];
+    const firmPh = uniqueFirms.map(() => '?').join(',');
+    if (!accIds.length) {
+      return this.db.prepare(`SELECT body FROM ledger_journal WHERE supplier_id IN (${firmPh}) OR type IN ('reverse', 'supplierReverse') ORDER BY seq`).all(...uniqueFirms).map(r => JSON.parse(r.body));
     }
-    const ph = ids.map(() => '?').join(',');
-    return this.db.prepare(`SELECT body FROM ledger_journal WHERE supplier_id = ? OR type IN ('reverse', 'supplierReverse') OR seq IN (SELECT seq FROM ledger_journal_accounts WHERE account_id IN (${ph}) AND match_kind = 0) ORDER BY seq`).all(supplierId, ...ids).map(r => JSON.parse(r.body));
+    const accPh = accIds.map(() => '?').join(',');
+    return this.db.prepare(`SELECT body FROM ledger_journal WHERE supplier_id IN (${firmPh}) OR type IN ('reverse', 'supplierReverse') OR seq IN (SELECT seq FROM ledger_journal_accounts WHERE account_id IN (${accPh}) AND match_kind = 0) ORDER BY seq`).all(...uniqueFirms, ...accIds).map(r => JSON.parse(r.body));
   }
   #getJournalEntry(id) {
     const row = this.db.prepare('SELECT body FROM ledger_journal WHERE id = ?').get(id);
@@ -943,12 +973,22 @@ export class Repository {
     const isHistory = HISTORY_COMMANDS.has(command.type)
       || (command.type === 'registerItem' && command.purchaseLine !== undefined)
       || (command.type === 'accountUpdate' && command.partyType !== undefined)
-      || (['supplierPurchase', 'supplierPayment'].includes(command.type) && (Boolean(command.debts?.length) || command.debtUses !== undefined || command.allocations !== undefined));
-    const supplierTargetId = isSupplierCommand(command)
-      ? (command.supplierId || command.replacement?.supplierId || (command.originalId ? this.#getJournalEntry(command.originalId)?.meta?.supplierId : null))
-      : null;
+      || (['supplierPurchase', 'supplierPayment'].includes(command.type) && (Boolean(command.debts?.length) || Boolean(command.received?.length) || command.debtUses !== undefined || command.allocations !== undefined || command.autoSameUnit === true));
+    const supplierTargetIds = isSupplierCommand(command)
+      ? [...new Set([
+          command.supplierId,
+          command.fromSupplierId,
+          command.toSupplierId,
+          command.replacement?.supplierId,
+          ...(command.originalId ? (() => {
+            const orig = this.#getJournalEntry(command.originalId);
+            return [orig?.meta?.supplierId, orig?.meta?.fromSupplierId, orig?.meta?.toSupplierId];
+          })() : [])
+        ].filter(Boolean))]
+      : [];
+    const supplierTargetId = supplierTargetIds.length ? supplierTargetIds[0] : null;
     const workJournal = isHistory
-      ? (supplierTargetId ? this.#loadSupplierJournalEntries(hot.state, supplierTargetId) : this.#loadAllJournalEntries())
+      ? (supplierTargetIds.length ? this.#loadSuppliersJournalEntries(hot.state, supplierTargetIds) : this.#loadAllJournalEntries())
       : [];
     const workState = { ...hot.state, journal: workJournal };
     const schemaVersion = eventVersion(command, workState);
@@ -1066,7 +1106,7 @@ export class Repository {
       if (revision !== this.db.prepare('SELECT revision FROM meta WHERE id=1').get().revision) fail('Veriler değişti. Geri yüklemeden önce yenileyin.', { status: 409, code: 'REVISION_CONFLICT' });
       // Preserve the previous history even when it exceeds the supported export size.
       this.db.prepare('INSERT INTO restore_archive(created_at,body) VALUES(?,?)').run(new Date().toISOString(), JSON.stringify(this.#backupSnapshot()));
-      this.db.exec('DELETE FROM events; DELETE FROM ledger_snapshot; DELETE FROM ledger_journal_accounts; DELETE FROM ledger_links; DELETE FROM ledger_journal;');
+      this.db.exec('DELETE FROM events; DELETE FROM ledger_snapshot; DELETE FROM ledger_journal_accounts; DELETE FROM ledger_links; DELETE FROM ledger_journal; DELETE FROM pending_submissions;');
       const insert = this.db.prepare('INSERT INTO events(id,body) VALUES(?,?)');
       for (const event of backup.events) insert.run(event.id, JSON.stringify(event));
       this.db.exec('UPDATE meta SET revision=revision+1 WHERE id=1');
@@ -1085,8 +1125,8 @@ export class Repository {
     return this.db.prepare("SELECT COUNT(*) AS c FROM pending_submissions WHERE status='pending'").get().c;
   }
   #summarizeTrade(state, command) {
-    if (!command || typeof command !== 'object' || !['sale', 'purchase'].includes(command.type)) {
-      fail('Yalnız satış veya alış işlemleri onaya gönderilebilir.');
+    if (!command || typeof command !== 'object' || !['sale', 'purchase', 'currencyExchange', 'collection'].includes(command.type)) {
+      fail('Yalnız satış, alış, döviz veya cari tahsilat işlemleri onaya gönderilebilir.');
     }
     const schemaVersion = eventVersion(command, state);
     const previewEvent = { id: 'dry-run-pending', schemaVersion, timestamp: new Date().toISOString(), command };
@@ -1110,7 +1150,11 @@ export class Repository {
         value: l.value
       };
     });
-    const totalTL = lines.reduce((sum, l) => sum + l.value, 0);
+    let totalTL = lines.reduce((sum, l) => sum + l.value, 0);
+    if (!totalTL && (command.type === 'currencyExchange' || command.type === 'collection')) {
+      totalTL = entry.entries.filter(e => byId.get(e.accountId)?.unit === 'TL' && e.delta > 0).reduce((s, e) => s + e.delta, 0)
+        || entry.entries.filter(e => byId.get(e.accountId)?.unit === 'TL').reduce((s, e) => s + Math.abs(e.delta), 0);
+    }
     const totalGram = lines.reduce((sum, l) => sum + (l.weightAccount ? l.weight : (l.unit === 'GRAM' ? l.quantity : 0)), 0);
     const mapAlloc = arr => (arr || []).map(r => {
       const a = byId.get(r.accountId);
@@ -1120,7 +1164,7 @@ export class Repository {
       type: command.type,
       date: command.date,
       customerId: customer?.id || '',
-      customerName: customer?.name || 'Peşin / isimsiz müşteri',
+      customerName: customer?.name || (command.type === 'currencyExchange' ? 'Döviz İşlemi' : 'Peşin / isimsiz müşteri'),
       totalTL,
       totalGram,
       note: entry.meta.note || '',
@@ -1201,8 +1245,8 @@ export class Repository {
     }
     const viaMasterPin = actor.viaMasterPin === true ? 1 : 0;
     const masterActorId = viaMasterPin ? actor.masterActorId : null;
-    if (!command || typeof command !== 'object' || Array.isArray(command) || !['sale', 'purchase', 'dailyCount'].includes(command.type)) {
-      fail('Yalnız satış, alış veya günlük sayım işlemleri onaya gönderilebilir.');
+    if (!command || typeof command !== 'object' || Array.isArray(command) || !['sale', 'purchase', 'currencyExchange', 'collection', 'dailyCount'].includes(command.type)) {
+      fail('Yalnız satış, alış, döviz, cari tahsilat veya günlük sayım işlemleri onaya gönderilebilir.');
     }
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -1311,7 +1355,7 @@ export class Repository {
     else if (status === 'approved_edited') { where.push("status='approved' AND was_edited=1"); }
     else if (['pending', 'approved', 'rejected'].includes(status)) { where.push('status=?'); params.push(status); }
     if (submittedById) { where.push('submitted_by_id=?'); params.push(submittedById); }
-    if (['sale', 'purchase', 'dailyCount'].includes(type)) { where.push('type=?'); params.push(type); }
+    if (['sale', 'purchase', 'dailyCount', 'currencyExchange', 'collection'].includes(type)) { where.push('type=?'); params.push(type); }
     if (startDate) { validDate(startDate); where.push('date>=?'); params.push(startDate); }
     if (endDate) { validDate(endDate); where.push('date<=?'); params.push(endDate); }
     const sql = `SELECT * FROM pending_submissions${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY submitted_at DESC LIMIT ?`;
@@ -1356,7 +1400,7 @@ export class Repository {
       if (row.status === 'rejected') { bucket.rejectedCount++; return; }
       bucket.approvedCount++;
       if (row.was_edited) bucket.approvedEditedCount++; else bucket.approvedDirectCount++;
-      if (row.type === 'dailyCount') return;
+      if (row.type === 'dailyCount' || row.type === 'currencyExchange' || row.type === 'collection') return;
       const isSale = row.type === 'sale';
       if (isSale) { bucket.saleCount++; bucket.saleTotalTL += summary.totalTL; bucket.saleTotalGram += summary.totalGram; }
       else { bucket.purchaseCount++; bucket.purchaseTotalTL += summary.totalTL; bucket.purchaseTotalGram += summary.totalGram; }
@@ -1458,7 +1502,7 @@ export class Repository {
       const storedCommand = JSON.parse(row.command_json);
       const wasEdited = Boolean(commandOverride && typeof commandOverride === 'object');
       const finalCommand = { ...(wasEdited ? commandOverride : storedCommand), date: currentState.date };
-      if (!['sale', 'purchase'].includes(finalCommand.type)) fail('Onaylanan işlem satış veya alış olmalı.');
+      if (!['sale', 'purchase', 'currencyExchange', 'collection'].includes(finalCommand.type)) fail('Onaylanan işlem satış, alış, döviz veya cari tahsilat olmalı.');
       const eventId = `approve-${id}`;
       if (!this.db.prepare('SELECT 1 FROM events WHERE id=?').get(eventId) && (!Number.isInteger(revision) || revision !== currentState.revision)) {
         fail('Veriler başka sekmede değişti. Yenileyip sayım/işlemi tekrar kontrol edin.', { status: 409, code: 'REVISION_CONFLICT' });
@@ -1518,6 +1562,23 @@ export class Repository {
       `).run(cleanReason, actor.id, actor.name, reviewedAt, id);
       this.db.exec('COMMIT');
       return { ok: true, id, status: 'rejected', rejectionReason: cleanReason };
+    } catch (e) {
+      if (this.db.isTransaction) this.db.exec('ROLLBACK');
+      throw e;
+    }
+  }
+  withdrawPending(id, actor) {
+    text(id, 'Bildirim anahtarı', 100);
+    if (!actor?.id) fail('İşlem sahibi bilgisi gerekli.', { status: 401 });
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.db.prepare('SELECT * FROM pending_submissions WHERE id=?').get(id);
+      if (!row) fail('Onay bekleyen bildirim bulunamadı.', { status: 404 });
+      if (row.submitted_by_id !== actor.id) fail('Yalnızca kendi gönderdiğiniz bildirimi geri çekebilirsiniz.', { status: 403 });
+      if (row.status !== 'pending') fail('Yalnızca onay bekleyen bildirimler geri çekilebilir.', { status: 409 });
+      this.db.prepare('DELETE FROM pending_submissions WHERE id=?').run(id);
+      this.db.exec('COMMIT');
+      return { ok: true, id, withdrawn: true };
     } catch (e) {
       if (this.db.isTransaction) this.db.exec('ROLLBACK');
       throw e;

@@ -36,7 +36,7 @@ test('cash sale stores optional line pricing, restores the draft, and protects c
   write(p('costTL'),'999');
   write(get('[data-item-field="accountId"]'),'ceyrek');
   assert.equal(p('costTL').value,'','previous stock card cost must not transfer to another product');
-  write(get('[data-item-field="accountId"]'),'ceyrek');write(get('[data-item-field="value"]'),'100');
+  write(get('[data-item-field="accountId"]'),'ceyrek');write(get('[data-item-field="quantity"]'),'1');write(get('[data-item-field="value"]'),'100');
   write(p('quotedTL'),'125');write(p('source'),'Etiket <x>');write(p('costTL'),'87.43');
   get('[data-add-price-component]').click();
   write(p('label'),'İndirim');write(p('amountTL'),'-2.50');
@@ -51,6 +51,7 @@ test('cash sale stores optional line pricing, restores the draft, and protects c
   assert.equal(record.type,'sale');
   assert.equal(record.meta.lines[0].pricing.costTL,8743);
   get('[data-view="journal"]').click();await tick();
+  get('[data-journal-mode="detailed"]')?.click();await tick();
   const privateDetail=get('[data-private-sale-pricing]');
   assert.match(privateDetail.textContent,/87,43 TL/);
   assert.match(privateDetail.textContent,/125,00 TL/);

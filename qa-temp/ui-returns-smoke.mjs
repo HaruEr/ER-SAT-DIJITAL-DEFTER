@@ -19,7 +19,7 @@ async function fixture(){
     else if(parsed.pathname==='/api/command'){const envelope=JSON.parse(options.body);commands.push(envelope);result=repo.execute(envelope,{compact:true});}
     else throw new Error('Unexpected route');return {ok:true,status:200,json:async()=>result};
   }catch(e){return {ok:false,status:e.status||500,json:async()=>({error:e.message})};}};
-  const openReturns=()=>{for(const d of w.document.querySelectorAll('details[data-sale-return]')){if(!d.open){d.open=true;d.dispatchEvent(new w.Event('toggle'));}}};
+  const openReturns=()=>{const det=w.document.querySelector('[data-journal-mode="detailed"]');if(det&&det.getAttribute('aria-pressed')!=='true')det.click();for(const d of w.document.querySelectorAll('details[data-sale-return]')){if(!d.open){d.open=true;d.dispatchEvent(new w.Event('toggle'));}}};
   w.eval(readFileSync(new URL('../public/app.js',import.meta.url),'utf8')+'\nwindow.__returnView=setView;window.__returnReceipt=statementReceipt;');await tick();w.__returnView('journal');await tick();openReturns();
   const set=(selector,value)=>{const el=w.document.querySelector(selector);assert.ok(el,selector);el.value=value;el.dispatchEvent(new w.Event(el.tagName==='SELECT'?'change':'input',{bubbles:true}));};
   return {w,doc:w.document,repo,commands,set,openReturns,close(){w.close();repo.close();}};
@@ -49,7 +49,7 @@ for(const [name,run] of [
     f.set('[name=refundProductValue]','70');
     f.set('[data-return-note]','Sentetik karma karşılık');
     const form=f.doc.querySelector('.sale-return-form');
-    assert.equal(form.querySelector('[data-return-refund]').value,'30.00');
+    assert.equal(form.querySelector('[data-return-refund]').value,'30');
     form.requestSubmit();assert.equal(f.commands.length,0);
     assert.match(form.querySelector('[data-return-review]').textContent,/9,000 gr/);
     form.querySelector('[data-confirm-return]').click();await tick();
@@ -74,7 +74,7 @@ for(const [name,run] of [
   ['return proposes proportional price but sends the explicit edited price and actual cash account',async f=>{
     const form=f.doc.querySelector('.sale-return-form');assert.ok(form);
     f.set('[data-return-quantity="0"]','1');
-    assert.equal(f.doc.querySelector('[data-return-value="0"]').value,'100.00');
+    assert.equal(f.doc.querySelector('[data-return-value="0"]').value,'100');
     f.set('[data-return-value="0"]','150');f.set('[data-return-note]','Anlaşılmış iade');
     form.dispatchEvent(new f.w.Event('submit',{bubbles:true,cancelable:true}));await tick();
     assert.equal(f.commands.length,0);assert.match(form.querySelector('[data-return-review]').textContent,/150,00 TL/);

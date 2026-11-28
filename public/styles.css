@@ -1127,12 +1127,26 @@ body:has(.closing-screen) .defter-toast-region { bottom: calc(88px + env(safe-ar
 .order-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .order-card-title { margin: 0; font-size: 16px; line-height: 1.35; overflow-wrap: anywhere; }
 .order-card-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
-.order-progress-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 10px; border-radius: var(--radius-sm); background: var(--surface-soft); border: 1px solid var(--line); font-variant-numeric: tabular-nums; }
-.order-progress-grid div { display: grid; gap: 2px; min-width: 0; }
-.order-progress-grid span { font-size: 12px; color: var(--muted); }
-.order-progress-grid strong { font-size: 14px; overflow-wrap: anywhere; }
+.order-progress-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--surface-soft); border: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.order-progress-grid > div,
+.order-axis-block { display: grid; gap: 3px; min-width: 0; align-content: start; }
+.order-progress-grid span,
+.order-axis-label { font-size: 12px; color: var(--muted); font-weight: 600; }
+.order-progress-grid strong,
+.order-axis-value { font-size: 14px; overflow-wrap: anywhere; line-height: 1.35; }
+.order-axis-sub { font-size: 12px; color: var(--muted); line-height: 1.35; }
+.order-progress-svg { width: 100%; height: 6px; display: block; margin-top: 2px; }
+.order-progress-track { fill: var(--line); }
+.order-progress-fill { fill: var(--gold); }
+.order-progress-fill--done { fill: #207044; }
+:root[data-theme="dark"] .order-progress-fill--done { fill: #8edbb0; }
 .order-badge-overdue { background: var(--negative-soft); color: var(--red); border-color: var(--red); }
 .order-badge-fulfilled { background: var(--positive-soft); color: var(--ink); }
+.order-badge-paid { background: #e8f5ee; color: #1b5e38; border-color: #9dd4b5; }
+:root[data-theme="dark"] .order-badge-paid { background: #1e3328; color: #8edbb0; border-color: #3a6b50; }
+.order-badge-owed { background: var(--warning-soft); color: var(--warning-ink); border-color: var(--gold-line); }
+.order-badge-excess { background: #e8f1fb; color: #1b4b7a; border-color: #9dc0e8; }
+:root[data-theme="dark"] .order-badge-excess { background: #1c2c3d; color: #9ac5f4; border-color: #3a5c80; }
 .order-card-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; align-items: center; }
 .order-advance-list { display: grid; gap: 8px; margin: 10px 0; }
 .order-advance-item { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-soft); display: grid; gap: 4px; font-size: 14px; }
@@ -1141,6 +1155,39 @@ body:has(.closing-screen) .defter-toast-region { bottom: calc(88px + env(safe-ar
 .order-drawer-progress { margin: 12px 0; }
 .order-drawer-actions { margin-bottom: 14px; }
 .order-drawer-form { margin-top: 10px; }
+.order-segmented { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-soft); margin: 6px 0 10px; }
+.order-seg-btn { min-height: 36px; padding: 6px 12px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--ink); font-size: 13px; font-weight: 600; cursor: pointer; }
+.order-seg-btn[aria-pressed="true"] { background: var(--action); color: var(--on-action); border-color: var(--action); }
+.order-repeater { display: grid; gap: 10px; margin: 8px 0; }
+.order-repeater-row { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); display: grid; gap: 8px; }
+.order-repeater-row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.order-repeater-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 10px; align-items: end; }
+.order-repeater-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-top: 4px; }
+.order-repeater-sum { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink); }
+.order-live-axes { display: grid; gap: 6px; padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--surface-soft); margin: 10px 0; font-size: 14px; font-variant-numeric: tabular-nums; }
+.order-live-axes--ok { border-color: #9dd4b5; background: #e8f5ee; color: #1b5e38; }
+:root[data-theme="dark"] .order-live-axes--ok { border-color: #3a6b50; background: #1e3328; color: #8edbb0; }
+.order-live-axes--owed { border-color: var(--gold-line); background: var(--warning-soft); color: var(--warning-ink); }
+.order-live-axes--excess { border-color: #9dc0e8; background: #e8f1fb; color: #1b4b7a; }
+:root[data-theme="dark"] .order-live-axes--excess { border-color: #3a5c80; background: #1c2c3d; color: #9ac5f4; }
+.order-live-axis-row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; }
+.order-settlement-box { display: grid; gap: 12px; padding: 12px; border-radius: var(--radius-sm); border: 1px solid var(--line-strong); background: var(--surface-soft); margin-top: 8px; }
+.order-settlement-box--owed { border-left: 4px solid var(--gold); }
+.order-settlement-box--excess { border-left: 4px solid #2b6cb0; }
+.order-settlement-summary { padding: 8px 10px; border-radius: 6px; background: var(--surface); border: 1px solid var(--line); font-size: 13px; font-variant-numeric: tabular-nums; }
+.order-settlement-summary--balanced { border-color: #9dd4b5; color: #1b5e38; font-weight: 600; }
+:root[data-theme="dark"] .order-settlement-summary--balanced { border-color: #3a6b50; color: #8edbb0; }
+.order-settlement-summary--unbalanced { border-color: var(--red); color: var(--red); font-weight: 600; }
+.order-settlement-block { padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); display: grid; gap: 8px; }
+.order-settlement-block-title { margin: 0; font-size: 13px; font-weight: 700; color: var(--ink); }
+.order-delivery-reverse { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line); }
+.order-cancel-disabled-note { margin: 6px 0 0; font-size: 13px; color: var(--muted); }
+.customer-order-summary-list { display: grid; gap: 10px; margin-top: 10px; }
+.customer-order-summary-card { padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); display: grid; gap: 8px; }
+.customer-order-summary-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+@media (max-width: 520px) {
+  .order-progress-grid { grid-template-columns: 1fr; }
+}
 .defter-dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--line); background: var(--surface-soft); }
 .defter-dialog-head h2 { margin: 0; font-size: 19px; line-height: 1.3; }
 .defter-dialog-subtitle { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
@@ -2242,5 +2289,218 @@ select.defter-combobox-native,
   #summary-result caption span {
     white-space: normal;
     overflow-wrap: anywhere;
+  }
+}
+
+
+/* === v20 Saha İyileştirmeleri: Fieldset, Sekmeler, Özet Tablo, Onay/Performans, Döviz ve Toptancı UI === */
+fieldset.section {
+  padding-top: 16px;
+}
+fieldset.section > legend {
+  float: left;
+  width: 100%;
+  margin: 0 0 12px 0;
+  padding: 0 0 8px 0;
+  border-bottom: 1px solid var(--line);
+  font-weight: 700;
+  font-size: 0.96rem;
+  color: var(--ink);
+}
+fieldset.section > legend + * {
+  clear: both;
+}
+
+.tabs {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.tabs .tab,
+.workbench-tabs .workbench-tab,
+.stepper-bar .stepper-tab {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.checkout-toolbar .button {
+  white-space: nowrap;
+}
+
+/* Günlük İşlemler: Hızlı Özet Tablo */
+.journal-header-compact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.journal-view-toggle {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.journal-view-toggle .button[aria-pressed="true"] {
+  background: var(--gold, #8f6b24);
+  color: #fff;
+  border-color: var(--gold, #8f6b24);
+}
+.journal-summary-table .badge {
+  white-space: nowrap;
+}
+.journal-summary-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+.journal-summary-table th,
+.journal-summary-table td {
+  padding: 8px 9px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: middle;
+}
+.journal-summary-table tbody tr {
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+.journal-summary-table tbody tr:hover,
+.journal-summary-table tbody tr.is-selected {
+  background: var(--surface-alt, rgba(180, 140, 60, 0.08));
+}
+.journal-summary-table tr.is-reversed {
+  opacity: 0.68;
+}
+.journal-summary-table .summary-cell-main {
+  max-width: min(320px, 26vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Onay Bekleyenler & Çalışan Performansı: 2 Sekmeli Ayrım */
+.approvals-primary-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+}
+.approvals-primary-tab {
+  font-weight: 600;
+}
+.approvals-primary-tab[aria-selected="true"] {
+  background: var(--gold, #8f6b24);
+  color: #fff;
+  border-color: var(--gold, #8f6b24);
+}
+.approvals-date-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.approvals-date-presets .button[aria-pressed="true"] {
+  background: var(--gold, #8f6b24);
+  color: #fff;
+  border-color: var(--gold, #8f6b24);
+}
+
+/* Döviz İşlemi (FX) Temiz Satır ve Kur Yardımcısı */
+.fx-direction-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.fx-direction-bar .button[aria-pressed="true"] {
+  background: var(--gold, #8f6b24);
+  color: #fff;
+  border-color: var(--gold, #8f6b24);
+}
+.fx-rate-helper {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+  align-items: end;
+  padding: 12px;
+  margin-bottom: 14px;
+  border-radius: 12px;
+  background: var(--surface-alt, rgba(180, 140, 60, 0.07));
+  border: 1px solid var(--line);
+}
+.fx-row-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(130px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 10px;
+}
+@media (max-width: 680px) {
+  .fx-row-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Toptancı 4 Ana Aksiyon */
+.supplier-primary-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+@media (max-width: 960px) {
+  .supplier-primary-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 520px) {
+  .supplier-primary-actions {
+    grid-template-columns: 1fr;
+  }
+}
+.supplier-primary-action-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  text-align: left;
+  padding: 12px 14px;
+  min-height: 68px;
+}
+.supplier-primary-action-btn small {
+  font-weight: 400;
+  opacity: 0.82;
+  font-size: 0.78rem;
+  white-space: normal;
+}
+.supplier-unit-chip {
+  white-space: nowrap;
+}
+
+/* v22 Masaüstü (1366px+) genişlik, filtre etiket sarma ve tablo taşma iyileştirmeleri */
+.journal-filters .field > span,
+.workbench-filters .field > span {
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (min-width: 1280px) {
+  :root {
+    --space-page: clamp(18px, 1.8vw, 32px);
+  }
+  main {
+    max-width: 1760px;
+  }
+  .journal-filters-secondary {
+    grid-template-columns: repeat(3, minmax(150px, 1fr)) minmax(180px, 1.35fr) auto;
+  }
+  .stock-table th,
+  .stock-table td,
+  .inventory-table th,
+  .inventory-table td {
+    padding: 13px 12px;
   }
 }

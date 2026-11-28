@@ -88,6 +88,8 @@ check('owner can distinguish an authenticated count from an old typed name in hi
   }
   await f.window.eval('refresh()');
   await f.open('journal');
+  f.document.querySelector('[data-journal-mode="detailed"]')?.click();
+  await tick();
   assert.match(f.document.querySelector('#journal-list').textContent, /İşlemi kaydeden · Defter sahibi \(c8d7225e-5535-49ed-b37f-5f6d0e7d09ef\)/);
   await f.window.eval('refresh()');
   await f.open('closing');

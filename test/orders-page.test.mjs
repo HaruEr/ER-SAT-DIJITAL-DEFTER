@@ -62,7 +62,7 @@ test('10 gr Bilezik multi-unit order: atomic TL deposit -> USD deposit -> delive
 
   let st = repo.state();
   assert.equal(st.balances.nakit, cashBefore + 2000000, 'Cash increases by 20.000 TL immediately');
-  assert.equal(st.journal.at(-1).meta.revenue, 0, 'Order deposit must not create revenue');
+  assert.equal(st.journal.at(-1).meta.revenue, 2000000, 'v22 cash-basis: non-carryover TL deposit adds receivedTL to revenue');
   let order = st.customerOrders.find(o => o.id === 'ord-1');
   assert.equal(order.category, 'bilezik');
   assert.equal(order.orderUnit, 'GRAM');
@@ -291,7 +291,7 @@ test('Order product/weight binding and orderUpdate editing rules with replay par
     orderUnit: 'GRAM',
     targetQuantity: '3.5',
     description: 'Birim değiştirme denemesi'
-  }), /Kapora alınmış siparişin takip birimi değiştirilemez/);
+  }), /Kapora alınmış veya teslimatı yapılmış siparişin takip birimi değiştirilemez/);
 
   // Editing other fields with same orderUnit succeeds even after advance
   exec(repo, 'upd-2', {

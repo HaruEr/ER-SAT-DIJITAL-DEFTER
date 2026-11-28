@@ -33,7 +33,7 @@ test('owner finds the prior purchase on a named sale and the customer journal sh
     return {ok:true,json:async()=>body};
   };
   window.eval(readFileSync(new URL('../public/app.js',import.meta.url),'utf8'));
-  await tick();get('[data-view="journal"]').click();await tick();
+  await tick();get('[data-view="journal"]').click();await tick();get('[data-journal-mode="detailed"]')?.click();await tick();
   const panel=get('[data-scrap-link]');
   assert.ok(panel,'named customer sale offers prior scrap linkage');
   panel.querySelector('summary').click();await tick();

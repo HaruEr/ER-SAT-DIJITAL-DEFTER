@@ -5,7 +5,7 @@ export function usesInventory(command) {
   if (command.type === 'amend') return command.replacement?.type === 'sale' && usesInventory(command.replacement);
   if (command.type === 'saleReturn') return Array.isArray(command.outgoing) && command.outgoing.some(row => row && Object.hasOwn(row, 'inventoryCode'));
   return ['registerItem', 'releaseItem', 'itemCostSource'].includes(command.type) ||
-    (command.type === 'sale' && Array.isArray(command.items) && command.items.some(row => row && Object.hasOwn(row, 'inventoryCode')));
+    (['sale', 'orderDeliver'].includes(command.type) && Array.isArray(command.items) && command.items.some(row => row && Object.hasOwn(row, 'inventoryCode')));
 }
 
 function codeOf(value) {
@@ -186,7 +186,7 @@ export function applyInventory(state, event, meta, tagged, entries, validationMo
     const code = codeOf(c.inventoryCode);
     change(code, 'released', event.id, 'available');
     meta.inventoryCode = code;
-  } else if (tagged && c.type === 'sale') {
+  } else if (tagged && (c.type === 'sale' || c.type === 'orderDeliver')) {
     for (const [index, line] of meta.lines.entries()) {
       if (!Object.hasOwn(c.items[index], 'inventoryCode')) continue;
       deliver(c.items[index].inventoryCode, line, 'sold');

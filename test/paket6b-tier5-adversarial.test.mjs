@@ -982,6 +982,8 @@ test('T5-17. Overview >50 pagination/XSS/metrics, compact bindSaleReturn restore
     assert.equal(od.querySelectorAll('.overview-screen .inventory-table tbody tr').length, 50);
 
     od.querySelector('[data-view="journal"]').click();
+    for (let i = 0; i < 40 && !od.querySelector('[data-journal-mode="detailed"]'); i++) await tick(25);
+    od.querySelector('[data-journal-mode="detailed"]')?.click();
     let retDet = null;
     for (let i = 0; i < 40 && !retDet; i++) { await tick(25); retDet = od.querySelector(`details[data-sale-return="${saleId}"]`); }
     assert.ok(retDet);
@@ -1065,6 +1067,8 @@ test('T5-18. bindSaleReturn restores serial refundProduct (item:<code>) draft ev
   };
   const app = await mountOwnerPart2(srv, { url: 'http://127.0.0.1:4317/owner#v=journal', seededStorage: seeded });
   try {
+    for (let i = 0; i < 40 && !app.document.querySelector('[data-journal-mode="detailed"]'); i++) await tick(25);
+    app.document.querySelector('[data-journal-mode="detailed"]')?.click();
     let rf = null;
     for (let i = 0; i < 40 && !rf; i++) { await tick(25); rf = app.document.getElementById(`return-form-${saleId}`); }
     assert.ok(rf);

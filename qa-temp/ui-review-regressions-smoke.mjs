@@ -82,7 +82,7 @@ check('bank operation switches preserve transfer and settlement drafts independe
   await c.click('[data-bank-action="settlement"]'); c.set('#f-gross', '100'); c.set('#f-expected', '97');
   await c.click('[data-bank-action="transfer"]'); assert.equal(c.d.querySelector('#f-quantity').value, '25');
   await c.click('[data-bank-action="settlement"]'); assert.equal(c.d.querySelector('#f-expected').value, '97');
-  await c.nav('overview'); await c.nav('banks'); assert.equal(c.d.querySelector('#f-fee')?.value, '3.00');
+  await c.nav('overview'); await c.nav('banks'); assert.equal(c.d.querySelector('#f-fee')?.value, '3');
 });
 check('bank create collapse and reopen preserves fields and rename drafts are per bank', async c => {
   const bank2 = c.execute({ type: 'fundAccount', name: 'İkinci Banka', unit: 'TL', physical: false, opening: '0' }).state.accounts.at(-1).id;

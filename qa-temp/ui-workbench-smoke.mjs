@@ -170,6 +170,7 @@ check('daily sale keeps multi-unit payment choices and moves setup into dedicate
 check('reversing a recorded transaction requires reviewing its effects before sending', async f => {
   f.repo.execute({id:'synthetic-movement',revision:f.repo.state().revision,command:{type:'movement',date:'2026-01-02',accountId:'nakit',category:'Sermaye',direction:'in',quantity:'10',note:'Sentetik hareket'}});
   f.document.querySelector('#refresh').click(); await tick(); await f.open('journal');
+  f.document.querySelector('[data-journal-mode="detailed"]').click();
   const form=f.document.querySelector('.reverse-form'); assert.ok(form);
   form.querySelector('[name="note"]').value='Yanlış giriş';
   form.dispatchEvent(new f.window.Event('submit',{bubbles:true,cancelable:true})); await tick();
@@ -276,16 +277,19 @@ check('collection target label follows selected customer direction and empty sea
   f.document.querySelector('[data-account-detail="'+claim.id+'"]').click();await tick();
   f.document.querySelector('[data-account-collect]').click();await tick();
   const select=f.document.querySelector('#f-customerAccount');
+  const direction=f.document.querySelector('#f-direction');
   const label=()=>f.document.querySelector('#f-target').previousElementSibling.firstChild.textContent;
-  assert.equal(f.document.querySelector('#f-direction').value,'collect');
+  assert.equal(direction.value,'collect');
   assert.equal(label(),'Tahsilatın gireceği kasa / banka');
   select.value='cari-owed-customer';select.dispatchEvent(new f.window.Event('change'));
-  assert.equal(f.document.querySelector('#f-direction').value,'pay');
+  direction.value='pay';direction.dispatchEvent(new f.window.Event('change'));
+  assert.equal(direction.value,'pay');
   assert.equal(label(),'Ödemenin yapılacağı kasa / banka');
   select.value=claim.id;select.dispatchEvent(new f.window.Event('change'));
+  direction.value='collect';direction.dispatchEvent(new f.window.Event('change'));
   assert.equal(label(),'Tahsilatın gireceği kasa / banka');
   const search=f.document.querySelector('#collection-search');search.value='eşleşmeyen-ad';search.dispatchEvent(new f.window.Event('input'));
-  assert.equal(label(),'Kasa / banka');
+  assert.match(f.document.querySelector('#collection-balance').textContent,/bulunamadı/);
   assert.equal(f.document.querySelector('#collection-form button[type="submit"]').disabled,true);
   assert.equal(f.calls.filter(c=>c.method==='POST').length,0);
 });

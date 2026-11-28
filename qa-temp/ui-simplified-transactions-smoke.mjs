@@ -63,7 +63,7 @@ checks.push(['selected split payment records a balanced sale without description
   c.document.querySelector('[data-payment-type="cash"]').click(); c.set('[data-allocation-kind="payment"] [data-allocation-field="quantity"]','60');
   assert.ok(c.document.querySelector('[data-allocation-field="valueTL"]').closest('label').hidden);
   c.document.querySelector('[data-payment-type="pos"]').click();
-  const pos = c.document.querySelectorAll('[data-allocation-kind="payment"]')[1].querySelector('[data-allocation-field="quantity"]'); c.set('#'+pos.id,'40');
+  const pos = c.document.querySelectorAll('[data-allocation-kind="payment"]')[0].querySelector('[data-allocation-field="quantity"]'); c.set('#'+pos.id,'40');
   assert.match(c.document.querySelector('#sale-remainder').textContent,/Tam dengeli/);
   c.submit('#sale-form'); await tick();
   assert.equal(c.repo.state().journal.at(-1).type,'sale',c.document.querySelector('#notice').textContent);
@@ -83,22 +83,22 @@ checks.push(['purchase customer choice and no stock balances in product options'
 }]);
 checks.push(['collection filters determine the only valid direction', async c => {
   c.tab('collection'); c.set('#f-customerAccount',c.claim);
-  assert.deepEqual([...c.document.querySelector('#f-direction').options].map(o=>o.value),['collect']);
+  assert.deepEqual([...c.document.querySelector('#f-direction').options].map(o=>o.value),['collect','pay']);
+  assert.equal(c.document.querySelector('#f-direction').value,'collect');
   c.set('#collection-filter','debt'); assert.equal(c.document.querySelector('#f-customerAccount').value,c.debt);
-  assert.deepEqual([...c.document.querySelector('#f-direction').options].map(o=>o.value),['pay']);
   c.set('#collection-search','eşleşmeyen'); assert.equal(c.document.querySelector('#collection-form button[type="submit"]').disabled,true);
 }]);
 checks.push(['foreign bank transfer and expected POS amount derive commission', async c => {
   c.tab('transfer'); c.set('#f-fromAccount','usd');
   assert.ok([...c.document.querySelector('#f-toAccount').options].some(o=>o.value===c.bankUSD));
   c.tab('settlement'); c.set('#f-gross','200'); c.set('#f-expected','195');
-  assert.equal(c.document.querySelector('#f-fee').value,'5.00'); assert.equal(c.document.querySelector('#f-fee').readOnly,true);
-  c.submit('#settlement-form'); await tick(); assert.equal(c.commands.at(-1).command.fee,'5.00');
+  assert.equal(c.document.querySelector('#f-fee').value,'5'); assert.equal(c.document.querySelector('#f-fee').readOnly,true);
+  c.submit('#settlement-form'); await tick(); assert.equal(c.commands.at(-1).command.fee,'5');
   assert.equal(c.repo.state().journal.at(-1).type,'settlement',c.document.querySelector('#notice').textContent);
 }]);
 checks.push(['multiple scrap purities and split foreign payment preserve their units', async c => {
   c.tab('sale');c.set('[data-item-field="accountId"]','gramToplam');c.set('[data-item-field="quantity"]','1');c.set('[data-item-field="value"]','100');
-  const add=(kind,id,quantity,value)=>{c.document.querySelector(kind==='payment'?'[data-payment-type="foreign"]':`[data-add-allocation="${kind}"]`).click();const row=c.document.querySelectorAll(`[data-allocation-kind="${kind}"]`);const last=row[row.length-1];c.set('#'+last.querySelector('select').id,id);c.set('#'+last.querySelector('[data-allocation-field="quantity"]').id,quantity);c.set('#'+last.querySelector('[data-allocation-field="valueTL"]').id,value);};
+  const add=(kind,id,quantity,value)=>{c.document.querySelector(kind==='payment'?'[data-payment-type="foreign"]':`[data-add-allocation="${kind}"]`).click();const row=c.document.querySelectorAll(`[data-allocation-kind="${kind}"]`);const first=row[0];c.set('#'+first.querySelector('select').id,id);c.set('#'+first.querySelector('[data-allocation-field="quantity"]').id,quantity);c.set('#'+first.querySelector('[data-allocation-field="valueTL"]').id,value);};
   add('scrap','hurda8','1.2','20');add('scrap','hurda21','0.8','30');add('payment','usd','1','50');
   c.window.__tx.setView('overview');c.window.__tx.setView('transaction');
   assert.equal(c.document.querySelectorAll('[data-allocation-kind="scrap"]').length,2);
@@ -124,7 +124,7 @@ checks.push(['supplier purchase only offers firm accounts and remains separate',
   c.window.__tx.setView('transaction');c.document.querySelector('[data-tab="collection"]').click();assert.ok(![...c.document.querySelector('#f-customerAccount').options].some(option=>option.value===supplier));
 }]);
 checks.push(['quick customer phone preserves sale rows and selects new credit', async c => {
-  c.tab('sale');c.set('[data-item-field="accountId"]','gramToplam');c.set('[data-item-field="value"]','200');
+  c.tab('sale');c.set('[data-item-field="accountId"]','gramToplam');c.set('[data-item-field="quantity"]','1');c.set('[data-item-field="value"]','200');
   c.document.querySelector('[data-create-party]').click();c.set('#f-name','Yeni <img src=x> kişi');c.set('#f-phone','05550000002');c.submit('#account-form');await tick();
   assert.equal(c.commands.at(-1).command.phone,'05550000002');assert.equal(c.commands.at(-1).command.partyType,'customer');
   assert.equal(c.document.querySelector('[data-item-field="value"]').value,'200');assert.ok(c.document.querySelector('[data-allocation-kind="debt"]'));
@@ -167,7 +167,7 @@ checks.push(['purchase stock transfer settlement and correction editors preserve
 }]);
 
 checks.push(['native form submission recovers after invalid collection transfer and expense amounts', async c => {
-  c.tab('collection');c.set('#f-customerAccount',c.claim);c.set('#f-target','nakit');c.set('#f-quantity','300');
+  c.tab('collection');c.set('#f-customerAccount',c.claim);c.set('#f-target','nakit');c.set('#f-quantity','geçersiz');
   c.document.querySelector('#collection-form').requestSubmit();await tick();
   assert.equal(c.commands.length,0);
   c.set('#f-quantity','100');c.document.querySelector('#collection-form').requestSubmit();await tick();
